@@ -1,0 +1,180 @@
+# ic-7300-hf-server
+
+A home-station node that relays texts and email over QRP Morse code. A Raspberry Pi,
+connected to an ICOM IC-7300 by one USB cable, listens on a fixed HF frequency,
+decodes CW from a field operator, authenticates them with one-time letter codes
+from a printed table, and then:
+
+- **TX**: sends a text or email to a named contact,
+- **RX**: reads back replies that have arrived (after a compliance filter has screened them),
+- **WX**: reads back a short National Weather Service forecast.
+
+Every request is read back and does nothing until the field operator confirms it
+with a second code. Message content travels in the clear. The codes only prove who
+is sending.
+
+> **Hardware status.** Every CI-V command in `crates/civ/src/ic7300.rs` cites
+> ICOM's IC-7300 Full Manual (IC-7300_ENG_FM_12b), Section 19, and the bytes match it.
+> The code has not yet run against a real radio, so follow the
+> [hardware test plan](docs/hardware-test-plan.md) in order, starting with the
+> receive-only bench steps. The RF power level to watts mapping is an assumption
+> to confirm with the Po meter.
+
+## How the code maps to the design
+
+The design spec is Robin's design doc ("HF CW Message Gateway", kept in the
+project files as `design/spec.md`, not in this repository). Where each part lives:
+
+| Design item | Where |
+|---|---|
+| Precomputed HOTP-style codes, 8 letters A-Z | `crates/auth` (`CodeBook`). HMAC-SHA256 over the 8-byte sequence number, encoded as letters. |
+| Accept only `seq > last_seq`, `last_seq` on disk | `crates/auth` (`Verifier`, `SeqStore`). `last_seq` is written before the node acts. |
+| Two codes per transaction (open, then commit) | `crates/hfnode/src/session.rs` |
+| Grammar `CALL seq code TX/RX/WX`, `OK`, `NO`, `AGN` | `crates/protocol` (`parse`). Callsigns, keywords and contact names are snapped to the nearest legal token. Sequence numbers and codes must decode exactly. |
+| Read-backs, `SENT`, chunk letters for `AGN` | `crates/protocol/src/reply.rs` |
+| Stop-and-wait ARQ, silence as NACK, idempotent retries | `crates/hfnode/src/session.rs` |
+| CW decoder | `crates/cw` (decoder plus a synthesizer used for tests) |
+| Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API) |
+| Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
+| Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
+| Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` for tests) |
+| Station safety: reduced power, tune at window start, SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
+| Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
+
+The hardware PTT timer in the design is external hardware, not part of this
+repository. See the [hardware test plan](docs/hardware-test-plan.md#step-9-hardware-ptt-timer)
+for what it has to do.
+
+## Workspace layout
+
+```
+crates/
+  auth/       codes, verifier, last_seq store
+  cw/         Morse table, decoder, synthesizer (examples/ has decoder experiments)
+  protocol/   grammar, fuzzy snapping, replies, chunking, text sanitizing
+  civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig
+  hfnode/     config, inbox, session state machine, station safety layer,
+              gateways (SMTP/IMAP, NWS, Claude filter), node loop, CLI (src/main.rs)
+              tests/end_to_end.rs: synthesized CW audio in, keyer text out, no hardware
+hfnode.example.toml   annotated example configuration
+deploy/hfnode.service systemd unit
+docs/                 setup, testing and operating guides
+```
+
+## Build and test
+
+You need a Rust toolchain (stable) and a C compiler (the TLS library, `ring`,
+compiles some C).
+
+```sh
+cargo test --workspace          # unit tests plus the end-to-end test; no hardware needed
+cargo build --release -p hfnode # binary at target/release/hfnode
+```
+
+**Building on the Pi.** This works on a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS; the
+first build takes a while. See [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md).
+
+**Cross-compiling from an x86-64 Linux machine.** The simplest route is
+[`cross`](https://github.com/cross-rs/cross), which runs the build in a container
+with the right linker and C compiler:
+
+```sh
+cargo install cross
+cross build --release -p hfnode --target aarch64-unknown-linux-gnu
+# binary: target/aarch64-unknown-linux-gnu/release/hfnode
+```
+
+Without `cross`, on Debian or Ubuntu:
+
+```sh
+sudo apt install gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+  cargo build --release -p hfnode --target aarch64-unknown-linux-gnu
+```
+
+A binary built this way links against the build machine's glibc. If the Pi
+complains about a missing `GLIBC_` version, build with `cross` or on the Pi itself.
+
+## Quick start (no radio needed)
+
+Everything below runs on any machine. Start from the example config, pointing the
+key and state at a scratch directory:
+
+```sh
+cargo build --release -p hfnode
+alias hfnode=$PWD/target/release/hfnode
+mkdir -p /tmp/hf && cp hfnode.example.toml /tmp/hf/hfnode.toml
+# edit /tmp/hf/hfnode.toml: state_dir = "/tmp/hf/state", [auth] key_file = "/tmp/hf/node.key"
+
+hfnode keygen --out /tmp/hf/node.key                   # refuses to overwrite an existing key
+hfnode codes --config /tmp/hf/hfnode.toml --count 30   # the paper table
+```
+
+`hfnode codes` starts at one after the last sequence number used (or `--from N`)
+and prints the codes in three columns, in groups of four letters (`VZLL AIIJ`).
+
+**Try the protocol by typing.** `sim` runs the real session state machine on text
+you type, as if it were decoded CW. With `--offline` nothing is emailed and no web
+service is called:
+
+```sh
+hfnode sim --config /tmp/hf/hfnode.toml --offline
+```
+
+```
+N0CALL/P 1 VZLLAIIJ TX MOM RUNNING LATE HOME SUN K
+  NODE> R 1 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K
+OK 2 YAAWUURC K
+  [offline] would send to MOM: RUNNING LATE HOME SUN
+  NODE> SENT 2 DE N0CALL K
+```
+
+Use the codes from your own table. Inside `sim`, `/code N` shows the code for line
+N, `/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
+`/quit` exits. Without `--offline`, `sim` really sends email and calls the weather
+service, so it needs the `[email]` settings and `HFNODE_EMAIL_PASSWORD`.
+
+`sim` writes `last_seq` into `state_dir` like the real node, so codes you use in
+`sim` are used up. Use a scratch `state_dir` and a scratch key, not the node's.
+
+**Exercise the decoder.** `synth` writes a WAV file of CW, optionally with noise
+and hand-keying jitter, and `decode` reads it back:
+
+```sh
+hfnode synth "N0CALL/P 1 VZLLAIIJ RX K" --out /tmp/hf/t.wav --wpm 18 --snr 6 --jitter 0.1
+hfnode decode /tmp/hf/t.wav --pitch 600
+```
+
+`decode` also works on a recording made from the radio with `arecord`, which is
+one of the bench steps.
+
+## Commands
+
+| Command | Transmits? | What it does |
+|---|---|---|
+| `hfnode keygen --out FILE` | no | Create a 256-bit key (mode 0600). |
+| `hfnode codes --config C [--from N] [--count N]` | no | Print the code table (default 100 lines). |
+| `hfnode sim --config C [--offline]` | no | Type field transmissions, see the node's replies. |
+| `hfnode synth TEXT --out F [--wpm] [--pitch] [--snr] [--jitter]` | no | Write CW to a WAV file. |
+| `hfnode decode FILE [--pitch HZ]` | no | Decode CW from a WAV file. |
+| `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
+| `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |
+| `hfnode radio --config C rx` | no | Stop the keyer and force the radio to receive. |
+| `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
+| `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. |
+| `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode run --config C` | **yes** | Run the node. |
+
+Logging goes to stderr; set `RUST_LOG=debug` for more detail.
+
+The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
+decoded transmission) and `health.csv` (every tune and SWR reading).
+
+## Documentation
+
+- [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md): installing on the Pi, radio menu settings, secrets, systemd.
+- [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
+- [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
+- [hfnode.example.toml](hfnode.example.toml): every config key, with comments.

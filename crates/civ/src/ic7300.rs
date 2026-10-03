@@ -1,17 +1,18 @@
 //! The ICOM IC-7300 over CI-V on its USB serial port.
 //!
-//! Every command below cites the ICOM CI-V reference it was taken from.
+//! Every command below cites ICOM's *IC-7300 Full Manual* (English, revision
+//! `IC-7300_ENG_FM_12b`), Section 19 "CONTROL COMMAND": the data format on p. 19-2,
+//! the command table on pp. 19-3 to 19-8 and the data content descriptions on
+//! pp. 19-9 to 19-15. Quoted values are copied from those pages.
 //!
-//! **Source status.** ICOM's IC-7300 CI-V reference guide
-//! (`IC-7300_ENG_CI-V_1.pdf`) could not yet be retrieved from this build
-//! environment. The byte values here are taken from ICOM's *IC-7300MK2* CI-V
-//! reference guide (`IC-7300MK2_ENG_CI-V_0.pdf`, "CI-V Reference Data"), the
-//! successor model, which shares the command set. The known difference that
-//! matters here is the default CI-V address (IC-7300: 94h, set in the radio's
-//! menu and in `station.civ_address`; MK2: B6h). Each command is marked `MK2 ref`
-//! until checked line by line against the IC-7300 guide; see
-//! `docs/hardware-test-plan.md`, step 0. Until then, run only the receive-only
-//! bench steps on real hardware.
+//! Points from the manual that the node relies on:
+//! - Frames are `FE FE 94 E0 Cn Sc Data FD`; the radio answers `FE FE E0 94 FB FD`
+//!   (OK) or `... FA FD` (NG); 94h is the default transceiver address (p. 19-2).
+//! - CW text sent with command 17 is transmitted only "if the [TRANSMIT] or an
+//!   external TX switch is ON, or the Break-in function is ON" (footnote *2,
+//!   p. 19-8), so the node turns semi break-in on.
+//! - With "CI-V USB Echo Back" ON (command 1A 05 00 75, "00=ON, 01=OFF", p. 19-5)
+//!   the radio repeats our own frames; the reader skips them either way.
 //!
 //! Safety in this module: [`Ic7300::set_transmit`] is only ever called with
 //! `false` by the node, CW is keyed through the radio's own keyer (command 17), and
@@ -22,43 +23,44 @@ use crate::{Result, Rig, RigError, MAX_CW_CHARS};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-/// Commands, as `[command, sub-command...]`. Citations are to the reference guide's
-/// command table.
+/// Commands, as `[command, sub-command...]`, with citations to Section 19 of the
+/// IC-7300 Full Manual.
 mod cmd {
-    /// 03: Read operating frequency. (MK2 ref, command table, p. 16)
+    /// 03: "Read operating frequency" (p. 19-3). Data: 5 BCD bytes, 10 Hz/1 Hz digits
+    /// first, 1000 MHz/100 MHz digits last and fixed at 0 (p. 19-9).
     pub const READ_FREQ: &[u8] = &[0x03];
-    /// 05: Set operating frequency. (MK2 ref, command table, p. 16)
+    /// 05: "Set operating frequency" (p. 19-3), same data format (p. 19-9).
     pub const SET_FREQ: &[u8] = &[0x05];
-    /// 06: Set operating mode; data mode code then filter.
-    /// Mode codes "00=LSB 01=USB 02=AM 03=CW 04=RTTY 05=FM 07=CW-R 08=RTTY-R",
-    /// filter "01=FIL1 02=FIL2 03=FIL3". (MK2 ref, command table)
+    /// 06: "Operating mode selection for transceive" (p. 19-3). Data: mode, then
+    /// filter; "03: CW", "01: FIL1" (p. 19-9).
     pub const SET_MODE: &[u8] = &[0x06];
     pub const MODE_CW: u8 = 0x03;
     pub const FILTER_1: u8 = 0x01;
-    /// 14 0A: RF power, "00 00=Minimum ~ 02 55=Maximum". (MK2 ref, command table)
+    /// 14 0A: "Send/read [RF PWR] position (00 00=max. CCW, 02 55=max. CW)" (p. 19-3).
     pub const RF_POWER: &[u8] = &[0x14, 0x0A];
-    /// 14 0C: Keying speed, "00 00=6 WPM ~ 02 55=48 WPM". (MK2 ref, command table)
+    /// 14 0C: "Send/read [KEY SPEED] level (00 00=6wpm, 02 55=48wpm)" (p. 19-3).
     pub const KEY_SPEED: &[u8] = &[0x14, 0x0C];
-    /// 15 12: SWR meter, "00 00=SWR1.0, 00 48=SWR1.5, 00 80=SWR2.0, 01 20=SWR3.0".
-    /// (MK2 ref, command table)
+    /// 15 12: "Read SWR meter level (00 00=SWR1.0, 00 48=SWR1.5, 00 80=SWR2.0,
+    /// 01 20=SWR3.0)" (p. 19-3).
     pub const SWR_METER: &[u8] = &[0x15, 0x12];
-    /// 16 47: Break-in, "00=OFF, 01=Semi Break-in ON, 02=Full Break-in ON".
-    /// (MK2 ref, command table)
+    /// 16 47: "BK-IN function (00=BK-IN OFF, 01=Semi BK-IN ON, 02=Full BK-IN ON)"
+    /// (p. 19-3).
     pub const BREAK_IN: &[u8] = &[0x16, 0x47];
     pub const BREAK_IN_OFF: u8 = 0x00;
     pub const BREAK_IN_SEMI: u8 = 0x01;
-    /// 17: Send CW messages, "up to 30 characters"; "FF" stops sending.
-    /// (MK2 ref, command table, p. 16)
+    /// 17: "Send CW messages" (p. 19-4): "Up to 30 characters" of the listed ASCII
+    /// codes; "“FF” stops sending CW messages" (p. 19-13).
     pub const SEND_CW: &[u8] = &[0x17];
     pub const STOP_CW: u8 = 0xFF;
-    /// 1C 00: Transceiver status, "00=RX, 01=TX". (MK2 ref, command table)
+    /// 1C 00: "Send/read transceiver's status" "00" RX, "01" TX (p. 19-7).
     pub const TX_STATUS: &[u8] = &[0x1C, 0x00];
-    /// 1C 01: Internal antenna tuner, "00=OFF, 01=ON, 02=Tune". (MK2 ref, command table)
+    /// 1C 01: "00=Send/read the antenna tuner OFF, 01=Send/read the antenna tuner ON,
+    /// 02=Send/read to tuning" (p. 19-7).
     pub const TUNER: &[u8] = &[0x1C, 0x01];
     pub const TUNER_TUNE: u8 = 0x02;
 }
 
-/// SWR meter calibration points (meter value, SWR) from the 15 12 row.
+/// SWR meter calibration points (meter value, SWR) from the 15 12 row (p. 19-3).
 const SWR_POINTS: [(f32, f32); 4] = [(0.0, 1.0), (48.0, 1.5), (80.0, 2.0), (120.0, 3.0)];
 
 /// Convert a 15 12 meter reading (0-255) to SWR by linear interpolation between
@@ -81,8 +83,10 @@ pub fn key_speed_level(wpm: u32) -> u16 {
     ((wpm - 6.0) * 255.0 / 42.0).round() as u16
 }
 
-/// Watts to the 14 0A level (00 00 = minimum ... 02 55 = maximum, 100 W). The scale
-/// is assumed linear; confirm with the Po meter during hardware testing.
+/// Watts to the 14 0A level. The manual defines this as the [RF PWR] knob position
+/// (00 00 = fully counter-clockwise, 02 55 = fully clockwise), not as watts, so the
+/// linear mapping to 0-100 W is an assumption to confirm against the Po meter
+/// (15 11) during hardware testing.
 pub fn power_level(watts: u32) -> u16 {
     ((watts.min(100) as f32) * 255.0 / 100.0).round() as u16
 }

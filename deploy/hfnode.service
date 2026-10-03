@@ -1,0 +1,73 @@
+# systemd unit for the HF CW message gateway node.
+# Install: see docs/raspberry-pi-setup.md, section 10.
+#   sudo cp deploy/hfnode.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now hfnode
+#
+# Do not enable this until docs/hardware-test-plan.md has been worked through.
+
+[Unit]
+Description=HF CW message gateway node (IC-7300)
+Documentation=https://github.com/robinonsay/ic-7300-hf-server
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target sound.target
+# Give up after 5 failures in 10 minutes rather than restarting (and re-tuning)
+# forever against a radio that is off or disconnected.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hfnode
+Group=hfnode
+SupplementaryGroups=dialout audio
+# HFNODE_EMAIL_PASSWORD and ANTHROPIC_API_KEY, one KEY=value per line, mode 0600.
+EnvironmentFile=/etc/hfnode/env
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml
+# After any stop or crash, stop the keyer and force the radio to receive.
+# The leading "-" means a failure here (radio off, port gone) is not an error.
+ExecStopPost=-/usr/local/bin/hfnode radio --config /etc/hfnode/hfnode.toml rx
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=20
+
+# State: /var/lib/hfnode (last_seq, inbox.json, rx.log, health.csv).
+StateDirectory=hfnode
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/hfnode
+UMask=0027
+
+# Hardening. The node needs: the USB serial port, ALSA capture (via arecord),
+# outbound network (SMTP, IMAP, api.weather.gov, the Claude API), and its state dir.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+# Devices: only USB serial (the IC-7300's CP210x, also via /dev/serial/by-id or a
+# udev symlink) and ALSA sound devices. Do not use PrivateDevices=, which would
+# hide both.
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=multi-user.target
