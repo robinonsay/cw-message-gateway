@@ -276,6 +276,24 @@ fn default_model() -> String {
     "claude-opus-5-5".into()
 }
 
+/// The IC-7300's transmitter frequency coverage in Hz, inclusive, from the manual's
+/// "Frequency coverage" table (Section 16 SPECIFICATIONS, p. 16-2). Which of these
+/// the radio actually transmits on depends on its version.
+const TX_COVERAGE_HZ: [(u64, u64); 12] = [
+    (1_800_000, 1_999_999),
+    (3_500_000, 3_999_999),
+    (5_255_000, 5_405_000),
+    (7_000_000, 7_300_000),
+    (10_100_000, 10_150_000),
+    (14_000_000, 14_350_000),
+    (18_068_000, 18_168_000),
+    (21_000_000, 21_450_000),
+    (24_890_000, 24_990_000),
+    (28_000_000, 29_700_000),
+    (50_000_000, 54_000_000),
+    (70_000_000, 70_500_000),
+];
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
@@ -303,6 +321,20 @@ impl Config {
         if !(1.1..=3.0).contains(&s.swr_limit) {
             bail!("station.swr_limit must be between 1.1 and 3.0");
         }
+        // The radio's keyer runs 6-48 wpm (14 0C: "00 00=6wpm, 02 55=48wpm", p. 19-3);
+        // stuck-key timing is computed from this value, so it must match what is sent.
+        if !(6..=48).contains(&s.key_speed_wpm) {
+            bail!("station.key_speed_wpm must be 6-48");
+        }
+        if !TX_COVERAGE_HZ
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
+        {
+            bail!(
+                "station.frequency_hz {} is outside the IC-7300's amateur transmit coverage",
+                s.frequency_hz
+            );
+        }
         for c in &self.contacts {
             if c.name.is_empty()
                 || !c
@@ -316,6 +348,19 @@ impl Config {
                 );
             }
         }
+        for (i, c) in self.contacts.iter().enumerate() {
+            if self.contacts[..i].iter().any(|o| o.name == c.name) {
+                bail!("contact name {:?} is listed twice", c.name);
+            }
+            // A bare address: the gateway sends to it and matches replies against it.
+            if c.address.parse::<lettre::Address>().is_err() {
+                bail!(
+                    "contact {} address {:?} is not an email address",
+                    c.name,
+                    c.address
+                );
+            }
+        }
         if let Some(w) = &self.weather {
             if !protocol::is_grid(&w.default_grid) {
                 bail!(
@@ -323,9 +368,20 @@ impl Config {
                     w.default_grid
                 );
             }
+            if w.user_agent.trim().is_empty() {
+                bail!(
+                    "weather.user_agent is required; api.weather.gov refuses requests without one"
+                );
+            }
+            if !(1..=6).contains(&w.periods) {
+                bail!("weather.periods must be 1-6");
+            }
         }
         if self.schedule.window_minutes > self.schedule.every_minutes {
             bail!("schedule.window_minutes is longer than schedule.every_minutes");
+        }
+        if self.schedule.offset_minutes >= self.schedule.every_minutes {
+            bail!("schedule.offset_minutes must be less than schedule.every_minutes");
         }
         // Bad audio settings would leave the decoder silently deaf.
         self.decoder_config()
@@ -356,6 +412,73 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.station.civ_address, 0x94);
+    }
+
+    fn example() -> Config {
+        toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap()
+    }
+
+    #[test]
+    fn rejects_key_speed_outside_radio_range() {
+        for (wpm, ok) in [(5, false), (6, true), (48, true), (49, false), (80, false)] {
+            let mut cfg = example();
+            cfg.station.key_speed_wpm = wpm;
+            assert_eq!(cfg.validate().is_ok(), ok, "{wpm} wpm");
+        }
+    }
+
+    #[test]
+    fn rejects_frequency_outside_tx_coverage() {
+        for (hz, ok) in [
+            (7_030_000, true),
+            (1_800_000, true),
+            (29_700_000, true),
+            (70_500_000, true),
+            (0, false),
+            (7_300_001, false),
+            (11_000_000, false),
+            (145_000_000, false),
+        ] {
+            let mut cfg = example();
+            cfg.station.frequency_hz = hz;
+            assert_eq!(cfg.validate().is_ok(), ok, "{hz} Hz");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_contacts() {
+        let mut cfg = example();
+        cfg.contacts[1].address = "bob at example.com".into();
+        assert!(cfg.validate().is_err());
+        let mut cfg = example();
+        cfg.contacts[1].address = "Bob <bob@example.com>".into();
+        assert!(cfg.validate().is_err());
+        let mut cfg = example();
+        cfg.contacts[1].name = cfg.contacts[0].name.clone();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_bad_weather() {
+        let mut cfg = example();
+        cfg.weather.as_mut().unwrap().user_agent = " ".into();
+        assert!(cfg.validate().is_err());
+        for (periods, ok) in [(0, false), (1, true), (6, true), (7, false), (1000, false)] {
+            let mut cfg = example();
+            cfg.weather.as_mut().unwrap().periods = periods;
+            assert_eq!(cfg.validate().is_ok(), ok, "{periods} periods");
+        }
+    }
+
+    #[test]
+    fn rejects_offset_beyond_period() {
+        let mut cfg = example();
+        cfg.schedule.offset_minutes = 59;
+        cfg.validate().unwrap();
+        cfg.schedule.offset_minutes = 60;
+        assert!(cfg.validate().is_err());
+        cfg.schedule.offset_minutes = 100_000;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
