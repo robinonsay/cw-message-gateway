@@ -322,7 +322,18 @@ impl Config {
         if self.schedule.window_minutes > self.schedule.every_minutes {
             bail!("schedule.window_minutes is longer than schedule.every_minutes");
         }
+        // Bad audio settings would leave the decoder silently deaf.
+        self.decoder_config()
+            .validate()
+            .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
         Ok(())
+    }
+
+    /// Decoder settings for the receiver audio.
+    pub fn decoder_config(&self) -> cw::DecoderConfig {
+        let mut d = cw::DecoderConfig::new(self.audio.sample_rate, self.audio.pitch_hz);
+        d.bandwidth_hz = self.audio.bandwidth_hz;
+        d
     }
 
     pub fn contact_names(&self) -> Vec<String> {
@@ -340,6 +351,26 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.station.civ_address, 0x94);
+    }
+
+    #[test]
+    fn rejects_bad_audio_parameters() {
+        let text = include_str!("../../../hfnode.example.toml");
+        let base: Config = toml::from_str(text).unwrap();
+        for (sr, pitch, bw) in [
+            (0, 600.0, 150.0),
+            (8000, 600.0, 0.0),
+            (8000, 600.0, -150.0),
+            (8000, 9000.0, 150.0),
+            (8000, 600.0, f32::NAN),
+        ] {
+            let mut cfg = base.clone();
+            cfg.audio.sample_rate = sr;
+            cfg.audio.pitch_hz = pitch;
+            cfg.audio.bandwidth_hz = bw;
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.starts_with("audio."), "{sr} {pitch} {bw}: {err}");
+        }
     }
 
     #[test]

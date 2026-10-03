@@ -17,6 +17,11 @@
 //!    bursts) do not train the speed estimate.
 //! 5. Classify gaps against the learned dit length into element, character and word
 //!    gaps, and look up each finished pattern in the Morse table.
+//!
+//! Since the floor only moves while the key is up, a jump in the noise level (or a
+//! steady carrier) would hold the key down, or chattering, indefinitely. If the key
+//! has not been up for a real gap in longer than any character can last, what was
+//! heard since is dropped and the levels are learned afresh.
 
 use crate::morse::decode_pattern;
 use std::collections::VecDeque;
@@ -53,6 +58,39 @@ impl DecoderConfig {
             squelch_sigmas: 4.0,
             min_level: 1e-3,
         }
+    }
+
+    /// Check that the decoder can work with these settings. Out-of-range audio
+    /// parameters do not fail loudly: they leave the decoder deaf (zero bandwidth),
+    /// unstable (negative bandwidth) or tuned to an alias of the tone (pitch above
+    /// Nyquist).
+    pub fn validate(&self) -> Result<(), String> {
+        let sr = self.sample_rate as f32;
+        if !(8000..=192_000).contains(&self.sample_rate) {
+            return Err(format!(
+                "sample_rate {} must be 8000-192000",
+                self.sample_rate
+            ));
+        }
+        if !(100.0..sr / 2.0).contains(&self.pitch_hz) {
+            return Err(format!(
+                "pitch_hz {} must be at least 100 and below half the sample rate",
+                self.pitch_hz
+            ));
+        }
+        if !(10.0..sr / 2.0).contains(&self.bandwidth_hz) {
+            return Err(format!(
+                "bandwidth_hz {} must be at least 10 and below half the sample rate",
+                self.bandwidth_hz
+            ));
+        }
+        if !(self.min_wpm > 0.0
+            && self.min_wpm <= self.initial_wpm
+            && self.initial_wpm <= self.max_wpm)
+        {
+            return Err("speeds must satisfy 0 < min_wpm <= initial_wpm <= max_wpm".into());
+        }
+        Ok(())
     }
 }
 
@@ -96,6 +134,10 @@ pub struct Decoder {
     /// Cached (marks in word, dit estimate including them).
     working: (usize, f32),
     idle_ms: u64,
+    /// Ticks since the key was last up for at least `2 * min_dit`, and the length
+    /// of `word` at that time.
+    busy_ticks: u32,
+    busy_word_len: usize,
 }
 
 const MARK_HISTORY: usize = 24;
@@ -130,8 +172,33 @@ impl Decoder {
             word: Vec::new(),
             working: (0, dit_ms),
             idle_ms: 0,
+            busy_ticks: 0,
+            busy_word_len: 0,
             cfg,
         }
+    }
+
+    /// Forget the signal and noise levels, the key state and any partly received
+    /// word, as for a new decoder, but keep the learned speed (dit estimate, mark
+    /// history and character-gap stretch). For use after the receiver has been
+    /// muted or its levels changed, e.g. after transmitting, so the next word is not
+    /// decoded at the initial speed.
+    pub fn reset_levels(&mut self) {
+        let fresh = Decoder::new(self.cfg.clone());
+        *self = Decoder {
+            dit_ms: self.dit_ms,
+            char_gap_ms: self.char_gap_ms,
+            marks: std::mem::take(&mut self.marks),
+            working: (0, self.dit_ms),
+            phase: self.phase,
+            ..fresh
+        };
+    }
+
+    /// Whether something is being received that has not been returned yet: the key
+    /// is down, or a word is buffered awaiting its word gap (see [`Decoder::flush`]).
+    pub fn has_partial(&self) -> bool {
+        self.on || !self.word.is_empty()
     }
 
     /// Current speed estimate in words per minute.
@@ -158,10 +225,10 @@ impl Decoder {
     pub fn push(&mut self, samples: &[f32]) -> Vec<DecodeEvent> {
         let mut events = Vec::new();
         for &x in samples {
-            self.phase += self.phase_step;
-            if self.phase > 2.0 * PI {
-                self.phase -= 2.0 * PI;
-            }
+            // One NaN would poison every filter and level for good; zero keeps the
+            // time base.
+            let x = if x.is_finite() { x } else { 0.0 };
+            self.phase = (self.phase + self.phase_step).rem_euclid(2.0 * PI);
             let (s, c) = self.phase.sin_cos();
             let mut i = x * c;
             let mut q = -x * s;
@@ -220,10 +287,14 @@ impl Decoder {
         } else if !self.on && self.run_ticks as f32 > 0.6 * self.dit_ms {
             // Only well into a gap, so the decaying tail of the last element is not
             // mistaken for noise. The floor falls quickly and rises slowly, and
-            // deviation samples are clipped, so stray tones barely move either.
+            // deviation samples are clipped, so stray tones barely move either. The
+            // clip allows at least min_level so a deviation learned on digital
+            // silence (zero) can still grow when band noise arrives.
             let a = if env < self.floor { 0.02 } else { 0.002 };
             self.floor += a * (env - self.floor);
-            let d = (env - self.floor).abs().min(4.0 * self.dev + 1e-6);
+            let d = (env - self.floor)
+                .abs()
+                .min(4.0 * self.dev + self.cfg.min_level);
             self.dev += 0.005 * (d - self.dev);
             // Let the peak relax towards the floor over a few seconds of silence so
             // a weaker station after a strong one is still heard.
@@ -254,6 +325,18 @@ impl Decoder {
             }
         }
 
+        // Stale levels: no real gap for longer than any character lasts.
+        if !self.on && self.run_ticks as f32 >= 2.0 * min_dit {
+            self.busy_ticks = 0;
+            self.busy_word_len = self.word.len();
+        } else {
+            self.busy_ticks += 1;
+            if self.busy_ticks as f32 > self.stale_ms() {
+                self.relearn_levels(events);
+                return;
+            }
+        }
+
         if self.on {
             self.idle_ms = 0;
         } else {
@@ -263,6 +346,34 @@ impl Decoder {
                 events.push(DecodeEvent::WordGap);
             }
         }
+    }
+
+    /// Longest real CW can go without the key up for `2 * min_dit`: a dah at the
+    /// slowest speed, or the longest character (0, 19 units) at the speed whose
+    /// element gaps are that short, with 30% to spare for hand keying.
+    fn stale_ms(&self) -> f32 {
+        let min_dit = 1200.0 / self.cfg.max_wpm;
+        let max_dit = 1200.0 / self.cfg.min_wpm;
+        (4.0 * max_dit).max(1.3 * 19.0 * 2.0 * min_dit)
+    }
+
+    /// The noise level jumped or a carrier came up while the floor was frozen. Drop
+    /// the runs heard since the last real gap so they neither decode nor train the
+    /// speed, finish the word before them, and learn the levels again from here.
+    fn relearn_levels(&mut self, events: &mut Vec<DecodeEvent>) {
+        self.word.truncate(self.busy_word_len);
+        if !self.word.is_empty() {
+            self.finish_word(events);
+            events.push(DecodeEvent::WordGap);
+        }
+        self.on = false;
+        self.raw_on = false;
+        self.run_ticks = 0;
+        self.candidate_ticks = 0;
+        self.busy_ticks = 0;
+        self.busy_word_len = 0;
+        self.floor = self.env;
+        self.ticks_seen = 0;
     }
 
     fn word_gap_threshold(&mut self) -> f32 {
@@ -495,6 +606,137 @@ mod tests {
         // ignores anything that does not parse as a command.
         let letters = text.chars().filter(|c| *c != ' ').count();
         assert!(letters <= 2, "decoded noise as {text:?}");
+    }
+
+    /// Quiet band for `quiet_s`, then the noise jumps by `step_db` and stays up, and
+    /// `msg` starts `delay_s` after the step.
+    fn noise_step(quiet_s: f32, step_db: f32, delay_s: f32, msg: &str, seed: u64) -> Vec<f32> {
+        let k = Keyer::new(SR, 600.0, 18.0);
+        let quiet = (quiet_s * SR as f32) as usize;
+        let mut audio = vec![0.0; quiet];
+        audio.extend(k.render(msg, delay_s * 1000.0));
+        let sigma = 0.005;
+        let mut noise = Noise::new(seed);
+        noise.add(&mut audio[..quiet], sigma);
+        noise.add(&mut audio[quiet..], sigma * 10f32.powf(step_db / 20.0));
+        audio
+    }
+
+    /// `msg` decoded as words of its own, ignoring lone letters from noise bursts
+    /// before it (the node hands those to the protocol separately).
+    fn ends_with_message(text: &str, msg: &str) -> bool {
+        text == msg || text.ends_with(&format!(" {msg}"))
+    }
+
+    #[test]
+    fn noise_step_does_not_latch_a_false_mark() {
+        const SHORT: &str = "OK 43 WBNFHJGC K";
+        for (seed, step_db) in [(1, 10.0), (2, 10.0), (3, 15.0), (5, 20.0)] {
+            let audio = noise_step(5.0, step_db, 4.0, SHORT, seed);
+            let (text, est) = decode(&audio, DecoderConfig::new(SR, 600.0));
+            assert!(
+                ends_with_message(&text, SHORT),
+                "+{step_db} dB step, seed {seed}: {text:?}"
+            );
+            assert!((est - 18.0).abs() < 2.0, "estimated {est} wpm");
+        }
+        // A decoder that settled on digital silence, then hears band noise.
+        for (seed, step_db) in [(1, 0.0), (2, 10.0)] {
+            let mut audio = vec![0.0; SR as usize / 8];
+            audio.extend(noise_step(0.0, step_db, 4.0, SHORT, seed));
+            let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+            assert!(
+                ends_with_message(&text, SHORT),
+                "noise +{step_db} dB after silence, seed {seed}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn steady_carrier_is_not_decoded() {
+        // Someone tunes up on frequency for 3 s; the message follows a second later.
+        const SHORT: &str = "OK 43 WBNFHJGC K";
+        let k = Keyer::new(SR, 600.0, 18.0);
+        let mut audio: Vec<f32> = (0..SR as usize * 3)
+            .map(|i| k.amplitude * (2.0 * PI * 600.0 * i as f32 / SR as f32).sin())
+            .collect();
+        audio.extend(k.render(SHORT, 1000.0));
+        Noise::new(3).add(
+            &mut audio,
+            Noise::sigma_for_snr(k.amplitude, 10.0, SR, 2500.0),
+        );
+        let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+        assert_eq!(text, SHORT);
+    }
+
+    #[test]
+    fn survives_non_finite_samples() {
+        let k = Keyer::new(SR, 600.0, 18.0);
+        let mut audio = vec![f32::NAN];
+        audio.extend(k.render(MSG, 300.0));
+        audio[SR as usize] = f32::INFINITY;
+        let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+        assert_eq!(text, MSG);
+    }
+
+    #[test]
+    fn mixer_phase_stays_bounded() {
+        // A step above 2*PI (pitch above the sample rate) aliases to the same tone;
+        // the phase must wrap rather than grow until f32 loses the fraction.
+        let k = Keyer::new(SR, 600.0, 18.0);
+        let mut d = Decoder::new(DecoderConfig::new(SR, SR as f32 * 3.0 + 600.0));
+        d.push(&k.render(MSG, 300.0));
+        assert!((0.0..2.0 * PI).contains(&d.phase), "phase {}", d.phase);
+    }
+
+    #[test]
+    fn validates_audio_parameters() {
+        assert!(DecoderConfig::new(8000, 600.0).validate().is_ok());
+        assert!(DecoderConfig::new(48_000, 700.0).validate().is_ok());
+        let bad = |f: fn(&mut DecoderConfig)| {
+            let mut c = DecoderConfig::new(8000, 600.0);
+            f(&mut c);
+            c.validate().is_err()
+        };
+        assert!(bad(|c| c.sample_rate = 0));
+        assert!(bad(|c| c.sample_rate = 400_000));
+        assert!(bad(|c| c.pitch_hz = 4000.0));
+        assert!(bad(|c| c.pitch_hz = 50.0));
+        assert!(bad(|c| c.pitch_hz = f32::NAN));
+        assert!(bad(|c| c.bandwidth_hz = 0.0));
+        assert!(bad(|c| c.bandwidth_hz = -150.0));
+        assert!(bad(|c| c.bandwidth_hz = f32::NAN));
+        assert!(bad(|c| c.min_wpm = 0.0));
+    }
+
+    #[test]
+    fn reset_levels_keeps_speed() {
+        // Learn a slow sender, then reset as the node does after transmitting.
+        let k = Keyer::new(SR, 600.0, 6.0);
+        let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+        d.push(&k.render("TEST DE W5XXX K", 300.0));
+        d.flush();
+        let wpm = d.wpm();
+        assert!((wpm - 6.0).abs() < 1.0, "{wpm}");
+        d.push(&k.render("OK", 300.0)[..SR as usize]);
+        assert!(d.has_partial());
+        d.reset_levels();
+        assert!(!d.has_partial() && !d.key_down());
+        assert_eq!(d.wpm(), wpm);
+        // The first word after the reset is not split at the initial speed.
+        const SHORT: &str = "OK 43 WBNFHJGC K";
+        let mut events = d.push(&k.render(SHORT, 500.0));
+        events.extend(d.push(&vec![0.0; SR as usize * 3]));
+        assert!(!d.has_partial());
+        assert_eq!(events_to_text(&events), SHORT);
+        let mut fresh = Decoder::new(DecoderConfig::new(SR, 600.0));
+        let mut events = fresh.push(&k.render(SHORT, 500.0));
+        events.extend(fresh.flush());
+        assert_ne!(
+            events_to_text(&events),
+            SHORT,
+            "fresh decoder should split it"
+        );
     }
 
     #[test]
