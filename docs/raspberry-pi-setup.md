@@ -142,45 +142,59 @@ Put the device name in `audio.device`.
 
 ## 6. IC-7300 settings
 
-Set these on the radio and write down what you set. Menu locations below are under
-**MENU > SET > Connectors** unless noted; names in the radio may differ slightly
-by firmware version, so check each one against the IC-7300 manual. The node does
-**not** change any of them over CI-V.
+Set these on the radio and write down what you set. Unless noted they are under
+**MENU > SET > Connectors** (IC-7300 Full Manual, pp. 12-10 and 12-11). Item names
+can differ slightly between firmware versions; check each against the manual for
+yours. The node does **not** change any of these over CI-V, so verify them on the
+radio's screen.
 
-**CI-V** (in the CI-V sub-menu of Connectors):
+**CI-V:**
 
-| Setting | Set to | Why |
+| Item | Set to | Why |
 |---|---|---|
-| CI-V Address | **94h** (the IC-7300 default) | Must equal `station.civ_address`. The IC-7300MK2's default is B6h; do not copy MK2 instructions. |
-| CI-V USB Port | **Unlink from [REMOTE]** | The USB port gets its own baud rate, independent of the rear REMOTE jack. |
-| CI-V USB Baud Rate | **115200** | Must equal `station.baud`. |
-| CI-V USB Echo Back | **OFF** (recommended) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
-| CI-V Transceive | **OFF** (recommended) | Stops the radio sending unsolicited frequency and mode updates. The driver ignores frames not addressed to it, so ON also works. |
+| CI-V Address | **94h** (default) | Must equal `station.civ_address`. Instructions written for the IC-7300MK2 use B6h; do not copy them. |
+| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack. The two settings below only apply in this mode. |
+| CI-V USB Baud Rate | **115200** | Must equal `station.baud`. Set it explicitly rather than Auto. |
+| CI-V USB Echo Back | **OFF** (default) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
+| CI-V Transceive | **OFF** (default is ON) | Stops the radio sending unsolicited status frames whenever a setting changes. The driver ignores frames not addressed to it, so ON also works. |
+| USB Serial Function | **CI-V** (default) | The USB serial port must carry CI-V, not decoded RTTY. |
 
-**USB audio** (in Connectors):
+**Transmit control over USB, keep OFF:**
 
-| Setting | Set to | Why |
+| Item | Set to | Why |
 |---|---|---|
-| USB AF Output Level | Start around 50% and adjust | Receive audio to the Pi. Adjust so a strong CW signal does not clip (step 2 of the test plan). |
-| USB AF SQL | **OFF (OPEN)** | The decoder needs audio all the time, not gated by squelch. |
-| USB MOD Level, DATA OFF MOD | Leave as is | The node does not transmit audio; it keys CW with the radio's own keyer. |
+| USB SEND | **OFF** (default) | When set to DTR or RTS, a serial control line keys the transmitter. The node does not use these lines, and opening a serial port can toggle them. |
+| USB Keying (CW) | **OFF** (default) | Same reason: a DTR or RTS line would key CW. The node keys with CI-V command 17 instead. |
+| Inhibit Timer at USB Connection | **ON** (default) | Extra protection against unintended keying when USB connects. |
 
-Check that the AGC and RF gain leave band noise audible but low in the recording.
-If the radio's audio level setting affects USB audio on your firmware, set it once
-and leave it.
+**USB audio:**
 
-**CW** (in CW mode, from the MULTI menu and the keyer settings):
-
-| Setting | Set to | Why |
+| Item | Set to | Why |
 |---|---|---|
-| CW Pitch | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
-| Break-in | **Semi** (BK-IN) | The node turns semi break-in on with CI-V at start-up. It must never be set to full break-in (QSK) for this use. |
-| Break-in delay | Default | Holds transmit between characters so the radio does not chatter. |
-| Key type, paddles | Whatever you use for local operating | The node does not use the KEY jack. Anything plugged into it will key the transmitter while the node runs, so unplug it for unattended use. |
+| ACC/USB Output Select | **AF** (default) | The decoder needs audio, not the 12 kHz IF. |
+| ACC/USB AF Output Level | Start at 50% (default) and adjust | Receive audio to the Pi. Adjust so the strongest signals do not clip (test plan, step 2). |
+| ACC/USB AF SQL | **OFF (OPEN)** (default) | The decoder needs audio all the time, not gated by squelch. |
+| ACC/USB AF Beep/Speech... Output | **OFF** (default) | Keeps beeps and voice announcements out of the decoder. |
+| USB MOD Level, DATA OFF MOD | Leave as is | The node does not transmit audio. |
+
+**CW** (in CW mode, from the Multi-function menu):
+
+| Item | Set to | Why |
+|---|---|---|
+| CW PITCH | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
+| BKIN D (break-in delay) | Default | Holds transmit between characters. |
+| Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on). It never selects full break-in. |
+| KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
+
+**Transmit backstop** (MENU > SET > Function, p. 12-5):
+
+| Item | Set to | Why |
+|---|---|---|
+| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends transmissions started over CI-V after this long. It backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. |
 
 **Power and tuner:** the node sets RF power to `station.power_watts` (30-50 W per
-the design; start the bench tests at 10 W) and runs the internal tuner at start-up
-and at the start of each listening window.
+the design; start bench tests at 10 W) and runs the internal tuner at start-up and
+at the start of each listening window. Leave the tuner switched on.
 
 ## 7. Configuration
 

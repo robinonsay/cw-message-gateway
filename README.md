@@ -42,7 +42,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
 The hardware PTT timer in the design is external hardware, not part of this
-repository. See the [hardware test plan](docs/hardware-test-plan.md#step-9-hardware-ptt-timer)
+repository. See the [hardware test plan](docs/hardware-test-plan.md#step-10-hardware-ptt-timer)
 for what it has to do.
 
 ## Workspace layout
