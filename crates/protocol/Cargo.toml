@@ -1,0 +1,9 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+description = "The field-to-node CW command grammar, fuzzy token matching and node replies"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cw = { path = "../cw" }

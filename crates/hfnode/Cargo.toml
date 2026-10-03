@@ -1,0 +1,14 @@
+[package]
+name = "hfnode"
+version = "0.1.0"
+description = "HF CW message gateway node"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+auth = { path = "../auth" }
+civ = { path = "../civ" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+getrandom = "0.2"
+serialport = { version = "4", default-features = false }

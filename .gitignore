@@ -1,0 +1,3 @@
+/target
+# Secret HOTP keys must never be committed.
+*.key

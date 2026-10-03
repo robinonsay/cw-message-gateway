@@ -1,0 +1,8 @@
+[package]
+name = "cw"
+version = "0.1.0"
+description = "Morse code: audio decoder for received CW and a test-signal synthesizer"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

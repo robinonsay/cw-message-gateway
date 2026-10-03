@@ -1,0 +1,13 @@
+[package]
+name = "auth"
+version = "0.1.0"
+description = "Precomputed HOTP letter codes for authenticating the field operator"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

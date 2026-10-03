@@ -1,0 +1,8 @@
+[package]
+name = "civ"
+version = "0.1.0"
+description = "ICOM CI-V protocol for the IC-7300"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
