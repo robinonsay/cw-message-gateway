@@ -5,6 +5,7 @@
 //! in [`ic7300`].
 
 pub mod frame;
+pub mod ic7300;
 pub mod sim;
 
 use std::fmt;
@@ -105,8 +106,14 @@ mod tests {
     fn keyer_pieces_fit() {
         let p = split_for_keyer("R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K");
         assert!(p.iter().all(|s| s.len() <= MAX_CW_CHARS), "{p:?}");
-        assert_eq!(p.join(" "), "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K");
+        assert_eq!(
+            p.join(" "),
+            "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K"
+        );
         let long = split_for_keyer(&"X".repeat(70));
-        assert_eq!(long.iter().map(String::len).collect::<Vec<_>>(), [30, 30, 10]);
+        assert_eq!(
+            long.iter().map(String::len).collect::<Vec<_>>(),
+            [30, 30, 10]
+        );
     }
 }

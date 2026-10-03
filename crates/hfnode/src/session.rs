@@ -41,7 +41,9 @@ pub struct Transmission {
 
 impl Transmission {
     fn single(text: String) -> Self {
-        Self { segments: vec![text] }
+        Self {
+            segments: vec![text],
+        }
     }
 
     pub fn text(&self) -> String {
@@ -96,7 +98,15 @@ pub struct Session {
 
 impl Session {
     pub fn new(cfg: SessionConfig, vocab: Vocabulary, verifier: Verifier, store: SeqStore) -> Self {
-        Self { cfg, vocab, verifier, store, pending: None, last_commit: None, last_tx: None }
+        Self {
+            cfg,
+            vocab,
+            verifier,
+            store,
+            pending: None,
+            last_commit: None,
+            last_tx: None,
+        }
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -104,7 +114,9 @@ impl Session {
     }
 
     pub fn has_pending(&self, now: Instant) -> bool {
-        self.pending.as_ref().is_some_and(|p| now.duration_since(p.opened_at) < self.cfg.pending_timeout)
+        self.pending
+            .as_ref()
+            .is_some_and(|p| now.duration_since(p.opened_at) < self.cfg.pending_timeout)
     }
 
     /// Handle one decoded field transmission.
@@ -120,28 +132,48 @@ impl Session {
             Err(e) => return Outcome::Silent(format!("unparsed ({e}): {decoded:?}")),
         };
         let outcome = match msg {
-            FieldMsg::Open { call, seq, code, cmd } => self.open(&call, seq, &code, cmd, now, svc),
+            FieldMsg::Open {
+                call,
+                seq,
+                code,
+                cmd,
+            } => self.open(&call, seq, &code, cmd, now, svc),
             FieldMsg::Commit { seq, code } => self.commit(seq, &code, now, svc),
             FieldMsg::Abort => match self.pending.take() {
                 Some(p) => {
                     log::info!("transaction {} aborted by field", p.open_seq);
-                    Outcome::Transmit(Transmission::single(Reply::Aborted.render(&self.cfg.node_call)))
+                    Outcome::Transmit(Transmission::single(
+                        Reply::Aborted.render(&self.cfg.node_call),
+                    ))
                 }
                 None => Outcome::Silent("NO with nothing pending".into()),
             },
             FieldMsg::Again { chunk } => return self.again(chunk, now),
         };
         if let Outcome::Transmit(t) = &outcome {
-            let chunks = self.last_commit.as_ref().filter(|c| c.transmission == *t).map(|c| c.chunks.clone());
+            let chunks = self
+                .last_commit
+                .as_ref()
+                .filter(|c| c.transmission == *t)
+                .map(|c| c.chunks.clone());
             self.last_tx = Some((now, t.clone(), chunks.unwrap_or_default()));
         }
         outcome
     }
 
-    fn open(&mut self, call: &str, seq: u64, code: &str, cmd: Command, now: Instant, svc: &mut dyn Services) -> Outcome {
+    fn open(
+        &mut self,
+        call: &str,
+        seq: u64,
+        code: &str,
+        cmd: Command,
+        now: Instant,
+        svc: &mut dyn Services,
+    ) -> Outcome {
         // Idempotent retry of the open we are already holding.
         if let Some(p) = &self.pending {
-            if p.open_seq == seq && p.cmd == cmd && self.verifier.check_code_only(seq, code).is_ok() {
+            if p.open_seq == seq && p.cmd == cmd && self.verifier.check_code_only(seq, code).is_ok()
+            {
                 return Outcome::Transmit(p.read_back.clone());
             }
         }
@@ -149,14 +181,29 @@ impl Session {
             return Outcome::Silent(format!("open from {call} rejected: {e}"));
         }
         let reply = match &cmd {
-            Command::Tx { dest, text } => Reply::ReadBackTx { seq, dest: dest.clone(), text: text.clone() },
-            Command::Rx => Reply::ReadBackRx { seq, count: svc.ready_messages().len() },
-            Command::Wx { grid } => Reply::ReadBackWx { seq, grid: grid.clone() },
+            Command::Tx { dest, text } => Reply::ReadBackTx {
+                seq,
+                dest: dest.clone(),
+                text: text.clone(),
+            },
+            Command::Rx => Reply::ReadBackRx {
+                seq,
+                count: svc.ready_messages().len(),
+            },
+            Command::Wx { grid } => Reply::ReadBackWx {
+                seq,
+                grid: grid.clone(),
+            },
         };
         let read_back = Transmission::single(reply.render(&self.cfg.node_call));
         log::info!("opened transaction {seq} from {call}: {cmd:?}");
-        self.pending =
-            Some(Pending { open_seq: seq, open_code: code.to_string(), cmd, opened_at: now, read_back: read_back.clone() });
+        self.pending = Some(Pending {
+            open_seq: seq,
+            open_code: code.to_string(),
+            cmd,
+            opened_at: now,
+            read_back: read_back.clone(),
+        });
         Outcome::Transmit(read_back)
     }
 
@@ -183,7 +230,11 @@ impl Session {
         }
         self.verifier.commit(seq);
         self.pending = None;
-        log::info!("committed transaction {} with {seq} (open code {})", p.open_seq, p.open_code);
+        log::info!(
+            "committed transaction {} with {seq} (open code {})",
+            p.open_seq,
+            p.open_code
+        );
 
         let call = self.cfg.node_call.clone();
         let (transmission, chunks) = match p.cmd {
@@ -192,7 +243,10 @@ impl Session {
                     Ok(()) => Reply::Sent { seq },
                     Err(e) => {
                         log::warn!("sending to {dest} failed: {e}");
-                        Reply::Failed { seq, reason: "GATEWAY".into() }
+                        Reply::Failed {
+                            seq,
+                            reason: "GATEWAY".into(),
+                        }
                     }
                 };
                 (Transmission::single(reply.render(&call)), Vec::new())
@@ -200,7 +254,10 @@ impl Session {
             Command::Rx => {
                 let msgs = svc.ready_messages();
                 if msgs.is_empty() {
-                    (Transmission::single(Reply::NoMessages { seq }.render(&call)), Vec::new())
+                    (
+                        Transmission::single(Reply::NoMessages { seq }.render(&call)),
+                        Vec::new(),
+                    )
                 } else {
                     let take = msgs.len().min(self.cfg.max_rx_messages);
                     let mut text = String::new();
@@ -220,11 +277,24 @@ impl Session {
                 Ok(text) => self.chunked(&format!("WX {text}"), &call),
                 Err(e) => {
                     log::warn!("weather failed: {e}");
-                    (Transmission::single(Reply::Failed { seq, reason: "WX".into() }.render(&call)), Vec::new())
+                    (
+                        Transmission::single(
+                            Reply::Failed {
+                                seq,
+                                reason: "WX".into(),
+                            }
+                            .render(&call),
+                        ),
+                        Vec::new(),
+                    )
                 }
             },
         };
-        self.last_commit = Some(LastCommit { seq, transmission: transmission.clone(), chunks: chunks.clone() });
+        self.last_commit = Some(LastCommit {
+            seq,
+            transmission: transmission.clone(),
+            chunks: chunks.clone(),
+        });
         Outcome::Transmit(transmission)
     }
 
@@ -287,7 +357,11 @@ mod tests {
             Ok(())
         }
         fn ready_messages(&mut self) -> Vec<Message> {
-            self.inbox.iter().filter(|m| m.state == State::Ready).cloned().collect()
+            self.inbox
+                .iter()
+                .filter(|m| m.state == State::Ready)
+                .cloned()
+                .collect()
         }
         fn mark_read(&mut self, ids: &[u64]) {
             for m in self.inbox.iter_mut().filter(|m| ids.contains(&m.id)) {
@@ -295,7 +369,10 @@ mod tests {
             }
         }
         fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-            Ok(format!("{} TODAY SUNNY HI 95 TONIGHT CLEAR LO 60", grid.unwrap_or("HOME")))
+            Ok(format!(
+                "{} TODAY SUNNY HI 95 TONIGHT CLEAR LO 60",
+                grid.unwrap_or("HOME")
+            ))
         }
     }
 
@@ -333,17 +410,31 @@ mod tests {
                     max_rx_messages: 5,
                     again_window: Duration::from_secs(900),
                 },
-                Vocabulary { field_calls: vec!["W5XXX".into()], contacts: vec!["MOM".into(), "BOB".into()] },
+                Vocabulary {
+                    field_calls: vec!["W5XXX".into()],
+                    contacts: vec!["MOM".into(), "BOB".into()],
+                },
                 Verifier::new(book.clone(), store.load().unwrap()),
                 store,
             );
-            Self { session, book, svc: Fake::default(), t0: Instant::now(), _dir: dir }
+            Self {
+                session,
+                book,
+                svc: Fake::default(),
+                t0: Instant::now(),
+                _dir: dir,
+            }
         }
 
         fn send(&mut self, secs: u64, text: &str) -> Outcome {
-            let text = text.replace("{42}", &self.book.code(42)).replace("{43}", &self.book.code(43));
-            let text = text.replace("{44}", &self.book.code(44)).replace("{45}", &self.book.code(45));
-            self.session.handle(&text, self.t0 + Duration::from_secs(secs), &mut self.svc)
+            let text = text
+                .replace("{42}", &self.book.code(42))
+                .replace("{43}", &self.book.code(43));
+            let text = text
+                .replace("{44}", &self.book.code(44))
+                .replace("{45}", &self.book.code(45));
+            self.session
+                .handle(&text, self.t0 + Duration::from_secs(secs), &mut self.svc)
         }
 
         fn stored_seq(&self) -> u64 {
@@ -372,7 +463,10 @@ mod tests {
 
         let o = r.send(30, "OK 43 {43} K");
         assert_eq!(tx(&o), "SENT 43 DE N0DE K");
-        assert_eq!(r.svc.sent, [("MOM".to_string(), "RUNNING LATE HOME SUN".to_string())]);
+        assert_eq!(
+            r.svc.sent,
+            [("MOM".to_string(), "RUNNING LATE HOME SUN".to_string())]
+        );
         assert_eq!(r.stored_seq(), 43);
     }
 
@@ -390,7 +484,9 @@ mod tests {
     fn replays_and_bad_codes_get_silence() {
         let mut r = Rig::new();
         // Stale sequence number.
-        assert!(silent(&r.send(0, &format!("W5XXX 41 {} RX K", r.book.code(41)))));
+        assert!(silent(
+            &r.send(0, &format!("W5XXX 41 {} RX K", r.book.code(41)))
+        ));
         // Wrong code.
         assert!(silent(&r.send(0, "W5XXX 42 {43} RX K")));
         // Commit with no open.
@@ -456,7 +552,10 @@ mod tests {
             msg(2, "BOB", "THE GAME WAS POSTPONED TO NEXT SATURDAY AT NOON"),
             msg(3, "MOM", "LOVE YOU"),
         ];
-        assert_eq!(tx(&r.send(0, "W5XXX 42 {42} RX K")), "R 42 3 MSGS ? DE N0DE K");
+        assert_eq!(
+            tx(&r.send(0, "W5XXX 42 {42} RX K")),
+            "R 42 3 MSGS ? DE N0DE K"
+        );
         let o = r.send(10, "OK 43 {43} K");
         let Outcome::Transmit(t) = &o else { panic!() };
         assert!(t.segments.len() > 1);
@@ -467,7 +566,10 @@ mod tests {
 
         // Repeat one chunk.
         let b = tx(&r.send(20, "AGN B K"));
-        assert!(b.starts_with(&t.segments[1][..10]) && b.ends_with("= B DE N0DE K"), "{b}");
+        assert!(
+            b.starts_with(&t.segments[1][..10]) && b.ends_with("= B DE N0DE K"),
+            "{b}"
+        );
         // Repeat everything.
         assert_eq!(tx(&r.send(30, "AGN K")), t.text());
         // Too late.
@@ -477,14 +579,20 @@ mod tests {
     #[test]
     fn rx_with_nothing_waiting() {
         let mut r = Rig::new();
-        assert_eq!(tx(&r.send(0, "W5XXX 42 {42} RX K")), "R 42 0 MSGS ? DE N0DE K");
+        assert_eq!(
+            tx(&r.send(0, "W5XXX 42 {42} RX K")),
+            "R 42 0 MSGS ? DE N0DE K"
+        );
         assert_eq!(tx(&r.send(10, "OK 43 {43} K")), "R 43 NIL DE N0DE K");
     }
 
     #[test]
     fn weather() {
         let mut r = Rig::new();
-        assert_eq!(tx(&r.send(0, "W5XXX 42 {42} WX DL89 K")), "R 42 WX DL89 ? DE N0DE K");
+        assert_eq!(
+            tx(&r.send(0, "W5XXX 42 {42} WX DL89 K")),
+            "R 42 WX DL89 ? DE N0DE K"
+        );
         let text = tx(&r.send(10, "OK 43 {43} K"));
         assert!(text.starts_with("WX DL89 TODAY SUNNY"), "{text}");
     }

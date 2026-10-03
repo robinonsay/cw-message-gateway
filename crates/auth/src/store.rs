@@ -26,10 +26,12 @@ impl SeqStore {
     /// The stored value, or 0 when the file does not exist yet.
     pub fn load(&self) -> io::Result<u64> {
         match fs::read_to_string(&self.path) {
-            Ok(s) => s
-                .trim()
-                .parse()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", self.path.display()))),
+            Ok(s) => s.trim().parse().map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {e}", self.path.display()),
+                )
+            }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(e),
         }

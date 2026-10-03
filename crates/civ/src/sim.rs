@@ -105,7 +105,9 @@ impl Rig for SimRig {
         }
         if !self.cw_mode || !self.break_in {
             // A real radio would not transmit; make the mistake visible in tests.
-            return Err(RigError::Protocol("send_cw without CW mode and break-in".into()));
+            return Err(RigError::Protocol(
+                "send_cw without CW mode and break-in".into(),
+            ));
         }
         self.sent.push(text.to_string());
         let ms = cw::duration_ms(text, self.key_wpm);
@@ -120,7 +122,9 @@ impl Rig for SimRig {
     }
 
     fn is_transmitting(&mut self) -> Result<bool> {
-        Ok(self.forced_tx || self.stuck_key && self.tx_until.is_some() || self.tx_until.is_some_and(|t| Instant::now() < t))
+        Ok(self.forced_tx
+            || self.stuck_key && self.tx_until.is_some()
+            || self.tx_until.is_some_and(|t| Instant::now() < t))
     }
 
     fn set_transmit(&mut self, tx: bool) -> Result<()> {

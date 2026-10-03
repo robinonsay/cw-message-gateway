@@ -79,7 +79,7 @@ impl Keyer {
         for (mark, len) in self.timing(text) {
             let n = ms(len);
             if !mark {
-                out.extend(std::iter::repeat(0.0).take(n));
+                out.extend(std::iter::repeat_n(0.0, n));
                 continue;
             }
             for i in 0..n {
@@ -95,7 +95,7 @@ impl Keyer {
                 out.push(self.amplitude * shape * (w * t).sin());
             }
         }
-        out.extend(std::iter::repeat(0.0).take(ms(lead_ms)));
+        out.extend(std::iter::repeat_n(0.0, ms(lead_ms)));
         out
     }
 }
@@ -108,7 +108,9 @@ pub struct Noise {
 
 impl Noise {
     pub fn new(seed: u64) -> Self {
-        Self { rng: Rng::new(seed) }
+        Self {
+            rng: Rng::new(seed),
+        }
     }
 
     /// Add noise with standard deviation `sigma` to every sample.
@@ -171,6 +173,10 @@ mod tests {
         let audio = k.render("E E", 100.0);
         // dit + 7 dit gap + dit = 9 dits = 540 ms, plus 2 × 100 ms lead.
         let expected = (740.0 * 8.0) as usize;
-        assert!((audio.len() as i64 - expected as i64).abs() <= 3, "{}", audio.len());
+        assert!(
+            (audio.len() as i64 - expected as i64).abs() <= 3,
+            "{}",
+            audio.len()
+        );
     }
 }

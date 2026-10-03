@@ -23,7 +23,9 @@ impl Capture {
     /// Samples arrive in blocks of about 50 ms.
     pub fn start(device: &str, sample_rate: u32) -> Result<Self> {
         let mut child = Command::new("arecord")
-            .args(["-q", "-D", device, "-f", "S16_LE", "-c", "1", "-t", "raw", "-r"])
+            .args([
+                "-q", "-D", device, "-f", "S16_LE", "-c", "1", "-t", "raw", "-r",
+            ])
             .arg(sample_rate.to_string())
             .stdout(Stdio::piped())
             .spawn()
@@ -38,8 +40,10 @@ impl Capture {
                     log::error!("audio capture ended");
                     break;
                 }
-                let samples =
-                    buf.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+                let samples = buf
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                    .collect();
                 if tx.send(samples).is_err() {
                     break;
                 }
@@ -59,25 +63,36 @@ impl Drop for Capture {
 /// Read a WAV file as mono f32 samples (channels are averaged). Returns the samples
 /// and the sample rate.
 pub fn read_wav(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let mut r = hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut r =
+        hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
     let spec = r.spec();
     let ch = spec.channels.max(1) as usize;
     let interleaved: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
         hound::SampleFormat::Int => {
             let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            r.samples::<i32>().map(|s| s.map(|v| v as f32 / scale)).collect::<Result<_, _>>()?
+            r.samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / scale))
+                .collect::<Result<_, _>>()?
         }
     };
     if interleaved.is_empty() {
         bail!("{} has no audio", path.display());
     }
-    let mono = interleaved.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
+    let mono = interleaved
+        .chunks(ch)
+        .map(|f| f.iter().sum::<f32>() / ch as f32)
+        .collect();
     Ok((mono, spec.sample_rate))
 }
 
 pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
-    let spec = hound::WavSpec { channels: 1, sample_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
     let mut w = hound::WavWriter::create(path, spec)?;
     for s in samples {
         w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)?;

@@ -101,8 +101,10 @@ impl ClaudeFilter {
     pub fn new(cfg: &crate::config::Filter) -> Result<Self> {
         let api_key = std::env::var(&cfg.api_key_env)
             .with_context(|| format!("environment variable {} is not set", cfg.api_key_env))?;
-        let agent: ureq::Agent =
-            ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(120))).build().into();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build()
+            .into();
         Ok(Self {
             agent,
             api_key,
@@ -162,7 +164,11 @@ impl ClaudeFilter {
 /// Interpret a Messages API response. A refusal withholds the message.
 pub fn parse_response(v: &Value) -> Result<Verdict> {
     if v["stop_reason"] == "refusal" {
-        return Ok(Verdict { action: Action::Drop, spans: vec![], reason: "model declined to screen".into() });
+        return Ok(Verdict {
+            action: Action::Drop,
+            spans: vec![],
+            reason: "model declined to screen".into(),
+        });
     }
     if v["stop_reason"] == "max_tokens" {
         bail!("filter response truncated");
@@ -182,14 +188,21 @@ mod tests {
     use super::*;
 
     fn verdict(action: Action, spans: &[&str]) -> Verdict {
-        Verdict { action, spans: spans.iter().map(|s| s.to_string()).collect(), reason: String::new() }
+        Verdict {
+            action,
+            spans: spans.iter().map(|s| s.to_string()).collect(),
+            reason: String::new(),
+        }
     }
 
     #[test]
     fn applies_verdicts_without_rewriting() {
         let t = "SEE YOU SUN DARN TRAFFIC";
         assert_eq!(apply(t, &verdict(Action::Keep, &[])), t);
-        assert_eq!(apply(t, &verdict(Action::Redact, &["DARN"])), "SEE YOU SUN REDACTED TRAFFIC");
+        assert_eq!(
+            apply(t, &verdict(Action::Redact, &["DARN"])),
+            "SEE YOU SUN REDACTED TRAFFIC"
+        );
         assert_eq!(apply(t, &verdict(Action::Drop, &[])), WITHHELD);
         // A span that is not in the text withholds the message.
         assert_eq!(apply(t, &verdict(Action::Redact, &["SEE YA"])), WITHHELD);
@@ -202,9 +215,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parse_response(&ok).unwrap().action, Action::Keep);
-        let refusal: Value = serde_json::from_str(r#"{"stop_reason":"refusal","content":[]}"#).unwrap();
+        let refusal: Value =
+            serde_json::from_str(r#"{"stop_reason":"refusal","content":[]}"#).unwrap();
         assert_eq!(parse_response(&refusal).unwrap().action, Action::Drop);
-        let cut: Value = serde_json::from_str(r#"{"stop_reason":"max_tokens","content":[]}"#).unwrap();
+        let cut: Value =
+            serde_json::from_str(r#"{"stop_reason":"max_tokens","content":[]}"#).unwrap();
         assert!(parse_response(&cut).is_err());
     }
 }

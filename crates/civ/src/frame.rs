@@ -21,7 +21,11 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(to: u8, from: u8, body: &[u8]) -> Self {
-        Self { to, from, body: body.to_vec() }
+        Self {
+            to,
+            from,
+            body: body.to_vec(),
+        }
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -56,7 +60,11 @@ pub fn take_frame(buf: &mut Vec<u8>) -> Option<Frame> {
         let raw: Vec<u8> = buf.drain(..=end).collect();
         let inner = &raw[i..raw.len() - 1];
         if inner.len() >= 3 {
-            return Some(Frame { to: inner[0], from: inner[1], body: inner[2..].to_vec() });
+            return Some(Frame {
+                to: inner[0],
+                from: inner[1],
+                body: inner[2..].to_vec(),
+            });
         }
         // Too short to be a frame (noise or a collision): keep scanning.
     }
@@ -124,7 +132,10 @@ mod tests {
     fn bcd() {
         // 14.074 MHz = 0014074000 Hz -> 00 40 07 14 00 (LSB first).
         assert_eq!(bcd_le(14_074_000, 5), [0x00, 0x40, 0x07, 0x14, 0x00]);
-        assert_eq!(from_bcd_le(&[0x00, 0x40, 0x07, 0x14, 0x00]), Some(14_074_000));
+        assert_eq!(
+            from_bcd_le(&[0x00, 0x40, 0x07, 0x14, 0x00]),
+            Some(14_074_000)
+        );
         assert_eq!(bcd_be(128, 2), [0x01, 0x28]);
         assert_eq!(from_bcd_be(&[0x02, 0x55]), Some(255));
         assert_eq!(from_bcd_le(&[0xAB]), None);

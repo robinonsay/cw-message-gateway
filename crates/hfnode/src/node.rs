@@ -18,7 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub fn load_codebook(cfg: &Config) -> Result<CodeBook> {
-    let key = std::fs::read(&cfg.auth.key_file).with_context(|| format!("reading {}", cfg.auth.key_file.display()))?;
+    let key = std::fs::read(&cfg.auth.key_file)
+        .with_context(|| format!("reading {}", cfg.auth.key_file.display()))?;
     if key.len() < 16 {
         anyhow::bail!("{} is too short to be a key", cfg.auth.key_file.display());
     }
@@ -42,7 +43,12 @@ pub fn build_session(cfg: &Config) -> Result<Session> {
             again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
         },
         Vocabulary {
-            field_calls: cfg.station.field_calls.iter().map(|c| c.to_ascii_uppercase()).collect(),
+            field_calls: cfg
+                .station
+                .field_calls
+                .iter()
+                .map(|c| c.to_ascii_uppercase())
+                .collect(),
             contacts: cfg.contact_names(),
         },
         Verifier::new(book, last),
@@ -51,12 +57,18 @@ pub fn build_session(cfg: &Config) -> Result<Session> {
 }
 
 pub fn open_inbox(cfg: &Config) -> Result<Arc<Mutex<Inbox>>> {
-    Ok(Arc::new(Mutex::new(Inbox::open(cfg.state_dir.join("inbox.json"))?)))
+    Ok(Arc::new(Mutex::new(Inbox::open(
+        cfg.state_dir.join("inbox.json"),
+    )?)))
 }
 
 /// Screen every unscreened message. Messages stay unscreened (and are never keyed)
 /// if the filter cannot be reached.
-pub fn screen_inbox(cfg: &Config, inbox: &Arc<Mutex<Inbox>>, filter: Option<&filter::ClaudeFilter>) {
+pub fn screen_inbox(
+    cfg: &Config,
+    inbox: &Arc<Mutex<Inbox>>,
+    filter: Option<&filter::ClaudeFilter>,
+) {
     let pending = inbox.lock().map(|i| i.unscreened()).unwrap_or_default();
     for m in pending {
         let on_air = sanitize(&m.raw);
@@ -65,7 +77,13 @@ pub fn screen_inbox(cfg: &Config, inbox: &Arc<Mutex<Inbox>>, filter: Option<&fil
         } else if let Some(f) = filter {
             match f.screen(&m.from, &on_air) {
                 Ok(v) => {
-                    log::info!("filter: message {} from {}: {:?} ({})", m.id, m.from, v.action, v.reason);
+                    log::info!(
+                        "filter: message {} from {}: {:?} ({})",
+                        m.id,
+                        m.from,
+                        v.action,
+                        v.reason
+                    );
                     filter::apply(&on_air, &v)
                 }
                 Err(e) => {
@@ -86,13 +104,17 @@ pub fn screen_inbox(cfg: &Config, inbox: &Arc<Mutex<Inbox>>, filter: Option<&fil
 
 /// Poll email and screen new messages until the process exits.
 pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
-    let Some(email) = cfg.email.clone() else { return };
+    let Some(email) = cfg.email.clone() else {
+        return;
+    };
     thread::spawn(move || {
         let filter = if cfg.filter.enabled {
             match filter::ClaudeFilter::new(&cfg.filter) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    log::error!("inbound filter not available, inbound messages will be held: {e:#}");
+                    log::error!(
+                        "inbound filter not available, inbound messages will be held: {e:#}"
+                    );
                     None
                 }
             }
@@ -119,7 +141,12 @@ pub fn live_services(cfg: &Config, inbox: Arc<Mutex<Inbox>>) -> Result<LiveServi
         None => None,
     };
     let weather = cfg.weather.as_ref().map(gateway::weather::Nws::new);
-    Ok(LiveServices { cfg: cfg.clone(), inbox, mailer, weather })
+    Ok(LiveServices {
+        cfg: cfg.clone(),
+        inbox,
+        mailer,
+        weather,
+    })
 }
 
 fn decoder_for(cfg: &Config) -> Decoder {

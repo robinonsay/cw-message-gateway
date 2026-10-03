@@ -28,7 +28,9 @@ fn levenshtein(a: &[u8], b: &[u8]) -> usize {
     for i in 1..=a.len() {
         let mut cur = vec![i; b.len() + 1];
         for j in 1..=b.len() {
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
+            cur[j] = (prev[j] + 1)
+                .min(cur[j - 1] + 1)
+                .min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
         }
         prev = cur;
     }
@@ -43,7 +45,11 @@ pub fn snap<'v, S: AsRef<str>>(token: &str, vocab: &'v [S], tolerance: usize) ->
     let mut tie = false;
     for v in vocab {
         let v = v.as_ref();
-        let d = if v.eq_ignore_ascii_case(token) { 0 } else { morse_distance(&token.to_ascii_uppercase(), &v.to_ascii_uppercase()) };
+        let d = if v.eq_ignore_ascii_case(token) {
+            0
+        } else {
+            morse_distance(&token.to_ascii_uppercase(), &v.to_ascii_uppercase())
+        };
         match best {
             Some((_, bd)) if d > bd => {}
             Some((_, bd)) if d == bd => tie = true,

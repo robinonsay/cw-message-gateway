@@ -20,9 +20,15 @@ impl Nws {
     }
 
     pub fn with_base(cfg: &Weather, base: &str) -> Self {
-        let agent: ureq::Agent =
-            ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into();
-        Self { agent, cfg: cfg.clone(), base: base.trim_end_matches('/').to_string() }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(20)))
+            .build()
+            .into();
+        Self {
+            agent,
+            cfg: cfg.clone(),
+            base: base.trim_end_matches('/').to_string(),
+        }
     }
 
     fn get(&self, url: &str) -> Result<Value> {
@@ -46,7 +52,10 @@ impl Nws {
         };
         let fc = self.get(url)?;
         let alerts = self
-            .get(&format!("{}/alerts/active?point={lat:.4},{lon:.4}", self.base))
+            .get(&format!(
+                "{}/alerts/active?point={lat:.4},{lon:.4}",
+                self.base
+            ))
             .map(|a| alert_events(&a))
             .unwrap_or_default();
         Ok(format_forecast(grid, &alerts, &fc, self.cfg.periods))
@@ -88,13 +97,34 @@ pub fn format_forecast(grid: &str, alerts: &[String], fc: &Value, periods: usize
     for a in alerts {
         parts.push(format!("ALERT {a}"));
     }
-    for p in fc["properties"]["periods"].as_array().into_iter().flatten().take(periods.max(1)) {
+    for p in fc["properties"]["periods"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(periods.max(1))
+    {
         let name = p["name"].as_str().unwrap_or("");
         let short = p["shortForecast"].as_str().unwrap_or("");
-        let temp = p["temperature"].as_i64().map(|t| t.to_string()).unwrap_or_default();
-        let hi_lo = if p["isDaytime"].as_bool().unwrap_or(true) { "HI" } else { "LO" };
-        let wind = format!("{} {}", p["windDirection"].as_str().unwrap_or(""), p["windSpeed"].as_str().unwrap_or(""));
-        parts.push(format!("{} {} {hi_lo} {temp} WIND {}", abbreviate(name), abbreviate(short), abbreviate(&wind)));
+        let temp = p["temperature"]
+            .as_i64()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let hi_lo = if p["isDaytime"].as_bool().unwrap_or(true) {
+            "HI"
+        } else {
+            "LO"
+        };
+        let wind = format!(
+            "{} {}",
+            p["windDirection"].as_str().unwrap_or(""),
+            p["windSpeed"].as_str().unwrap_or("")
+        );
+        parts.push(format!(
+            "{} {} {hi_lo} {temp} WIND {}",
+            abbreviate(name),
+            abbreviate(short),
+            abbreviate(&wind)
+        ));
     }
     parts.join(" ")
 }
@@ -142,9 +172,15 @@ mod tests {
     #[test]
     fn grid_centres() {
         let (lat, lon) = grid_center("DL89").unwrap();
-        assert!((lat - 29.5).abs() < 1e-9 && (lon + 103.0).abs() < 1e-9, "{lat} {lon}");
+        assert!(
+            (lat - 29.5).abs() < 1e-9 && (lon + 103.0).abs() < 1e-9,
+            "{lat} {lon}"
+        );
         let (lat, lon) = grid_center("FN31pr").unwrap();
-        assert!((lat - 41.729).abs() < 0.01 && (lon + 72.708).abs() < 0.01, "{lat} {lon}");
+        assert!(
+            (lat - 41.729).abs() < 0.01 && (lon + 72.708).abs() < 0.01,
+            "{lat} {lon}"
+        );
         assert!(grid_center("XX99").is_none());
     }
 

@@ -35,10 +35,20 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldMsg {
-    Open { call: String, seq: u64, code: String, cmd: Command },
-    Commit { seq: u64, code: String },
+    Open {
+        call: String,
+        seq: u64,
+        code: String,
+        cmd: Command,
+    },
+    Commit {
+        seq: u64,
+        code: String,
+    },
     Abort,
-    Again { chunk: Option<char> },
+    Again {
+        chunk: Option<char>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +114,10 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         .filter(|t| t.chars().all(|c| c != '*'))
         .collect();
     // Drop the trailing over/out prosign: K, KN, AR (+), SK.
-    while matches!(tokens.last().map(String::as_str), Some("K" | "KN" | "+" | "AR" | "SK")) {
+    while matches!(
+        tokens.last().map(String::as_str),
+        Some("K" | "KN" | "+" | "AR" | "SK")
+    ) {
         tokens.pop();
     }
     if tokens.is_empty() {
@@ -116,11 +129,18 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
     // when what remains is a start word.
     let starts = ["OK", "NO", "AGN"];
     for t in tokens.iter_mut() {
-        let is_start = |w: &str| snap(w, &starts, 0).is_some() || snap(w, &vocab.field_calls, KEYWORD_TOLERANCE).is_some();
+        let is_start = |w: &str| {
+            snap(w, &starts, 0).is_some()
+                || snap(w, &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
+        };
         if is_start(t) {
             break;
         }
-        let peel = t.chars().take(2).take_while(|c| NOISE_CHARS.contains(*c)).count();
+        let peel = t
+            .chars()
+            .take(2)
+            .take_while(|c| NOISE_CHARS.contains(*c))
+            .count();
         if let Some(n) = (1..=peel).find(|&n| is_start(&t[n..])) {
             *t = t[n..].to_string();
             break;
@@ -130,7 +150,12 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
     // when together, but not alone, they match a field callsign.
     if let Some(i) = (0..tokens.len().saturating_sub(1)).find(|&i| {
         snap(&tokens[i], &vocab.field_calls, KEYWORD_TOLERANCE).is_none()
-            && snap(&format!("{}{}", tokens[i], tokens[i + 1]), &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
+            && snap(
+                &format!("{}{}", tokens[i], tokens[i + 1]),
+                &vocab.field_calls,
+                KEYWORD_TOLERANCE,
+            )
+            .is_some()
     }) {
         let joined = format!("{}{}", tokens[i], tokens[i + 1]);
         tokens.splice(i..i + 2, [joined]);
@@ -160,9 +185,13 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         return Ok(FieldMsg::Again { chunk });
     }
 
-    let call = snap(first, &vocab.field_calls, KEYWORD_TOLERANCE).expect("start token matched").to_string();
+    let call = snap(first, &vocab.field_calls, KEYWORD_TOLERANCE)
+        .expect("start token matched")
+        .to_string();
     let (seq, code, rest) = seq_and_code(&tokens[1..])?;
-    let (kw, args) = rest.split_first().ok_or_else(|| ParseError::BadCommand(String::new()))?;
+    let (kw, args) = rest
+        .split_first()
+        .ok_or_else(|| ParseError::BadCommand(String::new()))?;
     let cmd = match snap(kw, &["TX", "RX", "WX"], 1) {
         Some("TX") => {
             let (dest, words) = args.split_first().ok_or(ParseError::EmptyMessage)?;
@@ -172,7 +201,10 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
             if words.is_empty() {
                 return Err(ParseError::EmptyMessage);
             }
-            Command::Tx { dest, text: words.join(" ") }
+            Command::Tx {
+                dest,
+                text: words.join(" "),
+            }
         }
         Some("RX") => {
             expect_end(args)?;
@@ -189,15 +221,24 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         }
         _ => return Err(ParseError::BadCommand(kw.clone())),
     };
-    Ok(FieldMsg::Open { call, seq, code, cmd })
+    Ok(FieldMsg::Open {
+        call,
+        seq,
+        code,
+        cmd,
+    })
 }
 
 /// Read `seq code` from the front of `tokens`. A code split across tokens by a
 /// stretched gap (`KRTP QMLD`) is rejoined when the pieces add up to exactly 8 letters.
 fn seq_and_code(tokens: &[String]) -> Result<(u64, String, &[String]), ParseError> {
-    let (seq_tok, rest) = tokens.split_first().ok_or_else(|| ParseError::BadSeq(String::new()))?;
+    let (seq_tok, rest) = tokens
+        .split_first()
+        .ok_or_else(|| ParseError::BadSeq(String::new()))?;
     let seq = if seq_tok.chars().all(|c| c.is_ascii_digit()) {
-        seq_tok.parse().map_err(|_| ParseError::BadSeq(seq_tok.clone()))?
+        seq_tok
+            .parse()
+            .map_err(|_| ParseError::BadSeq(seq_tok.clone()))?
     } else {
         return Err(ParseError::BadSeq(seq_tok.clone()));
     };
@@ -257,20 +298,34 @@ mod tests {
                 call: "W5XXX".into(),
                 seq: 42,
                 code: "KRTPQMLD".into(),
-                cmd: Command::Tx { dest: "MOM".into(), text: "RUNNING LATE HOME SUN".into() },
+                cmd: Command::Tx {
+                    dest: "MOM".into(),
+                    text: "RUNNING LATE HOME SUN".into()
+                },
             })
         );
         assert_eq!(
             parse("OK 43 WBNFHJGC K", &vocab()),
-            Ok(FieldMsg::Commit { seq: 43, code: "WBNFHJGC".into() })
+            Ok(FieldMsg::Commit {
+                seq: 43,
+                code: "WBNFHJGC".into()
+            })
         );
         assert_eq!(
             parse("W5XXX 44 ABCDEFGH RX K", &vocab()).unwrap(),
-            FieldMsg::Open { call: "W5XXX".into(), seq: 44, code: "ABCDEFGH".into(), cmd: Command::Rx }
+            FieldMsg::Open {
+                call: "W5XXX".into(),
+                seq: 44,
+                code: "ABCDEFGH".into(),
+                cmd: Command::Rx
+            }
         );
         assert_eq!(parse("NO K", &vocab()), Ok(FieldMsg::Abort));
         assert_eq!(parse("AGN", &vocab()), Ok(FieldMsg::Again { chunk: None }));
-        assert_eq!(parse("AGN B K", &vocab()), Ok(FieldMsg::Again { chunk: Some('B') }));
+        assert_eq!(
+            parse("AGN B K", &vocab()),
+            Ok(FieldMsg::Again { chunk: Some('B') })
+        );
     }
 
     #[test]
@@ -280,8 +335,16 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(open("W5XXX 46 ABCDEFGH WX K"), Command::Wx { grid: None });
-        assert_eq!(open("W5XXX 46 ABCDEFGH WX DL88 K"), Command::Wx { grid: Some("DL88".into()) });
-        assert_eq!(parse("W5XXX 46 ABCDEFGH WX ZZ99 K", &vocab()), Err(ParseError::BadGrid("ZZ99".into())));
+        assert_eq!(
+            open("W5XXX 46 ABCDEFGH WX DL88 K"),
+            Command::Wx {
+                grid: Some("DL88".into())
+            }
+        );
+        assert_eq!(
+            parse("W5XXX 46 ABCDEFGH WX ZZ99 K", &vocab()),
+            Err(ParseError::BadGrid("ZZ99".into()))
+        );
     }
 
     #[test]
@@ -295,7 +358,10 @@ mod tests {
                 call: "W5XXX".into(),
                 seq: 42,
                 code: "KRTPQMLD".into(),
-                cmd: Command::Tx { dest: "MOM".into(), text: "HI".into() },
+                cmd: Command::Tx {
+                    dest: "MOM".into(),
+                    text: "HI".into()
+                },
             }
         );
     }
@@ -303,10 +369,22 @@ mod tests {
     #[test]
     fn peels_noise_glued_to_the_first_word() {
         let v = vocab();
-        assert_eq!(parse("EOK 43 WBNFHJGC K", &v), Ok(FieldMsg::Commit { seq: 43, code: "WBNFHJGC".into() }));
-        assert!(matches!(parse("TW5XXX 44 ABCDEFGH RX K", &v), Ok(FieldMsg::Open { .. })));
+        assert_eq!(
+            parse("EOK 43 WBNFHJGC K", &v),
+            Ok(FieldMsg::Commit {
+                seq: 43,
+                code: "WBNFHJGC".into()
+            })
+        );
+        assert!(matches!(
+            parse("TW5XXX 44 ABCDEFGH RX K", &v),
+            Ok(FieldMsg::Open { .. })
+        ));
         // A callsign split by a long gap is rejoined.
-        assert!(matches!(parse("E W 5XXX 44 ABCDEFGH RX K", &v), Ok(FieldMsg::Open { .. })));
+        assert!(matches!(
+            parse("E W 5XXX 44 ABCDEFGH RX K", &v),
+            Ok(FieldMsg::Open { .. })
+        ));
         // Only short noise characters are peeled.
         assert_eq!(parse("QOK 43 WBNFHJGC K", &v), Err(ParseError::NoStart));
     }
@@ -316,12 +394,27 @@ mod tests {
         let v = vocab();
         assert_eq!(parse("", &v), Err(ParseError::Empty));
         assert_eq!(parse("CQ CQ DE N0CALL K", &v), Err(ParseError::NoStart));
-        assert_eq!(parse("W5XXX 4Z KRTPQMLD RX K", &v), Err(ParseError::BadSeq("4Z".into())));
+        assert_eq!(
+            parse("W5XXX 4Z KRTPQMLD RX K", &v),
+            Err(ParseError::BadSeq("4Z".into()))
+        );
         assert_eq!(parse("W5XXX 42 KRTPQML RX K", &v), Err(ParseError::BadCode));
-        assert_eq!(parse("W5XXX 42 KRTPQMLD QQ K", &v), Err(ParseError::BadCommand("QQ".into())));
-        assert_eq!(parse("W5XXX 42 KRTPQMLD TX ZEUS HI K", &v), Err(ParseError::UnknownContact("ZEUS".into())));
-        assert_eq!(parse("W5XXX 42 KRTPQMLD TX MOM K", &v), Err(ParseError::EmptyMessage));
-        assert_eq!(parse("OK 43 WBNFHJGC EXTRA K", &v), Err(ParseError::TrailingGarbage("EXTRA".into())));
+        assert_eq!(
+            parse("W5XXX 42 KRTPQMLD QQ K", &v),
+            Err(ParseError::BadCommand("QQ".into()))
+        );
+        assert_eq!(
+            parse("W5XXX 42 KRTPQMLD TX ZEUS HI K", &v),
+            Err(ParseError::UnknownContact("ZEUS".into()))
+        );
+        assert_eq!(
+            parse("W5XXX 42 KRTPQMLD TX MOM K", &v),
+            Err(ParseError::EmptyMessage)
+        );
+        assert_eq!(
+            parse("OK 43 WBNFHJGC EXTRA K", &v),
+            Err(ParseError::TrailingGarbage("EXTRA".into()))
+        );
         // Unknown patterns (decoded as '*') are dropped, not guessed.
         assert_eq!(parse("OK 43 WBNF*JGC K", &v), Err(ParseError::BadCode));
     }

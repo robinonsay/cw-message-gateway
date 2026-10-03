@@ -6,7 +6,11 @@ use crate::text::sanitize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     /// Read-back of a `TX` request.
-    ReadBackTx { seq: u64, dest: String, text: String },
+    ReadBackTx {
+        seq: u64,
+        dest: String,
+        text: String,
+    },
     /// Read-back of an `RX` request: how many messages are waiting.
     ReadBackRx { seq: u64, count: usize },
     /// Read-back of a `WX` request.
@@ -29,9 +33,14 @@ impl Reply {
     /// identification rule (47 CFR 97.119) without the node tracking ID timing.
     pub fn render(&self, node_call: &str) -> String {
         let body = match self {
-            Self::ReadBackTx { seq, dest, text } => format!("R {seq} TX {dest} {} ?", sanitize(text)),
+            Self::ReadBackTx { seq, dest, text } => {
+                format!("R {seq} TX {dest} {} ?", sanitize(text))
+            }
             Self::ReadBackRx { seq, count } => {
-                format!("R {seq} {count} {} ?", if *count == 1 { "MSG" } else { "MSGS" })
+                format!(
+                    "R {seq} {count} {} ?",
+                    if *count == 1 { "MSG" } else { "MSGS" }
+                )
             }
             Self::ReadBackWx { seq, grid } => match grid {
                 Some(g) => format!("R {seq} WX {g} ?"),
@@ -97,7 +106,10 @@ pub fn chunk(text: &str, max_chars: usize) -> Vec<Chunk> {
     pieces
         .into_iter()
         .enumerate()
-        .map(|(i, text)| Chunk { letter: (b'A' + i as u8) as char, text })
+        .map(|(i, text)| Chunk {
+            letter: (b'A' + i as u8) as char,
+            text,
+        })
         .collect()
 }
 
@@ -107,9 +119,19 @@ mod tests {
 
     #[test]
     fn renders_spec_examples() {
-        let r = Reply::ReadBackTx { seq: 42, dest: "MOM".into(), text: "running late home sun".into() };
-        assert_eq!(r.render("N0DE"), "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K");
-        assert_eq!(Reply::ReadBackRx { seq: 44, count: 3 }.render("N0DE"), "R 44 3 MSGS ? DE N0DE K");
+        let r = Reply::ReadBackTx {
+            seq: 42,
+            dest: "MOM".into(),
+            text: "running late home sun".into(),
+        };
+        assert_eq!(
+            r.render("N0DE"),
+            "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K"
+        );
+        assert_eq!(
+            Reply::ReadBackRx { seq: 44, count: 3 }.render("N0DE"),
+            "R 44 3 MSGS ? DE N0DE K"
+        );
         assert_eq!(Reply::Sent { seq: 43 }.render("N0DE"), "SENT 43 DE N0DE K");
     }
 
@@ -122,6 +144,9 @@ mod tests {
         assert_eq!(c[1].render(), "FOX JUMPS OVER = B");
         assert!(chunk("", 10).is_empty());
         let long = chunk("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 10);
-        assert_eq!(long.iter().map(|c| c.text.len()).collect::<Vec<_>>(), [10, 10, 6]);
+        assert_eq!(
+            long.iter().map(|c| c.text.len()).collect::<Vec<_>>(),
+            [10, 10, 6]
+        );
     }
 }

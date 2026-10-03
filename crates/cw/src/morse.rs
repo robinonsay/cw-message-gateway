@@ -103,7 +103,8 @@ pub fn units(text: &str) -> u32 {
     for (wi, word) in words.iter().enumerate() {
         let chars: Vec<&str> = word.chars().filter_map(encode_char).collect();
         for (ci, p) in chars.iter().enumerate() {
-            total += p.chars().map(|e| if e == '.' { 1 } else { 3 }).sum::<u32>() + p.len() as u32 - 1;
+            total +=
+                p.chars().map(|e| if e == '.' { 1 } else { 3 }).sum::<u32>() + p.len() as u32 - 1;
             if ci + 1 < chars.len() {
                 total += 3;
             }

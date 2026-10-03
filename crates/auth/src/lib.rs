@@ -58,8 +58,13 @@ pub enum AlphabetError {
 impl fmt::Display for AlphabetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooShort(n) => write!(f, "alphabet has {n} letters, need at least {MIN_ALPHABET_LEN}"),
-            Self::NotUppercaseLetter(c) => write!(f, "alphabet character {c:?} is not an uppercase letter A-Z"),
+            Self::TooShort(n) => write!(
+                f,
+                "alphabet has {n} letters, need at least {MIN_ALPHABET_LEN}"
+            ),
+            Self::NotUppercaseLetter(c) => {
+                write!(f, "alphabet character {c:?} is not an uppercase letter A-Z")
+            }
             Self::Duplicate(c) => write!(f, "alphabet letter {c:?} appears more than once"),
         }
     }
@@ -87,7 +92,10 @@ impl CodeBook {
         if alphabet.len() < MIN_ALPHABET_LEN {
             return Err(AlphabetError::TooShort(alphabet.len()));
         }
-        Ok(Self { key: key.to_vec(), alphabet: alphabet.as_bytes().to_vec() })
+        Ok(Self {
+            key: key.to_vec(),
+            alphabet: alphabet.as_bytes().to_vec(),
+        })
     }
 
     pub fn alphabet(&self) -> &str {
@@ -96,7 +104,8 @@ impl CodeBook {
 
     /// The code for sequence number `seq`.
     pub fn code(&self, seq: u64) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC accepts any key length");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC accepts any key length");
         mac.update(&seq.to_be_bytes());
         let digest = mac.finalize().into_bytes();
         // 128 bits against at most 26^8 ≈ 2^37.6 values: modulo bias is below 2^-90.
@@ -122,13 +131,20 @@ impl CodeBook {
         if got.len() != expected.len() {
             return false;
         }
-        expected.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        expected
+            .bytes()
+            .zip(got.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
     }
 }
 
 /// Uppercase and drop anything that is not a letter (spaces from printed grouping).
 fn normalize(code: &str) -> String {
-    code.chars().filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_ascii_uppercase()).collect()
+    code.chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +158,9 @@ pub enum Reject {
 impl fmt::Display for Reject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stale { seq, last_seq } => write!(f, "sequence {seq} is not after last used {last_seq}"),
+            Self::Stale { seq, last_seq } => {
+                write!(f, "sequence {seq} is not after last used {last_seq}")
+            }
             Self::BadCode { seq } => write!(f, "wrong code for sequence {seq}"),
         }
     }
@@ -168,7 +186,10 @@ impl Verifier {
     /// Check a fresh code without consuming it.
     pub fn check(&self, seq: u64, code: &str) -> Result<(), Reject> {
         if seq <= self.last_seq {
-            return Err(Reject::Stale { seq, last_seq: self.last_seq });
+            return Err(Reject::Stale {
+                seq,
+                last_seq: self.last_seq,
+            });
         }
         self.check_code_only(seq, code)
     }
@@ -236,7 +257,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_alphabets() {
-        assert_eq!(CodeBook::with_alphabet(KEY, "ABC").unwrap_err(), AlphabetError::TooShort(3));
+        assert_eq!(
+            CodeBook::with_alphabet(KEY, "ABC").unwrap_err(),
+            AlphabetError::TooShort(3)
+        );
         assert_eq!(
             CodeBook::with_alphabet(KEY, "ABCDEFGHIJKLMNOa").unwrap_err(),
             AlphabetError::NotUppercaseLetter('a')
@@ -260,12 +284,27 @@ mod tests {
     fn verifier_accepts_only_increasing_sequence_numbers() {
         let book = CodeBook::new(KEY);
         let mut v = Verifier::new(book.clone(), 41);
-        assert_eq!(v.check(41, &book.code(41)), Err(Reject::Stale { seq: 41, last_seq: 41 }));
-        assert_eq!(v.check(42, &book.code(43)), Err(Reject::BadCode { seq: 42 }));
+        assert_eq!(
+            v.check(41, &book.code(41)),
+            Err(Reject::Stale {
+                seq: 41,
+                last_seq: 41
+            })
+        );
+        assert_eq!(
+            v.check(42, &book.code(43)),
+            Err(Reject::BadCode { seq: 42 })
+        );
         // Skipping lines on the paper table is fine.
         assert_eq!(v.check(45, &book.code(45)), Ok(()));
         v.commit(45);
-        assert_eq!(v.check(45, &book.code(45)), Err(Reject::Stale { seq: 45, last_seq: 45 }));
+        assert_eq!(
+            v.check(45, &book.code(45)),
+            Err(Reject::Stale {
+                seq: 45,
+                last_seq: 45
+            })
+        );
         assert_eq!(v.check_code_only(45, &book.code(45)), Ok(()));
         v.commit(10);
         assert_eq!(v.last_seq(), 45);

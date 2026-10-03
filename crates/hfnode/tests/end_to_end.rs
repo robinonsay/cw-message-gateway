@@ -71,18 +71,27 @@ fn field_message_over_the_air_is_sent() {
     // committing, as they would on the air.
     let read_back_ms = cw::duration_ms("R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K", 18);
     for (text, wait_ms) in [
-        (format!("W5XXX 42 {} TX MOM RUNNING LATE HOME SUN K", book.code(42)), read_back_ms + 5000),
+        (
+            format!("W5XXX 42 {} TX MOM RUNNING LATE HOME SUN K", book.code(42)),
+            read_back_ms + 5000,
+        ),
         (format!("OK 43 {} K", book.code(43)), 8000),
     ] {
         audio.extend(k.render(&text, 3000.0));
         audio.extend(vec![0.0; sr as usize * wait_ms as usize / 1000]);
     }
-    Noise::new(11).add(&mut audio, Noise::sigma_for_snr(k.amplitude, 3.0, sr, 2500.0));
+    Noise::new(11).add(
+        &mut audio,
+        Noise::sigma_for_snr(k.amplitude, 3.0, sr, 2500.0),
+    );
 
     // Feed 50 ms blocks 100x faster than real time, matching the simulated radio's
     // time scale, so audio heard while "transmitting" is discarded as it would be.
     let (tx, rx) = mpsc::channel();
-    let blocks: Vec<Vec<f32>> = audio.chunks(sr as usize / 20).map(<[f32]>::to_vec).collect();
+    let blocks: Vec<Vec<f32>> = audio
+        .chunks(sr as usize / 20)
+        .map(<[f32]>::to_vec)
+        .collect();
     std::thread::spawn(move || {
         for b in blocks {
             std::thread::sleep(Duration::from_micros(500));
@@ -105,8 +114,14 @@ fn field_message_over_the_air_is_sent() {
     let end = node::run(&cfg, &mut station, &rx, &mut session, &mut svc).unwrap_err();
     assert!(end.to_string().contains("audio source ended"));
 
-    assert_eq!(svc.sent, [("MOM".to_string(), "RUNNING LATE HOME SUN".to_string())]);
+    assert_eq!(
+        svc.sent,
+        [("MOM".to_string(), "RUNNING LATE HOME SUN".to_string())]
+    );
     let keyed = station.rig().lock().unwrap().sent.join(" ");
-    assert_eq!(keyed, "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K SENT 43 DE N0DE K");
+    assert_eq!(
+        keyed,
+        "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K SENT 43 DE N0DE K"
+    );
     assert_eq!(session.last_seq(), 43);
 }

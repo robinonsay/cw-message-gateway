@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The real [`Services`]: SMTP for outbound, the shared inbox for inbound, NWS for weather.
@@ -25,9 +28,15 @@ pub struct LiveServices {
 impl Services for LiveServices {
     fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
         let mailer = self.mailer.as_ref().ok_or("email is not configured")?;
-        let contact =
-            self.cfg.contacts.iter().find(|c| c.name == dest).ok_or_else(|| format!("no contact {dest}"))?;
-        mailer.send(&contact.address, text).map_err(|e| format!("{e:#}"))
+        let contact = self
+            .cfg
+            .contacts
+            .iter()
+            .find(|c| c.name == dest)
+            .ok_or_else(|| format!("no contact {dest}"))?;
+        mailer
+            .send(&contact.address, text)
+            .map_err(|e| format!("{e:#}"))
     }
 
     fn ready_messages(&mut self) -> Vec<Message> {
@@ -71,6 +80,9 @@ impl Services for OfflineServices {
     }
 
     fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-        Ok(format!("{} TDA SUNNY HI 95 WIND W 10 TNGT CLEAR LO 60", grid.unwrap_or("HOME")))
+        Ok(format!(
+            "{} TDA SUNNY HI 95 WIND W 10 TNGT CLEAR LO 60",
+            grid.unwrap_or("HOME")
+        ))
     }
 }

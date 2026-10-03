@@ -38,7 +38,10 @@ mod tests {
 
     #[test]
     fn sanitizes() {
-        assert_eq!(sanitize("Hi Robin!  Dinner @ 6 & bring 2% milk 😀\nok?"), "HI ROBIN. DINNER @ 6 AND BRING 2 PCT MILK OK?");
+        assert_eq!(
+            sanitize("Hi Robin!  Dinner @ 6 & bring 2% milk 😀\nok?"),
+            "HI ROBIN. DINNER @ 6 AND BRING 2 PCT MILK OK?"
+        );
         assert_eq!(sanitize("it’s—fine"), "IT'S-FINE");
     }
 }

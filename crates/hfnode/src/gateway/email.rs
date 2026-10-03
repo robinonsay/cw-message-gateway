@@ -13,7 +13,8 @@ use mail_parser::MessageParser;
 use std::sync::{Arc, Mutex};
 
 fn password(cfg: &Email) -> Result<String> {
-    std::env::var(&cfg.password_env).with_context(|| format!("environment variable {} is not set", cfg.password_env))
+    std::env::var(&cfg.password_env)
+        .with_context(|| format!("environment variable {} is not set", cfg.password_env))
 }
 
 pub struct Mailer {
@@ -68,7 +69,9 @@ pub fn contact_for<'c>(contacts: &'c [Contact], from_addr: &str) -> Option<&'c C
             return true;
         }
         let (cl, fl) = (local(&addr), local(&from));
-        cl.chars().all(|ch| ch.is_ascii_digit()) && cl.len() >= 10 && digits(&fl).ends_with(&cl[cl.len() - 10..])
+        cl.chars().all(|ch| ch.is_ascii_digit())
+            && cl.len() >= 10
+            && digits(&fl).ends_with(&cl[cl.len() - 10..])
     })
 }
 
@@ -90,7 +93,10 @@ pub fn strip_reply(body: &str) -> String {
         }
         out.push(t);
     }
-    out.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    out.join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Fetch unseen mail from contacts into the inbox. Mail from anyone else is left
@@ -100,7 +106,9 @@ pub fn poll_imap(cfg: &Email, contacts: &[Contact], inbox: &Arc<Mutex<Inbox>>) -
         .tls_kind(imap::TlsKind::Rust)
         .connect()
         .context("IMAP connect")?;
-    let mut session = client.login(&cfg.username, password(cfg)?).map_err(|(e, _)| anyhow!("IMAP login: {e}"))?;
+    let mut session = client
+        .login(&cfg.username, password(cfg)?)
+        .map_err(|(e, _)| anyhow!("IMAP login: {e}"))?;
     session.select("INBOX")?;
     let uids = session.uid_search("UNSEEN")?;
     let mut added = 0;
@@ -108,14 +116,26 @@ pub fn poll_imap(cfg: &Email, contacts: &[Contact], inbox: &Arc<Mutex<Inbox>>) -
         let fetches = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
         for f in fetches.iter() {
             let Some(raw) = f.body() else { continue };
-            let Some(parsed) = MessageParser::default().parse(raw) else { continue };
-            let from = parsed.from().and_then(|a| a.first()).and_then(|a| a.address()).unwrap_or("").to_string();
-            let Some(contact) = contact_for(contacts, &from) else { continue };
+            let Some(parsed) = MessageParser::default().parse(raw) else {
+                continue;
+            };
+            let from = parsed
+                .from()
+                .and_then(|a| a.first())
+                .and_then(|a| a.address())
+                .unwrap_or("")
+                .to_string();
+            let Some(contact) = contact_for(contacts, &from) else {
+                continue;
+            };
             let text = strip_reply(&parsed.body_text(0).unwrap_or_default());
             if text.is_empty() {
                 continue;
             }
-            let source = parsed.message_id().map(str::to_string).unwrap_or_else(|| format!("uid:{uid}"));
+            let source = parsed
+                .message_id()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("uid:{uid}"));
             let mut ib = inbox.lock().map_err(|_| anyhow!("inbox lock poisoned"))?;
             if ib.add(&contact.name, &source, &text, super::unix_now())? {
                 added += 1;
@@ -143,11 +163,25 @@ mod tests {
     #[test]
     fn matches_contacts_including_sms_gateway_replies() {
         let contacts = vec![
-            Contact { name: "MOM".into(), address: "5551234567@vtext.com".into() },
-            Contact { name: "BOB".into(), address: "Bob@Example.com".into() },
+            Contact {
+                name: "MOM".into(),
+                address: "5551234567@vtext.com".into(),
+            },
+            Contact {
+                name: "BOB".into(),
+                address: "Bob@Example.com".into(),
+            },
         ];
-        assert_eq!(contact_for(&contacts, "bob@example.com").unwrap().name, "BOB");
-        assert_eq!(contact_for(&contacts, "15551234567@vzwpix.com").unwrap().name, "MOM");
+        assert_eq!(
+            contact_for(&contacts, "bob@example.com").unwrap().name,
+            "BOB"
+        );
+        assert_eq!(
+            contact_for(&contacts, "15551234567@vzwpix.com")
+                .unwrap()
+                .name,
+            "MOM"
+        );
         assert!(contact_for(&contacts, "spam@example.net").is_none());
     }
 }

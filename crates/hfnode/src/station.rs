@@ -117,8 +117,13 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     fn spawn_watchdog(&self) {
-        let (rig, since, fired, stop, max) =
-            (self.rig.clone(), self.keying_since.clone(), self.watchdog_fired.clone(), self.stop.clone(), self.cfg.max_key);
+        let (rig, since, fired, stop, max) = (
+            self.rig.clone(),
+            self.keying_since.clone(),
+            self.watchdog_fired.clone(),
+            self.stop.clone(),
+            self.cfg.max_key,
+        );
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(250));
@@ -144,7 +149,12 @@ impl<R: Rig + 'static> Station<R> {
         log::info!("health: {event} {value}");
         if let Some(path) = &self.health_log {
             let line = format!("{},{event},{value}\n", crate::gateway::unix_now());
-            if let Err(e) = OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(line.as_bytes())) {
+            if let Err(e) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(line.as_bytes()))
+            {
                 log::warn!("cannot write health log: {e}");
             }
         }
@@ -218,7 +228,10 @@ impl<R: Rig + 'static> Station<R> {
                     self.health("swr", &format!("{swr:.2}"));
                     if swr > self.cfg.swr_limit {
                         self.swr_lockout = true;
-                        log::error!("SWR {swr:.2} above {:.1}: silent until next window", self.cfg.swr_limit);
+                        log::error!(
+                            "SWR {swr:.2} above {:.1}: silent until next window",
+                            self.cfg.swr_limit
+                        );
                         return Err(TxError::HighSwr(swr));
                     }
                 }
@@ -284,7 +297,9 @@ mod tests {
     }
 
     fn tx(segments: &[&str]) -> Transmission {
-        Transmission { segments: segments.iter().map(|s| s.to_string()).collect() }
+        Transmission {
+            segments: segments.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -292,23 +307,41 @@ mod tests {
         let mut st = Station::new(fast_rig(), cfg(), None);
         st.configure().unwrap();
         st.start_window().unwrap();
-        st.transmit(&tx(&["R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K", "SECOND = B"])).unwrap();
+        st.transmit(&tx(&[
+            "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K",
+            "SECOND = B",
+        ]))
+        .unwrap();
         let rig = st.rig();
         let r = rig.lock().unwrap();
         assert_eq!(r.power_watts, 40);
         assert!(r.cw_mode && r.break_in);
         assert_eq!(r.tunes, 1);
         assert!(r.sent.iter().all(|p| p.len() <= civ::MAX_CW_CHARS));
-        assert_eq!(r.sent.join(" "), "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K SECOND = B");
+        assert_eq!(
+            r.sent.join(" "),
+            "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K SECOND = B"
+        );
     }
 
     #[test]
     fn high_swr_locks_out_until_next_window() {
-        let mut st = Station::new({ let mut r = fast_rig(); r.swr = 3.5; r }, cfg(), None);
+        let mut st = Station::new(
+            {
+                let mut r = fast_rig();
+                r.swr = 3.5;
+                r
+            },
+            cfg(),
+            None,
+        );
         st.configure().unwrap();
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
-        assert!(!st.rig().lock().unwrap().is_transmitting().unwrap(), "back on receive");
+        assert!(
+            !st.rig().lock().unwrap().is_transmitting().unwrap(),
+            "back on receive"
+        );
         st.rig().lock().unwrap().swr = 1.2;
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
@@ -332,6 +365,9 @@ mod tests {
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
         let text = std::fs::read_to_string(log).unwrap();
-        assert!(text.contains(",tune,") && text.contains(",swr,1.30"), "{text}");
+        assert!(
+            text.contains(",tune,") && text.contains(",swr,1.30"),
+            "{text}"
+        );
     }
 }

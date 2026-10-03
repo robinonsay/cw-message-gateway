@@ -303,7 +303,9 @@ impl Decoder {
     /// Estimate the dit length from mark lengths with 1-D 2-means on log length.
     fn estimate_dit(&self, marks: &[f32], current: f32) -> f32 {
         let logs: Vec<f32> = marks.iter().map(|m| m.max(1.0).ln()).collect();
-        let (lo, hi) = logs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        let (lo, hi) = logs
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         let min_dit = 1200.0 / self.cfg.max_wpm;
         let max_dit = 1200.0 / self.cfg.min_wpm;
         if logs.len() >= 3 && hi - lo > 1.8f32.ln() {
@@ -323,7 +325,11 @@ impl Decoder {
         } else if let Some(&last) = marks.last() {
             // One population so far: decide whether it is dits or dahs relative to
             // the current estimate and nudge towards it.
-            let est = if last < 2.0 * current { last } else { last / 3.0 };
+            let est = if last < 2.0 * current {
+                last
+            } else {
+                last / 3.0
+            };
             (0.7 * current + 0.3 * est).clamp(min_dit, max_dit)
         } else {
             current
@@ -418,7 +424,9 @@ mod tests {
         for i in 1..=a.len() {
             let mut cur = vec![i; b.len() + 1];
             for j in 1..=b.len() {
-                cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
+                cur[j] = (prev[j] + 1)
+                    .min(cur[j - 1] + 1)
+                    .min(prev[j - 1] + usize::from(a[i - 1] != b[j - 1]));
             }
             prev = cur;
         }
@@ -431,7 +439,10 @@ mod tests {
             let k = Keyer::new(SR, 600.0, wpm);
             let (text, est) = decode(&k.render(MSG, 300.0), DecoderConfig::new(SR, 600.0));
             assert_eq!(text, MSG, "at {wpm} wpm");
-            assert!((est - wpm).abs() / wpm < 0.15, "estimated {est} wpm for {wpm}");
+            assert!(
+                (est - wpm).abs() / wpm < 0.15,
+                "estimated {est} wpm for {wpm}"
+            );
         }
     }
 
@@ -442,7 +453,10 @@ mod tests {
         for (seed, snr) in [(1, 0.0), (2, -3.0), (3, -3.0)] {
             let k = Keyer::new(SR, 600.0, 18.0);
             let mut audio = k.render(MSG, 500.0);
-            Noise::new(seed).add(&mut audio, Noise::sigma_for_snr(k.amplitude, snr, SR, 2500.0));
+            Noise::new(seed).add(
+                &mut audio,
+                Noise::sigma_for_snr(k.amplitude, snr, SR, 2500.0),
+            );
             let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
             let errs = char_errors(&text, MSG);
             assert!(errs <= 2, "SNR {snr} dB: {errs} errors in {text:?}");
@@ -456,7 +470,10 @@ mod tests {
         k.gap_stretch = 1.4;
         k.seed = 7;
         let mut audio = k.render(MSG, 500.0);
-        Noise::new(9).add(&mut audio, Noise::sigma_for_snr(k.amplitude, 3.0, SR, 2500.0));
+        Noise::new(9).add(
+            &mut audio,
+            Noise::sigma_for_snr(k.amplitude, 3.0, SR, 2500.0),
+        );
         let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
         let errs = char_errors(&text, MSG);
         assert!(errs <= 3, "{errs} errors in {text:?}");

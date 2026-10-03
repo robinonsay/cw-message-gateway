@@ -107,7 +107,12 @@ pub struct Schedule {
 
 impl Default for Schedule {
     fn default() -> Self {
-        Self { always: false, every_minutes: default_every(), offset_minutes: 0, window_minutes: default_window() }
+        Self {
+            always: false,
+            every_minutes: default_every(),
+            offset_minutes: 0,
+            window_minutes: default_window(),
+        }
     }
 }
 
@@ -184,7 +189,12 @@ pub struct Filter {
 
 impl Default for Filter {
     fn default() -> Self {
-        Self { enabled: true, api_key_env: default_api_key_env(), model: default_model(), extra_policy: String::new() }
+        Self {
+            enabled: true,
+            api_key_env: default_api_key_env(),
+            model: default_model(),
+            extra_policy: String::new(),
+        }
     }
 }
 
@@ -263,8 +273,10 @@ fn default_model() -> String {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let cfg: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -287,13 +299,24 @@ impl Config {
             bail!("station.swr_limit must be between 1.1 and 3.0");
         }
         for c in &self.contacts {
-            if c.name.is_empty() || !c.name.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()) {
-                bail!("contact name {:?} must be uppercase letters and digits", c.name);
+            if c.name.is_empty()
+                || !c
+                    .name
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+            {
+                bail!(
+                    "contact name {:?} must be uppercase letters and digits",
+                    c.name
+                );
             }
         }
         if let Some(w) = &self.weather {
             if !protocol::is_grid(&w.default_grid) {
-                bail!("weather.default_grid {:?} is not a grid square", w.default_grid);
+                bail!(
+                    "weather.default_grid {:?} is not a grid square",
+                    w.default_grid
+                );
             }
         }
         if self.schedule.window_minutes > self.schedule.every_minutes {
@@ -321,12 +344,20 @@ mod tests {
 
     #[test]
     fn schedule_windows() {
-        let s = Schedule { always: false, every_minutes: 60, offset_minutes: 0, window_minutes: 10 };
+        let s = Schedule {
+            always: false,
+            every_minutes: 60,
+            offset_minutes: 0,
+            window_minutes: 10,
+        };
         assert!(s.is_open(0));
         assert!(s.is_open(9 * 60 + 59));
         assert!(!s.is_open(10 * 60));
         assert!(s.is_open(3600 * 5 + 30));
-        let s = Schedule { offset_minutes: 30, ..s };
+        let s = Schedule {
+            offset_minutes: 30,
+            ..s
+        };
         assert!(!s.is_open(0));
         assert!(s.is_open(35 * 60));
         assert!(Schedule { always: true, ..s }.is_open(12345));

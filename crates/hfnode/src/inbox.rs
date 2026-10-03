@@ -54,7 +54,9 @@ impl Inbox {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let data = match fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?,
+            Ok(s) => {
+                serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -80,7 +82,13 @@ impl Inbox {
     }
 
     /// Add a received message. Returns false if `source_id` was already seen.
-    pub fn add(&mut self, from: &str, source_id: &str, raw: &str, received_unix: u64) -> Result<bool> {
+    pub fn add(
+        &mut self,
+        from: &str,
+        source_id: &str,
+        raw: &str,
+        received_unix: u64,
+    ) -> Result<bool> {
         if self.data.messages.iter().any(|m| m.source_id == source_id) {
             return Ok(false);
         }
@@ -99,7 +107,12 @@ impl Inbox {
     }
 
     pub fn unscreened(&self) -> Vec<Message> {
-        self.data.messages.iter().filter(|m| m.state == State::Unscreened).cloned().collect()
+        self.data
+            .messages
+            .iter()
+            .filter(|m| m.state == State::Unscreened)
+            .cloned()
+            .collect()
     }
 
     pub fn set_screened(&mut self, id: u64, text: &str) -> Result<()> {
@@ -113,7 +126,13 @@ impl Inbox {
 
     /// Screened messages not yet read, oldest first.
     pub fn ready(&self) -> Vec<Message> {
-        let mut v: Vec<Message> = self.data.messages.iter().filter(|m| m.state == State::Ready).cloned().collect();
+        let mut v: Vec<Message> = self
+            .data
+            .messages
+            .iter()
+            .filter(|m| m.state == State::Ready)
+            .cloned()
+            .collect();
         v.sort_by_key(|m| (m.received_unix, m.id));
         v
     }
@@ -124,9 +143,9 @@ impl Inbox {
                 m.state = State::Read;
             }
         }
-        self.data
-            .messages
-            .retain(|m| m.state != State::Read || now_unix.saturating_sub(m.received_unix) < KEEP_READ_SECS);
+        self.data.messages.retain(|m| {
+            m.state != State::Read || now_unix.saturating_sub(m.received_unix) < KEEP_READ_SECS
+        });
         self.save()
     }
 }
@@ -143,12 +162,18 @@ mod tests {
         assert!(inbox.add("MOM", "<a@x>", "Drive safe!", 100).unwrap());
         assert!(!inbox.add("MOM", "<a@x>", "Drive safe!", 100).unwrap());
         assert!(inbox.add("BOB", "<b@x>", "ok", 50).unwrap());
-        assert!(inbox.ready().is_empty(), "unscreened messages are never ready");
+        assert!(
+            inbox.ready().is_empty(),
+            "unscreened messages are never ready"
+        );
         for m in inbox.unscreened() {
             inbox.set_screened(m.id, &m.raw.to_uppercase()).unwrap();
         }
         let ready = Inbox::open(&path).unwrap().ready();
-        assert_eq!(ready.iter().map(|m| m.from.as_str()).collect::<Vec<_>>(), ["BOB", "MOM"]);
+        assert_eq!(
+            ready.iter().map(|m| m.from.as_str()).collect::<Vec<_>>(),
+            ["BOB", "MOM"]
+        );
         inbox.mark_read(&[ready[0].id], 200).unwrap();
         assert_eq!(inbox.ready().len(), 1);
         // Read messages are pruned after 30 days.
