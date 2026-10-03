@@ -1,0 +1,66 @@
+# Example configuration for hfnode. Copy to /etc/hfnode/hfnode.toml and edit.
+# Secrets (email password, API key) come from environment variables, never this file.
+
+state_dir = "/var/lib/hfnode"
+pending_timeout_secs = 600
+
+[station]
+node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
+field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
+frequency_hz = 7_030_000          # the agreed listening frequency
+serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port
+baud = 115200                     # must match the radio's CI-V USB baud rate setting
+civ_address = 0x94                # IC-7300 default CI-V address
+power_watts = 40                  # 30-50 W per the design
+key_speed_wpm = 18
+max_key_seconds = 45              # software watchdog; keep below the hardware PTT timer
+swr_limit = 2.0
+chunk_chars = 60
+chunk_pause_ms = 2000
+
+[audio]
+device = "plughw:CARD=CODEC,DEV=0"  # the IC-7300's USB audio codec (see `arecord -L`)
+sample_rate = 8000
+pitch_hz = 600                    # the radio's CW pitch setting
+end_of_message_ms = 3000
+bandwidth_hz = 150
+
+[auth]
+key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
+
+[schedule]
+always = false
+every_minutes = 60                # first ten minutes of every hour (UTC)
+offset_minutes = 0
+window_minutes = 10
+
+[email]
+smtp_host = "smtp.example.com"
+smtp_port = 465                   # implicit TLS
+imap_host = "imap.example.com"
+imap_port = 993
+username = "hfnode@example.com"
+password_env = "HFNODE_EMAIL_PASSWORD"
+from_address = "hfnode@example.com"
+poll_secs = 300
+
+# Contacts the field operator can name in TX. For SMS use the carrier's
+# email-to-SMS address; replies from the phone come back by email.
+[[contacts]]
+name = "MOM"
+address = "5551234567@vtext.com"
+
+[[contacts]]
+name = "BOB"
+address = "bob@example.com"
+
+[weather]
+default_grid = "DL89"             # e.g. Big Bend
+user_agent = "hfnode (you@example.com)"
+periods = 2
+
+[filter]
+enabled = true
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-opus-5-5"
+extra_policy = ""

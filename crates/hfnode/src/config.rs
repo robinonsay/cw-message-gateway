@@ -1,0 +1,334 @@
+//! Node configuration, read from a TOML file. See `hfnode.example.toml`.
+
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub station: Station,
+    pub audio: Audio,
+    pub auth: Auth,
+    #[serde(default)]
+    pub schedule: Schedule,
+    /// Where `last_seq`, the inbox and the radio health log are kept.
+    pub state_dir: PathBuf,
+    /// A pending transaction is forgotten after this long without `OK` or `NO`.
+    #[serde(default = "default_pending_timeout")]
+    pub pending_timeout_secs: u64,
+    pub email: Option<Email>,
+    #[serde(default)]
+    pub contacts: Vec<Contact>,
+    pub weather: Option<Weather>,
+    #[serde(default)]
+    pub filter: Filter,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Station {
+    /// The node's own callsign, sent as `DE <call>` on every transmission.
+    pub node_call: String,
+    /// Field callsigns allowed to open transactions.
+    pub field_calls: Vec<String>,
+    /// The agreed listening frequency in Hz (dial frequency in CW mode).
+    pub frequency_hz: u64,
+    pub serial_port: String,
+    #[serde(default = "default_baud")]
+    pub baud: u32,
+    /// The radio's CI-V address.
+    #[serde(default = "default_civ_address")]
+    pub civ_address: u8,
+    /// RF output power in watts. The design calls for 30-50 W.
+    #[serde(default = "default_power")]
+    pub power_watts: u32,
+    /// Keyer speed for the node's own transmissions.
+    #[serde(default = "default_key_wpm")]
+    pub key_speed_wpm: u32,
+    /// Hard limit on one continuous keying run; the software watchdog forces receive
+    /// after this. Keep it below the hardware PTT timer.
+    #[serde(default = "default_max_key_secs")]
+    pub max_key_seconds: u64,
+    /// Stop transmitting for the rest of the window above this SWR.
+    #[serde(default = "default_swr_limit")]
+    pub swr_limit: f32,
+    /// Longest chunk of a long transmission, in characters.
+    #[serde(default = "default_chunk_chars")]
+    pub chunk_chars: usize,
+    /// Pause between chunks, in milliseconds.
+    #[serde(default = "default_chunk_pause_ms")]
+    pub chunk_pause_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Audio {
+    /// ALSA capture device for the radio's USB audio codec, as passed to `arecord -D`.
+    #[serde(default = "default_audio_device")]
+    pub device: String,
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    /// The receiver's CW pitch, in Hz.
+    #[serde(default = "default_pitch")]
+    pub pitch_hz: f32,
+    /// Silence after which a field transmission is considered finished.
+    #[serde(default = "default_end_of_message_ms")]
+    pub end_of_message_ms: u64,
+    /// Decoder filter bandwidth in Hz.
+    #[serde(default = "default_bandwidth")]
+    pub bandwidth_hz: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+    /// File holding the secret key. Generate with `hfnode keygen`.
+    pub key_file: PathBuf,
+    /// Code alphabet; defaults to A-Z.
+    pub alphabet: Option<String>,
+}
+
+/// When the node listens. Outside a window it neither decodes nor transmits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    /// Listen all the time, ignoring the fields below.
+    #[serde(default)]
+    pub always: bool,
+    /// Windows repeat with this period, aligned to the top of the UTC hour.
+    #[serde(default = "default_every")]
+    pub every_minutes: u32,
+    #[serde(default)]
+    pub offset_minutes: u32,
+    #[serde(default = "default_window")]
+    pub window_minutes: u32,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self { always: false, every_minutes: default_every(), offset_minutes: 0, window_minutes: default_window() }
+    }
+}
+
+impl Schedule {
+    /// Whether `unix_secs` falls inside a listening window.
+    pub fn is_open(&self, unix_secs: u64) -> bool {
+        if self.always {
+            return true;
+        }
+        let minute = (unix_secs / 60) % (24 * 60);
+        let period = self.every_minutes.max(1) as u64;
+        let into = (minute + period * 24 * 60 - self.offset_minutes as u64) % period;
+        into < self.window_minutes as u64
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Email {
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    pub imap_host: String,
+    #[serde(default = "default_imap_port")]
+    pub imap_port: u16,
+    pub username: String,
+    /// Environment variable holding the password (never put it in the file).
+    #[serde(default = "default_password_env")]
+    pub password_env: String,
+    pub from_address: String,
+    #[serde(default = "default_poll_secs")]
+    pub poll_secs: u64,
+}
+
+/// Someone the field operator can message by name. SMS goes through the carrier's
+/// email-to-SMS gateway (for example `5551234567@vtext.com`), so replies from a
+/// phone arrive back by email too.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Contact {
+    /// Name as sent in CW, e.g. `MOM`. Letters and digits only.
+    pub name: String,
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Weather {
+    /// Grid square used when `WX` is sent without one, e.g. where the field
+    /// operator is headed.
+    pub default_grid: String,
+    /// api.weather.gov asks for a contact in the User-Agent.
+    pub user_agent: String,
+    /// How many forecast periods to send (each is about half a day).
+    #[serde(default = "default_periods")]
+    pub periods: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Filter {
+    /// Screen inbound messages before they are keyed on air. Turning this off means
+    /// third-party text is transmitted unreviewed.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// Extra policy text appended to the built-in instructions.
+    #[serde(default)]
+    pub extra_policy: String,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Self { enabled: true, api_key_env: default_api_key_env(), model: default_model(), extra_policy: String::new() }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+fn default_pending_timeout() -> u64 {
+    600
+}
+fn default_baud() -> u32 {
+    115_200
+}
+fn default_civ_address() -> u8 {
+    0x94
+}
+fn default_power() -> u32 {
+    40
+}
+fn default_key_wpm() -> u32 {
+    18
+}
+fn default_max_key_secs() -> u64 {
+    45
+}
+fn default_swr_limit() -> f32 {
+    2.0
+}
+fn default_chunk_chars() -> usize {
+    60
+}
+fn default_chunk_pause_ms() -> u64 {
+    2000
+}
+fn default_audio_device() -> String {
+    "plughw:CARD=CODEC,DEV=0".into()
+}
+fn default_sample_rate() -> u32 {
+    8000
+}
+fn default_pitch() -> f32 {
+    600.0
+}
+fn default_end_of_message_ms() -> u64 {
+    3000
+}
+fn default_bandwidth() -> f32 {
+    150.0
+}
+fn default_every() -> u32 {
+    60
+}
+fn default_window() -> u32 {
+    10
+}
+fn default_smtp_port() -> u16 {
+    465
+}
+fn default_imap_port() -> u16 {
+    993
+}
+fn default_password_env() -> String {
+    "HFNODE_EMAIL_PASSWORD".into()
+}
+fn default_poll_secs() -> u64 {
+    300
+}
+fn default_periods() -> usize {
+    2
+}
+fn default_api_key_env() -> String {
+    "ANTHROPIC_API_KEY".into()
+}
+fn default_model() -> String {
+    "claude-opus-5-5".into()
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let s = &self.station;
+        if s.node_call.trim().is_empty() {
+            bail!("station.node_call is required");
+        }
+        if s.field_calls.is_empty() {
+            bail!("station.field_calls must list at least one callsign");
+        }
+        if !(1..=100).contains(&s.power_watts) {
+            bail!("station.power_watts must be 1-100");
+        }
+        if s.max_key_seconds == 0 || s.max_key_seconds > 120 {
+            bail!("station.max_key_seconds must be 1-120");
+        }
+        if !(1.1..=3.0).contains(&s.swr_limit) {
+            bail!("station.swr_limit must be between 1.1 and 3.0");
+        }
+        for c in &self.contacts {
+            if c.name.is_empty() || !c.name.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()) {
+                bail!("contact name {:?} must be uppercase letters and digits", c.name);
+            }
+        }
+        if let Some(w) = &self.weather {
+            if !protocol::is_grid(&w.default_grid) {
+                bail!("weather.default_grid {:?} is not a grid square", w.default_grid);
+            }
+        }
+        if self.schedule.window_minutes > self.schedule.every_minutes {
+            bail!("schedule.window_minutes is longer than schedule.every_minutes");
+        }
+        Ok(())
+    }
+
+    pub fn contact_names(&self) -> Vec<String> {
+        self.contacts.iter().map(|c| c.name.clone()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config_parses() {
+        let text = include_str!("../../../hfnode.example.toml");
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.station.civ_address, 0x94);
+    }
+
+    #[test]
+    fn schedule_windows() {
+        let s = Schedule { always: false, every_minutes: 60, offset_minutes: 0, window_minutes: 10 };
+        assert!(s.is_open(0));
+        assert!(s.is_open(9 * 60 + 59));
+        assert!(!s.is_open(10 * 60));
+        assert!(s.is_open(3600 * 5 + 30));
+        let s = Schedule { offset_minutes: 30, ..s };
+        assert!(!s.is_open(0));
+        assert!(s.is_open(35 * 60));
+        assert!(Schedule { always: true, ..s }.is_open(12345));
+    }
+}
