@@ -70,10 +70,35 @@ impl Chunk {
     }
 }
 
+/// Most chunks in one transmission: one per letter A to Z.
+pub const MAX_CHUNKS: usize = 26;
+
 /// Split `text` into chunks of at most `max_chars` (on word boundaries where possible),
-/// lettered A, B, C... At most 26 chunks are produced; anything beyond is dropped and
-/// the last chunk says `MORE`.
+/// lettered A, B, C... At most [`MAX_CHUNKS`] chunks are produced; anything beyond is
+/// dropped and the last chunk says `MORE`. Use [`chunk_count`] first to avoid that.
 pub fn chunk(text: &str, max_chars: usize) -> Vec<Chunk> {
+    let mut pieces = pieces(text, max_chars);
+    if pieces.len() > MAX_CHUNKS {
+        pieces.truncate(MAX_CHUNKS);
+        pieces[MAX_CHUNKS - 1].push_str(" MORE");
+    }
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| Chunk {
+            letter: (b'A' + i as u8) as char,
+            text,
+        })
+        .collect()
+}
+
+/// How many chunks [`chunk`] would need for `text`, without the [`MAX_CHUNKS`] cap.
+/// Anything above [`MAX_CHUNKS`] would be cut off.
+pub fn chunk_count(text: &str, max_chars: usize) -> usize {
+    pieces(text, max_chars).len()
+}
+
+fn pieces(text: &str, max_chars: usize) -> Vec<String> {
     let max_chars = max_chars.max(8);
     let text = sanitize(text);
     let mut pieces: Vec<String> = Vec::new();
@@ -99,18 +124,7 @@ pub fn chunk(text: &str, max_chars: usize) -> Vec<Chunk> {
     if !cur.is_empty() {
         pieces.push(cur);
     }
-    if pieces.len() > 26 {
-        pieces.truncate(26);
-        pieces[25].push_str(" MORE");
-    }
     pieces
-        .into_iter()
-        .enumerate()
-        .map(|(i, text)| Chunk {
-            letter: (b'A' + i as u8) as char,
-            text,
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -148,5 +162,15 @@ mod tests {
             long.iter().map(|c| c.text.len()).collect::<Vec<_>>(),
             [10, 10, 6]
         );
+    }
+
+    #[test]
+    fn counts_chunks_past_the_cap() {
+        let text = "ABCDEFGH ".repeat(30);
+        assert_eq!(chunk_count(&text, 8), 30);
+        let c = chunk(&text, 8);
+        assert_eq!(c.len(), MAX_CHUNKS);
+        assert!(c[MAX_CHUNKS - 1].text.ends_with(" MORE"));
+        assert_eq!(chunk_count("", 8), 0);
     }
 }

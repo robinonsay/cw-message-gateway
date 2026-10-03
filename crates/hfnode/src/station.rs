@@ -299,6 +299,7 @@ mod tests {
     fn tx(segments: &[&str]) -> Transmission {
         Transmission {
             segments: segments.iter().map(|s| s.to_string()).collect(),
+            read_ids: Vec::new(),
         }
     }
 

@@ -217,8 +217,11 @@ pub fn run<R: Rig + 'static>(
                 Outcome::Silent(why) => log::info!("no reply: {why}"),
                 Outcome::Transmit(t) => {
                     log::info!("sending: {}", t.text());
-                    if let Err(e) = station.transmit(&t) {
-                        log::error!("transmit failed: {e}");
+                    match station.transmit(&t) {
+                        // Only messages that actually went out are marked read.
+                        Ok(()) if !t.read_ids.is_empty() => svc.mark_read(&t.read_ids),
+                        Ok(()) => {}
+                        Err(e) => log::error!("transmit failed: {e}"),
                     }
                     // Discard whatever was captured while transmitting.
                     drain(audio);
