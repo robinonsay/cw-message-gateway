@@ -250,7 +250,10 @@ fn sim_add(ib: &mut Inbox, name: &str, text: &str, now: u64) -> Result<()> {
 
 fn decode(file: &Path, pitch: f32) -> Result<()> {
     let (samples, sr) = audio::read_wav(file)?;
-    let mut d = cw::Decoder::new(cw::DecoderConfig::new(sr, pitch));
+    let dc = cw::DecoderConfig::new(sr, pitch);
+    dc.validate()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+    let mut d = cw::Decoder::new(dc);
     let mut ev = d.push(&samples);
     ev.extend(d.flush());
     println!("{}", cw::events_to_text(&ev));
