@@ -61,6 +61,8 @@ pub struct StationConfig {
     /// Extra time allowed beyond the keying time and break-in delay before the
     /// transmitter is declared stuck.
     pub stuck_margin: Duration,
+    /// Longest a tuner cycle may take before it is abandoned and receive forced.
+    pub tune_timeout: Duration,
     pub poll: Duration,
 }
 
@@ -82,6 +84,8 @@ impl StationConfig {
             // the 3 s stuck margin covers.
             break_in_delay_dots: 10.0,
             stuck_margin: Duration::from_secs(3),
+            // The manual's tuner takes "2~3 seconds" (p. 11-2).
+            tune_timeout: Duration::from_secs(15),
             poll: Duration::from_millis(100),
         }
     }
@@ -295,7 +299,7 @@ impl<R: Rig + 'static> Station<R> {
         self.with_rig(|r| r.start_tune())?;
         let t0 = Instant::now();
         while self.with_rig(|r| r.tuner_busy())? {
-            if t0.elapsed() > Duration::from_secs(15) {
+            if t0.elapsed() > self.cfg.tune_timeout {
                 self.health("tune", "timeout");
                 self.force_rx()
                     .map_err(|e| RigError::Protocol(e.to_string()))?;
@@ -474,6 +478,7 @@ mod tests {
             swr_min_po: 10.0,
             break_in_delay_dots: 10.0,
             stuck_margin: Duration::from_millis(300),
+            tune_timeout: Duration::from_secs(15),
             poll: Duration::from_millis(2),
         }
     }

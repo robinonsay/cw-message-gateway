@@ -1,0 +1,1961 @@
+//! Closed-loop self-test: a scripted field operator against the whole node and a
+//! byte-level mock IC-7300, with no radio, sound card or network.
+//!
+//! ```text
+//!  operator ──CW audio (Keyer + Noise)──► node::run ──CI-V bytes──► Ic7300 driver
+//!     ▲                                                                 │
+//!     └──────────── text the mock radio actually keyed ◄── civ::mock ◄──┘
+//! ```
+//!
+//! The operator keys its transmissions as audio into the node's audio queue, in
+//! 50 ms blocks, and listens to the mock radio: what it keyed and when it is
+//! sounding. It reacts like a real operator: it waits for the frequency to be quiet,
+//! keys, waits for the node's over, checks a read-back and repeats a transmission
+//! that got no answer. Every scenario ends with the audio source closing, which
+//! makes `node::run` return, and an overall time limit.
+//!
+//! **Time scale.** Everything runs `scale` times faster than real time so a
+//! scenario takes a second or two: the mock radio keys at the scaled speed, the
+//! audio is paced to it, and the station's timing constants are divided by it
+//! ([`TimeScaled`] divides the driver's dot length, the only timing the station
+//! reads from the radio). The CI-V reply timeout, the watchdog tick and the forced
+//! receive retry pause stay in real time, so faults on them take longer in radio
+//! time than they would on the air. The audio is also held back while the node has
+//! not taken what was sent (it is decoding, transmitting or waiting on the radio),
+//! so a slow machine slows the operator down instead of failing scenarios; lower
+//! the scale on a slow machine (`--scale`, or `HFNODE_E2E_SCALE` for the tests).
+//!
+//! Codes come from [`TEST_KEY`], a fixed key for tests only.
+
+use crate::audio::{self, Block, BlockSender};
+use crate::config::Config;
+use crate::inbox::{Message, State as MsgState};
+use crate::node;
+use crate::session::Services;
+use crate::station::{Station, StationConfig};
+use anyhow::{Context, Result};
+use auth::{CodeBook, SeqStore};
+use civ::ic7300::Ic7300;
+use civ::mock::{Fault, Foldback, MockConfig, MockPort, MockRadio, ReplyFault, Report};
+use civ::Rig;
+use cw::{Keyer, Noise};
+use std::collections::VecDeque;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// The key every self-test and test-vector code comes from. For tests only: anyone
+/// can compute its codes, so a node using it accepts anyone.
+pub const TEST_KEY: &[u8] = b"hfnode self-test key: TEST ONLY, never use on the air";
+pub const NODE_CALL: &str = "N0DE";
+pub const FIELD_CALL: &str = "W5XXX";
+/// `last_seq` when a scenario starts: its first open uses line 42.
+pub const START_SEQ: u64 = 41;
+/// Default time scale.
+pub const DEFAULT_SCALE: f32 = 100.0;
+
+const SAMPLE_RATE: u32 = 8000;
+const PITCH_HZ: f32 = 600.0;
+/// 50 ms of audio, as the capture thread delivers it.
+const BLOCK: usize = 400;
+const BLOCK_SECS: f32 = 0.05;
+/// Blocks the node may have queued before the operator waits for it: while the
+/// radio is on transmit, the node's capture queue's 10 s, as on the air; otherwise
+/// 0.4 s.
+const AHEAD_TX: usize = 200;
+const AHEAD: usize = 8;
+/// Seconds of audio. The operator waits this long after the frequency goes quiet
+/// before keying.
+const REACTION: f32 = 2.0;
+/// No reply started this long after the operator's over: the node is silent.
+const NO_REPLY: f32 = 15.0;
+/// An over that stops this long without its `DE <call> K` was cut short.
+const CUT_AFTER: f32 = 8.0;
+/// How often the operator keys a transmission that gets no answer.
+const TRIES: u32 = 3;
+/// Listening after the script, for anything keyed late.
+const TRAIL: f32 = 10.0;
+/// Radio time a scenario may take at most.
+const BUDGET: Duration = Duration::from_secs(1800);
+/// Peak amplitude of the operator's signal and of the radio's sidetone.
+const AMPLITUDE: f32 = 0.5;
+const SIDETONE: f32 = 0.3;
+
+/// The field operator's sending.
+#[derive(Debug, Clone)]
+pub struct Fist {
+    pub wpm: f32,
+    /// Signal-to-noise ratio in 2500 Hz; `None` for no noise at all.
+    pub snr_db: Option<f32>,
+    /// Hand-keying timing jitter, as [`Keyer::jitter`].
+    pub jitter: f32,
+    /// Stretch of character and word gaps, as [`Keyer::gap_stretch`].
+    pub gap_stretch: f32,
+    /// How far off the node's CW pitch the signal is.
+    pub offset_hz: f32,
+    pub seed: u64,
+}
+
+impl Default for Fist {
+    fn default() -> Self {
+        Self {
+            wpm: 18.0,
+            snr_db: Some(15.0),
+            jitter: 0.03,
+            gap_stretch: 1.0,
+            offset_hz: 0.0,
+            seed: 1,
+        }
+    }
+}
+
+/// The node's side: its keyer speed, chunking and what its gateways do.
+#[derive(Debug, Clone)]
+pub struct NodeSetup {
+    pub key_wpm: u32,
+    pub chunk_chars: usize,
+    pub fail_send: bool,
+    pub fail_weather: bool,
+    /// Inbound messages ready to read, as (contact, text).
+    pub inbox: Vec<(String, String)>,
+}
+
+impl Default for NodeSetup {
+    fn default() -> Self {
+        Self {
+            key_wpm: 18,
+            chunk_chars: 60,
+            fail_send: false,
+            fail_weather: false,
+            inbox: Vec::new(),
+        }
+    }
+}
+
+/// The mock radio's setup.
+#[derive(Debug, Clone)]
+pub struct RadioSetup {
+    pub echo: bool,
+    pub swr: f32,
+    pub foldback: Option<Foldback>,
+    pub faults: Vec<Fault>,
+    /// Mix the radio's own keying into the receive audio, as sidetone.
+    pub sidetone: bool,
+}
+
+impl Default for RadioSetup {
+    fn default() -> Self {
+        Self {
+            echo: true,
+            swr: 1.2,
+            foldback: None,
+            faults: Vec::new(),
+            sidetone: false,
+        }
+    }
+}
+
+/// One thing the operator does. In texts, `{n}` is the code for line `n`, and a
+/// trailing ` ~` keys a noise burst (a lone dit) 1.5 s after the over.
+#[derive(Debug, Clone)]
+pub enum Step {
+    /// Key an open and wait for the read-back, repeating the open (exactly, as the
+    /// operating guide says) if none comes. A read-back other than `read_back` is
+    /// answered `NO K` and fails the scenario.
+    Open {
+        text: String,
+        read_back: String,
+    },
+    /// Key `text`. With `Some(over)`, wait for exactly that answer, repeating
+    /// `text` if none comes; with `None`, the node must stay silent.
+    Say {
+        text: String,
+        expect: Option<String>,
+    },
+    /// Key `text` `tries` times; no try may get a complete answer (the node is
+    /// locked out or inhibited). An over cut short is allowed.
+    Unanswered {
+        text: String,
+        tries: u32,
+    },
+    /// The node's next over is lost in QRM: the operator does not copy it.
+    MissNext,
+    /// Radio-side changes.
+    Inject(Fault),
+    SetSwr(f32),
+    /// A hardware PTT timer (or a power cycle) ends a stuck transmit.
+    ClearStuck,
+    /// Seconds of listening.
+    Wait(f32),
+}
+
+/// One of the node's overs, as the radio keyed it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Over {
+    Full(String),
+    /// Stopped part-way: what was keyed is a proper prefix of this text.
+    Cut(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Expect {
+    pub keyed: Vec<Over>,
+    /// Messages the gateway sent, as (contact, text).
+    pub sent: Vec<(String, String)>,
+    /// Inbound message ids marked read.
+    pub read: Vec<u64>,
+    /// Weather requests, by grid.
+    pub weather: Vec<Option<String>>,
+    pub last_seq: u64,
+    /// Transmitting stopped for the rest of the window at the first over cut short.
+    pub lockout: bool,
+    /// The node inhibited transmitting until restart.
+    pub inhibited: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Scenario {
+    pub name: String,
+    pub about: String,
+    pub fist: Fist,
+    pub node: NodeSetup,
+    pub radio: RadioSetup,
+    pub script: Vec<Step>,
+    pub expect: Expect,
+}
+
+/// Pass or fail for one check, with the reason.
+#[derive(Debug, Clone)]
+pub struct Check {
+    pub name: &'static str,
+    pub pass: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub scenario: String,
+    pub checks: Vec<Check>,
+    /// Real time taken.
+    pub wall: Duration,
+    /// Radio time taken.
+    pub radio_time: Duration,
+    /// What the operator sent and heard.
+    pub transcript: Vec<String>,
+}
+
+impl Outcome {
+    pub fn passed(&self) -> bool {
+        !self.checks.is_empty() && self.checks.iter().all(|c| c.pass)
+    }
+
+    /// The failed checks, one line each, or `ok`.
+    pub fn summary(&self) -> String {
+        let failed: Vec<String> = self
+            .checks
+            .iter()
+            .filter(|c| !c.pass)
+            .map(|c| format!("{}: {}", c.name, c.detail))
+            .collect();
+        if failed.is_empty() {
+            "ok".into()
+        } else {
+            failed.join("; ")
+        }
+    }
+
+    /// Every check and the transcript.
+    pub fn render(&self) -> String {
+        let mut s = format!(
+            "{} {} ({:.1} s, {:.0} s radio time)\n",
+            self.scenario,
+            if self.passed() { "PASS" } else { "FAIL" },
+            self.wall.as_secs_f32(),
+            self.radio_time.as_secs_f32()
+        );
+        for c in &self.checks {
+            let _ = writeln!(
+                s,
+                "  [{}] {}: {}",
+                if c.pass { "ok" } else { "FAIL" },
+                c.name,
+                c.detail
+            );
+        }
+        for l in &self.transcript {
+            let _ = writeln!(s, "    {l}");
+        }
+        s
+    }
+}
+
+/// [`Services`] for tests: records what was sent, serves a fixed inbox and canned
+/// weather.
+#[derive(Debug, Default)]
+pub struct FakeServices {
+    pub sent: Vec<(String, String)>,
+    pub inbox: Vec<Message>,
+    /// Ids marked read, each once, in the order first marked.
+    pub read: Vec<u64>,
+    pub weather_calls: Vec<Option<String>>,
+    pub fail_send: bool,
+    pub fail_weather: bool,
+}
+
+impl FakeServices {
+    /// The forecast served for `grid` (the default location is DL89).
+    pub fn forecast(grid: Option<&str>) -> String {
+        format!(
+            "{} TDA SUNNY HI 75 TNGT CLEAR LO 50",
+            grid.unwrap_or("DL89")
+        )
+    }
+}
+
+impl Services for FakeServices {
+    fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+        if self.fail_send {
+            return Err("gateway down".into());
+        }
+        self.sent.push((dest.into(), text.into()));
+        Ok(())
+    }
+
+    fn ready_messages(&mut self) -> Vec<Message> {
+        self.inbox
+            .iter()
+            .filter(|m| m.state == MsgState::Ready)
+            .cloned()
+            .collect()
+    }
+
+    fn mark_read(&mut self, ids: &[u64]) {
+        // Marking is idempotent, and an AGN of an RX result marks the same ones
+        // again (so that a readout whose keying failed is marked when repeated):
+        // record each id once.
+        for id in ids {
+            if !self.read.contains(id) {
+                self.read.push(*id);
+            }
+        }
+        for m in self.inbox.iter_mut().filter(|m| ids.contains(&m.id)) {
+            m.state = MsgState::Read;
+        }
+    }
+
+    fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
+        self.weather_calls.push(grid.map(str::to_string));
+        if self.fail_weather {
+            return Err("no forecast".into());
+        }
+        Ok(Self::forecast(grid))
+    }
+}
+
+/// A [`Rig`] that passes every call to `inner` and divides the keyer's dot length
+/// by the time scale, so that the station times keying to match a time-scaled mock
+/// radio. Nothing else is changed: the driver still sends and parses every byte.
+pub struct TimeScaled<R> {
+    pub inner: R,
+    pub scale: f32,
+}
+
+impl<R: Rig> Rig for TimeScaled<R> {
+    fn frequency(&mut self) -> civ::Result<u64> {
+        self.inner.frequency()
+    }
+    fn set_frequency(&mut self, hz: u64) -> civ::Result<()> {
+        self.inner.set_frequency(hz)
+    }
+    fn set_mode_cw(&mut self) -> civ::Result<()> {
+        self.inner.set_mode_cw()
+    }
+    fn set_rf_power_watts(&mut self, watts: u32) -> civ::Result<()> {
+        self.inner.set_rf_power_watts(watts)
+    }
+    fn set_key_speed(&mut self, wpm: u32) -> civ::Result<()> {
+        self.inner.set_key_speed(wpm)
+    }
+    fn set_break_in(&mut self, on: bool) -> civ::Result<()> {
+        self.inner.set_break_in(on)
+    }
+    fn set_break_in_delay(&mut self, dots: f32) -> civ::Result<()> {
+        self.inner.set_break_in_delay(dots)
+    }
+    fn dot_duration(&mut self) -> civ::Result<Duration> {
+        Ok(self.inner.dot_duration()?.div_f32(self.scale))
+    }
+    fn start_tune(&mut self) -> civ::Result<()> {
+        self.inner.start_tune()
+    }
+    fn tuner_busy(&mut self) -> civ::Result<bool> {
+        self.inner.tuner_busy()
+    }
+    fn read_swr(&mut self) -> civ::Result<f32> {
+        self.inner.read_swr()
+    }
+    fn read_po(&mut self) -> civ::Result<f32> {
+        self.inner.read_po()
+    }
+    fn send_cw(&mut self, text: &str) -> civ::Result<()> {
+        self.inner.send_cw(text)
+    }
+    fn stop_cw(&mut self) -> civ::Result<()> {
+        self.inner.stop_cw()
+    }
+    fn is_transmitting(&mut self) -> civ::Result<bool> {
+        self.inner.is_transmitting()
+    }
+    fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
+        self.inner.set_transmit(tx)
+    }
+}
+
+type NodeRig = TimeScaled<Ic7300<MockPort>>;
+
+/// A scratch directory, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> std::io::Result<Self> {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "hfnode-selftest-{}-{}-{name}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p)?;
+        Ok(Self(p))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A well-mixed 64-bit seed from a few numbers (SplitMix64).
+fn mix(parts: &[u64]) -> u64 {
+    let mut z = 0x9E37_79B9_7F4A_7C15u64;
+    for &p in parts {
+        z = (z ^ p).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+    }
+    z
+}
+
+/// Replace `{n}` with the code for line `n`.
+pub fn with_codes(text: &str, book: &CodeBook) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find('{') {
+        let Some(j) = rest[i..].find('}') else { break };
+        out.push_str(&rest[..i]);
+        match rest[i + 1..i + j].parse::<u64>() {
+            Ok(n) => out.push_str(&book.code(n)),
+            Err(_) => out.push_str(&rest[i..=i + j]),
+        }
+        rest = &rest[i + j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What the operator made of the node's next over.
+#[derive(Debug)]
+enum Heard {
+    Over(String),
+    Cut(String),
+    Nothing,
+}
+
+/// The operator, on the air: the audio it puts into the node and what it hears
+/// from the mock radio.
+struct Air {
+    radio: MockRadio,
+    tx: Option<BlockSender>,
+    book: CodeBook,
+    fist: Fist,
+    sigma: f32,
+    sidetone: bool,
+    block_real: Duration,
+    next_due: Instant,
+    deadline: Instant,
+    /// Blocks sent so far: the operator's clock.
+    blocks: u64,
+    /// The operator's own audio still to send.
+    keying: VecDeque<f32>,
+    /// Inside a transmission (lead-in included): its number and block count, which
+    /// seed the noise, so the audio of each transmission does not depend on timing.
+    tx_index: u64,
+    in_tx: bool,
+    tx_block: u64,
+    /// Keyer messages already heard (or missed).
+    heard: usize,
+    deaf: bool,
+    over_end: String,
+    log: Vec<String>,
+}
+
+impl Air {
+    fn secs(&self) -> f32 {
+        self.blocks as f32 * BLOCK_SECS
+    }
+
+    fn note(&mut self, s: impl AsRef<str>) {
+        let line = format!("{:7.1}s {}", self.secs(), s.as_ref());
+        self.log.push(line);
+    }
+
+    /// Send one block of audio, paced to the time scale and held back while the
+    /// node has not taken what was already sent.
+    fn tick(&mut self) -> Result<(), String> {
+        let tx = self.tx.as_ref().ok_or("audio closed")?;
+        loop {
+            let now = Instant::now();
+            if now > self.deadline {
+                return Err("scenario took too long".into());
+            }
+            let ahead = if self.radio.transmitting() {
+                AHEAD_TX
+            } else {
+                AHEAD
+            };
+            if now >= self.next_due && tx.queued() < ahead {
+                break;
+            }
+            let wait = self
+                .next_due
+                .saturating_duration_since(now)
+                .clamp(Duration::from_micros(50), Duration::from_micros(500));
+            thread::sleep(wait);
+        }
+        self.next_due = self.next_due.max(Instant::now()) + self.block_real;
+
+        let mut samples: Vec<f32> = (0..BLOCK)
+            .map(|_| self.keying.pop_front().unwrap_or(0.0))
+            .collect();
+        if self.fist.snr_db.is_some() {
+            let seed = if self.in_tx {
+                mix(&[self.fist.seed, self.tx_index, self.tx_block])
+            } else {
+                mix(&[self.fist.seed, u64::MAX, self.blocks])
+            };
+            Noise::new(seed).add(&mut samples, self.sigma);
+        }
+        if self.sidetone {
+            self.add_sidetone(&mut samples);
+        }
+        if self.in_tx {
+            self.tx_block += 1;
+        }
+        let block = Block {
+            at: Instant::now(),
+            samples,
+        };
+        tx.send(block).map_err(|_| "the node stopped listening")?;
+        self.blocks += 1;
+        Ok(())
+    }
+
+    /// Mix in the radio's keying over the last block's worth of radio time.
+    fn add_sidetone(&self, samples: &mut [f32]) {
+        let span = Duration::from_secs_f32(BLOCK_SECS);
+        let to = self.radio.now();
+        let from = to.saturating_sub(span);
+        let n = samples.len();
+        let at = |t: Duration| ((t - from).as_secs_f32() / BLOCK_SECS * n as f32) as usize;
+        let w = 2.0 * std::f32::consts::PI * PITCH_HZ / SAMPLE_RATE as f32;
+        for (a, b) in self.radio.key_down_between(from, to) {
+            let start = from.as_secs_f32() * SAMPLE_RATE as f32;
+            for (i, s) in samples
+                .iter_mut()
+                .enumerate()
+                .take(at(b).min(n))
+                .skip(at(a))
+            {
+                *s += SIDETONE * (w * (start + i as f32)).sin();
+            }
+        }
+    }
+
+    fn idle(&mut self, secs: f32) -> Result<(), String> {
+        let until = self.secs() + secs;
+        while self.secs() < until {
+            self.tick()?;
+        }
+        Ok(())
+    }
+
+    fn wait_quiet(&mut self) -> Result<(), String> {
+        while self.radio.audible() {
+            self.tick()?;
+        }
+        Ok(())
+    }
+
+    /// Wait for a quiet frequency, then key `text` after a short lead-in.
+    fn key(&mut self, text: &str) -> Result<(), String> {
+        let text = with_codes(text, &self.book);
+        self.wait_quiet()?;
+        self.tx_index += 1;
+        self.in_tx = true;
+        self.tx_block = 0;
+        self.idle(REACTION)?;
+        let (body, burst) = match text.strip_suffix(" ~") {
+            Some(t) => (t, true),
+            None => (text.as_str(), false),
+        };
+        let mut k = Keyer::new(SAMPLE_RATE, PITCH_HZ + self.fist.offset_hz, self.fist.wpm);
+        k.amplitude = AMPLITUDE;
+        k.jitter = self.fist.jitter;
+        k.gap_stretch = self.fist.gap_stretch;
+        k.seed = mix(&[self.fist.seed, self.tx_index]);
+        let mut audio = k.render(body, 0.0);
+        if burst {
+            audio.extend(std::iter::repeat_n(0.0, SAMPLE_RATE as usize * 3 / 2));
+            audio.extend(k.render("E", 0.0));
+        }
+        self.note(format!("OP    {text}"));
+        self.keying.extend(audio);
+        while !self.keying.is_empty() {
+            self.tick()?;
+        }
+        self.in_tx = false;
+        Ok(())
+    }
+
+    /// Wait for the node's next over: until it ends with `DE <call> K` and the
+    /// frequency is quiet, or stops short, or none starts in time.
+    fn listen(&mut self) -> Result<Heard, String> {
+        let mut since = self.secs();
+        let mut last_sound: Option<f32> = None;
+        loop {
+            self.tick()?;
+            let now = self.secs();
+            if self.radio.audible() {
+                last_sound = Some(now);
+                continue;
+            }
+            let pieces: Vec<_> = self
+                .radio
+                .keyed_from(self.heard)
+                .into_iter()
+                .filter(|k| k.on_air)
+                .collect();
+            let text = pieces
+                .iter()
+                .map(|k| if k.complete { &k.text } else { &k.sent })
+                .filter(|t| !t.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let done = !pieces.is_empty()
+                && pieces.iter().all(|k| k.complete)
+                && text.ends_with(&self.over_end);
+            let stalled = last_sound.is_some_and(|t| now - t > CUT_AFTER);
+            if done || stalled && !pieces.is_empty() {
+                self.heard = self.radio.keyed_from(0).len();
+                if std::mem::take(&mut self.deaf) {
+                    self.note(format!("NODE  (lost in QRM) {text}"));
+                    since = now;
+                    last_sound = None;
+                    continue;
+                }
+                if done {
+                    self.note(format!("NODE  {text}"));
+                    return Ok(Heard::Over(text));
+                }
+                if text.is_empty() {
+                    self.note("NODE  (cut short before the first character)");
+                } else {
+                    self.note(format!("NODE  {text} (cut short)"));
+                }
+                return Ok(Heard::Cut(text));
+            }
+            if stalled {
+                // A carrier with no keyed text (the tuner): not an answer.
+                last_sound = None;
+                since = now;
+            }
+            if last_sound.is_none() && now - since > NO_REPLY {
+                return Ok(Heard::Nothing);
+            }
+        }
+    }
+
+    fn step(&mut self, step: &Step) -> Result<(), String> {
+        match step {
+            Step::Open { text, read_back } => {
+                for _ in 0..TRIES {
+                    self.key(text)?;
+                    match self.listen()? {
+                        Heard::Over(o) if o == *read_back => return Ok(()),
+                        Heard::Over(o) => {
+                            self.note("OP    (read-back wrong)");
+                            self.key("NO K")?;
+                            self.listen()?;
+                            return Err(format!("read-back {o:?}, expected {read_back:?}"));
+                        }
+                        Heard::Cut(_) | Heard::Nothing => self.note("OP    (no read-back)"),
+                    }
+                }
+                Err(format!("no read-back to {text:?} after {TRIES} tries"))
+            }
+            Step::Say { text, expect } => {
+                let tries = if expect.is_some() { TRIES } else { 1 };
+                for _ in 0..tries {
+                    self.key(text)?;
+                    match (self.listen()?, expect) {
+                        (Heard::Over(o), Some(e)) if o == *e => return Ok(()),
+                        (Heard::Over(o), Some(e)) => {
+                            return Err(format!("heard {o:?}, expected {e:?}"))
+                        }
+                        (Heard::Over(o), None) => {
+                            return Err(format!("heard {o:?}, expected silence"))
+                        }
+                        (Heard::Cut(o), None) => {
+                            return Err(format!("heard {o:?} (cut), expected silence"))
+                        }
+                        (Heard::Nothing, None) => {
+                            self.note("NODE  (silence)");
+                            return Ok(());
+                        }
+                        (_, Some(_)) => self.note("OP    (no answer)"),
+                    }
+                }
+                Err(format!("no answer to {text:?} after {tries} tries"))
+            }
+            Step::Unanswered { text, tries } => {
+                for _ in 0..*tries {
+                    self.key(text)?;
+                    match self.listen()? {
+                        Heard::Over(o) => return Err(format!("heard {o:?}, expected no answer")),
+                        Heard::Cut(_) => {}
+                        Heard::Nothing => self.note("NODE  (silence)"),
+                    }
+                }
+                Ok(())
+            }
+            Step::MissNext => {
+                self.deaf = true;
+                Ok(())
+            }
+            Step::Inject(f) => {
+                self.note(format!("RADIO fault {f:?}"));
+                self.radio.inject(f.clone());
+                Ok(())
+            }
+            Step::SetSwr(swr) => {
+                self.note(format!("RADIO SWR now {swr}"));
+                self.radio.configure(|c| c.swr = *swr);
+                Ok(())
+            }
+            Step::ClearStuck => {
+                self.note("RADIO stuck transmit cleared (hardware timer)");
+                self.radio.clear_stuck();
+                Ok(())
+            }
+            Step::Wait(s) => self.idle(*s),
+        }
+    }
+
+    /// Run the script. The first failed step ends it, as an operator would give up.
+    fn operate(&mut self, script: &[Step]) -> Vec<String> {
+        let mut failures = Vec::new();
+        // The node tunes at the start of its window; wait it out, as the operating
+        // guide says.
+        let start = (|| {
+            while self.radio.tunes() == 0 {
+                self.tick()?;
+            }
+            self.wait_quiet()
+        })();
+        if let Err(e) = start {
+            return vec![e];
+        }
+        for (i, step) in script.iter().enumerate() {
+            if let Err(e) = self.step(step) {
+                failures.push(format!("step {}: {e}", i + 1));
+                break;
+            }
+        }
+        // Anything the node keys late still shows up in the keyed check.
+        if let Err(e) = self.idle(TRAIL).and_then(|_| self.wait_quiet()) {
+            failures.push(e);
+        }
+        failures
+    }
+}
+
+fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
+    let key = dir.join("test.key");
+    std::fs::write(&key, TEST_KEY)?;
+    let cfg: Config = toml::from_str(&format!(
+        r#"
+        state_dir = "{state}"
+        [station]
+        node_call = "{NODE_CALL}"
+        field_calls = ["{FIELD_CALL}"]
+        frequency_hz = 7030000
+        serial_port = "mock"
+        power_watts = 40
+        key_speed_wpm = {wpm}
+        chunk_chars = {chunk}
+        chunk_pause_ms = {pause}
+        [audio]
+        sample_rate = {SAMPLE_RATE}
+        pitch_hz = {PITCH_HZ}
+        [auth]
+        key_file = "{key}"
+        [schedule]
+        always = true
+        [[contacts]]
+        name = "MOM"
+        address = "mom@example.com"
+        [[contacts]]
+        name = "BOB"
+        address = "bob@example.com"
+        "#,
+        state = dir.join("state").display(),
+        key = key.display(),
+        wpm = s.node.key_wpm,
+        chunk = s.node.chunk_chars,
+        pause = ((2000.0 / scale) as u64).max(1),
+    ))?;
+    cfg.validate()?;
+    SeqStore::new(cfg.state_dir.join("last_seq")).save(START_SEQ)?;
+    Ok(cfg)
+}
+
+/// The station's timing, divided by the time scale.
+fn station_config(cfg: &Config, scale: f32) -> StationConfig {
+    let mut sc = StationConfig::from_config(&cfg.station);
+    for d in [
+        &mut sc.max_key,
+        &mut sc.swr_delay,
+        &mut sc.swr_window,
+        &mut sc.stuck_margin,
+        &mut sc.tune_timeout,
+        &mut sc.poll,
+    ] {
+        *d = d.div_f32(scale);
+    }
+    sc
+}
+
+fn inbox(setup: &NodeSetup) -> Vec<Message> {
+    setup
+        .inbox
+        .iter()
+        .enumerate()
+        .map(|(i, (from, text))| Message {
+            id: i as u64 + 1,
+            from: from.clone(),
+            received_unix: 1_700_000_000 + i as u64,
+            source_id: format!("selftest:{i}"),
+            raw: text.clone(),
+            screened: Some(text.clone()),
+            state: MsgState::Ready,
+        })
+        .collect()
+}
+
+/// Match the radio's keyer messages against the expected overs.
+fn match_overs(keyed: &[civ::mock::Keyed], expect: &[Over]) -> Result<(), String> {
+    let pieces: Vec<_> = keyed.iter().filter(|k| k.on_air).collect();
+    let join = |a: &str, b: &str| match (a.is_empty(), b.is_empty()) {
+        (true, _) => b.to_string(),
+        (_, true) => a.to_string(),
+        _ => format!("{a} {b}"),
+    };
+    let mut i = 0;
+    for (n, over) in expect.iter().enumerate() {
+        let mut got = String::new();
+        match over {
+            Over::Full(t) => loop {
+                let Some(p) = pieces.get(i) else {
+                    return Err(format!("over {}: keyed {got:?}, expected {t:?}", n + 1));
+                };
+                got = join(&got, &p.text);
+                i += 1;
+                if !p.complete {
+                    return Err(format!("over {}: cut short at {:?}", n + 1, p.sent));
+                }
+                if got == *t {
+                    break;
+                }
+                if !t.starts_with(&format!("{got} ")) {
+                    return Err(format!("over {}: keyed {got:?}, expected {t:?}", n + 1));
+                }
+            },
+            Over::Cut(t) => {
+                while let Some(p) = pieces.get(i) {
+                    let more = join(&got, if p.complete { &p.text } else { &p.sent });
+                    if !t.starts_with(&more) || more.len() >= t.len() {
+                        if i == 0 || got.is_empty() {
+                            return Err(format!(
+                                "over {}: keyed {more:?}, expected part of {t:?}",
+                                n + 1
+                            ));
+                        }
+                        break;
+                    }
+                    got = more;
+                    i += 1;
+                    if !p.complete {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    match pieces.get(i..) {
+        Some(rest) if !rest.is_empty() => Err(format!(
+            "keyed more than expected: {:?}",
+            rest.iter().map(|p| p.text.as_str()).collect::<Vec<_>>()
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn describe(r: &Report) -> String {
+    r.keyed
+        .iter()
+        .filter(|k| k.on_air)
+        .map(|k| {
+            if k.complete {
+                format!("{:?}", k.text)
+            } else {
+                format!("{:?} (cut: {:?})", k.text, k.sent)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
+    Check {
+        name,
+        pass,
+        detail: detail.into(),
+    }
+}
+
+/// What the node thread hands back when `node::run` returns.
+type Finished = (
+    anyhow::Result<()>,
+    Station<NodeRig>,
+    crate::session::Session,
+    FakeServices,
+);
+
+/// Run one scenario at `scale` times real time.
+pub fn run(s: &Scenario, scale: f32) -> Outcome {
+    let t0 = Instant::now();
+    let mut out = Outcome {
+        scenario: s.name.clone(),
+        checks: Vec::new(),
+        wall: Duration::ZERO,
+        radio_time: Duration::ZERO,
+        transcript: Vec::new(),
+    };
+    if let Err(e) = run_inner(s, scale, &mut out) {
+        out.checks.push(check("setup", false, format!("{e:#}")));
+    }
+    out.wall = t0.elapsed();
+    out
+}
+
+fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
+    let scale = scale.clamp(1.0, 1000.0);
+    let dir = Scratch::new(&s.name).context("scratch directory")?;
+    let cfg = config(s, &dir.0, scale)?;
+    let book = node::load_codebook(&cfg)?;
+    let radio = MockRadio::new(MockConfig {
+        time_scale: scale,
+        echo: s.radio.echo,
+        swr: s.radio.swr,
+        foldback: s.radio.foldback,
+        ..MockConfig::default()
+    });
+    for f in &s.radio.faults {
+        radio.inject(f.clone());
+    }
+    let rig = TimeScaled {
+        inner: Ic7300::with_port(radio.port(), cfg.station.civ_address),
+        scale,
+    };
+    let station = Station::new(
+        rig,
+        station_config(&cfg, scale),
+        Some(cfg.state_dir.join("health.csv")),
+    );
+    station.configure().context("configuring the mock radio")?;
+    let session = node::build_session(&cfg)?;
+    let svc = FakeServices {
+        inbox: inbox(&s.node),
+        fail_send: s.node.fail_send,
+        fail_weather: s.node.fail_weather,
+        ..FakeServices::default()
+    };
+
+    let (tx, rx) = audio::queue(usize::MAX);
+    let (done_tx, done_rx) = mpsc::channel::<Finished>();
+    let node_cfg = cfg.clone();
+    thread::spawn(move || {
+        let (mut station, mut session, mut svc) = (station, session, svc);
+        let end = node::run(&node_cfg, &mut station, &rx, &mut session, &mut svc);
+        drop(rx);
+        let _ = done_tx.send((end, station, session, svc));
+    });
+
+    let snr = s.fist.snr_db.unwrap_or(f32::INFINITY);
+    let mut air = Air {
+        radio: radio.clone(),
+        tx: Some(tx),
+        book,
+        fist: s.fist.clone(),
+        sigma: Noise::sigma_for_snr(AMPLITUDE, snr, SAMPLE_RATE, 2500.0),
+        sidetone: s.radio.sidetone,
+        block_real: Duration::from_secs_f32(BLOCK_SECS / scale),
+        next_due: Instant::now(),
+        deadline: Instant::now() + BUDGET.div_f32(scale) + Duration::from_secs(30),
+        blocks: 0,
+        keying: VecDeque::new(),
+        tx_index: 0,
+        in_tx: false,
+        tx_block: 0,
+        heard: 0,
+        deaf: false,
+        over_end: format!("DE {NODE_CALL} K"),
+        log: Vec::new(),
+    };
+    let failures = air.operate(&s.script);
+    // Closing the audio ends node::run.
+    air.tx = None;
+    out.transcript = std::mem::take(&mut air.log);
+    out.checks.push(check(
+        "script",
+        failures.is_empty(),
+        if failures.is_empty() {
+            format!("{} steps", s.script.len())
+        } else {
+            failures.join("; ")
+        },
+    ));
+
+    let finished = done_rx.recv_timeout(Duration::from_secs(30));
+    let Ok((end, station, session, svc)) = finished else {
+        out.checks.push(check(
+            "ended",
+            false,
+            "node::run did not return within 30 s",
+        ));
+        return Ok(());
+    };
+    let ended = matches!(&end, Err(e) if e.to_string().contains("audio source ended"));
+    out.checks.push(check(
+        "ended",
+        ended,
+        match &end {
+            Ok(()) => "node::run returned Ok".to_string(),
+            Err(e) => format!("{e:#}"),
+        },
+    ));
+    let inhibited = station.tx_inhibited();
+    let last_seq = session.last_seq();
+    let stored = SeqStore::new(cfg.state_dir.join("last_seq")).load()?;
+    // Dropping the station forces receive, as on shutdown.
+    drop(station);
+    let r = radio.report();
+    out.radio_time = r.now;
+
+    let e = &s.expect;
+    let keyed = match_overs(&r.keyed, &e.keyed);
+    out.checks.push(check(
+        "keyed",
+        keyed.is_ok(),
+        match keyed {
+            Ok(()) => format!("{} overs: {}", e.keyed.len(), describe(&r)),
+            Err(why) => format!("{why}; radio keyed: {}", describe(&r)),
+        },
+    ));
+
+    let weather: Vec<Option<String>> = e.weather.clone();
+    let gateway_ok = svc.sent == e.sent && svc.read == e.read && svc.weather_calls == weather;
+    out.checks.push(check(
+        "gateway",
+        gateway_ok,
+        format!(
+            "sent {:?}, read {:?}, weather {:?}{}",
+            svc.sent,
+            svc.read,
+            svc.weather_calls,
+            if gateway_ok {
+                String::new()
+            } else {
+                format!(
+                    "; expected sent {:?}, read {:?}, weather {:?}",
+                    e.sent, e.read, weather
+                )
+            }
+        ),
+    ));
+
+    out.checks.push(check(
+        "last_seq",
+        last_seq == e.last_seq && stored == e.last_seq,
+        format!("{last_seq} (stored {stored}), expected {}", e.last_seq),
+    ));
+
+    out.checks.push(check(
+        "ci-v",
+        r.violations.is_empty(),
+        if r.violations.is_empty() {
+            format!(
+                "{} commands, no protocol violations",
+                radio.commands().len()
+            )
+        } else {
+            r.violations
+                .iter()
+                .map(|v| format!("{:02X?}: {}", v.bytes, v.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        },
+    ));
+
+    out.checks.push(safety(&cfg, e, &r, inhibited));
+
+    let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
+    let own = format!("DE {NODE_CALL}");
+    let echoes: Vec<&str> = rx_log.lines().filter(|l| l.contains(&own)).collect();
+    out.checks.push(check(
+        "self-decode",
+        echoes.is_empty(),
+        if echoes.is_empty() {
+            format!(
+                "{} receptions, none of the node's own",
+                rx_log.lines().count()
+            )
+        } else {
+            format!("node decoded itself: {echoes:?}")
+        },
+    ));
+    Ok(())
+}
+
+/// Bounds that hold whatever the scenario: transmit runs, duty, receive at the end,
+/// and nothing keyed after a lockout or inhibit.
+fn safety(cfg: &Config, e: &Expect, r: &Report, inhibited: bool) -> Check {
+    let mut bad = Vec::new();
+    let max_key = Duration::from_secs(cfg.station.max_key_seconds);
+    if r.max_key_down > max_key {
+        bad.push(format!(
+            "key down for {:.1} s at once (limit {} s)",
+            r.max_key_down.as_secs_f32(),
+            max_key.as_secs()
+        ));
+    }
+    // A radio jammed on transmit is ended by the hardware timer, not the node.
+    if !e.inhibited && r.max_tx > max_key {
+        bad.push(format!(
+            "on transmit for {:.1} s at once (limit {} s)",
+            r.max_tx.as_secs_f32(),
+            max_key.as_secs()
+        ));
+    }
+    let duty = r.total_key_down.as_secs_f32() / r.now.as_secs_f32().max(1.0);
+    if duty > 0.5 {
+        bad.push(format!("key-down duty {:.0}%", duty * 100.0));
+    }
+    if r.transmitting || r.keyer_busy {
+        bad.push("radio not back on receive at the end".into());
+    }
+    if inhibited != e.inhibited {
+        bad.push(format!(
+            "transmit inhibited: {inhibited}, expected {}",
+            e.inhibited
+        ));
+    }
+    if (e.lockout || e.inhibited) && r.tunes > 1 {
+        bad.push(format!("tuned {} times after the lockout", r.tunes - 1));
+    }
+    let detail = format!(
+        "longest key-down {:.1} s, longest transmit {:.1} s, {} transmissions, {:.0} s on transmit, duty {:.0}%",
+        r.max_key_down.as_secs_f32(),
+        r.max_tx.as_secs_f32(),
+        r.transmissions.len(),
+        r.total_tx.as_secs_f32(),
+        duty * 100.0
+    );
+    if bad.is_empty() {
+        check("safety", true, detail)
+    } else {
+        check("safety", false, format!("{}; {detail}", bad.join("; ")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scenarios.
+
+fn rb_tx(seq: u64, dest: &str, text: &str) -> String {
+    format!("R {seq} TX {dest} {text} ? DE {NODE_CALL} K")
+}
+
+fn de(text: &str) -> String {
+    format!("{text} DE {NODE_CALL} K")
+}
+
+fn full(texts: &[&String]) -> Vec<Over> {
+    texts.iter().map(|t| Over::Full((*t).clone())).collect()
+}
+
+fn sent(dest: &str, text: &str) -> Vec<(String, String)> {
+    vec![(dest.to_string(), text.to_string())]
+}
+
+fn base(name: &str, about: &str) -> Scenario {
+    Scenario {
+        name: name.into(),
+        about: about.into(),
+        fist: Fist {
+            seed: mix(&[name.len() as u64, name.bytes().map(u64::from).sum()]),
+            ..Fist::default()
+        },
+        node: NodeSetup::default(),
+        radio: RadioSetup::default(),
+        script: Vec::new(),
+        expect: Expect {
+            keyed: Vec::new(),
+            sent: Vec::new(),
+            read: Vec::new(),
+            weather: Vec::new(),
+            last_seq: START_SEQ,
+            lockout: false,
+            inhibited: false,
+        },
+    }
+}
+
+/// A whole TX transaction on lines 42 and 43.
+fn tx(name: &str, about: &str, dest: &str, text: &str) -> Scenario {
+    let rb = rb_tx(42, dest, text);
+    let done = de("SENT 43");
+    Scenario {
+        script: vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX {dest} {text} K"),
+                read_back: rb.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(done.clone()),
+            },
+        ],
+        expect: Expect {
+            keyed: full(&[&rb, &done]),
+            sent: sent(dest, text),
+            last_seq: 43,
+            ..base(name, about).expect
+        },
+        ..base(name, about)
+    }
+}
+
+fn with_fist(mut s: Scenario, f: impl FnOnce(&mut Fist)) -> Scenario {
+    f(&mut s.fist);
+    s
+}
+
+fn with_radio(mut s: Scenario, f: impl FnOnce(&mut RadioSetup)) -> Scenario {
+    f(&mut s.radio);
+    s
+}
+
+/// The read-back long enough to be keyed in two pieces.
+const LONG_TEXT: &str = "RUNNING LATE HOME SUN";
+
+/// Every scenario, in the order they run.
+pub fn scenarios() -> Vec<Scenario> {
+    let mut v = vec![
+        tx(
+            "tx",
+            "TX to a contact: open, read-back, OK, SENT",
+            "MOM",
+            LONG_TEXT,
+        ),
+        {
+            let mut s = tx(
+                "tx-gateway-down",
+                "TX whose gateway fails: FAIL 43 GATEWAY, codes still used",
+                "BOB",
+                "CALL ME",
+            );
+            s.node.fail_send = true;
+            let rb = rb_tx(42, "BOB", "CALL ME");
+            let fail = de("FAIL 43 GATEWAY");
+            s.script[1] = Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(fail.clone()),
+            };
+            s.expect.keyed = full(&[&rb, &fail]);
+            s.expect.sent = Vec::new();
+            s
+        },
+    ];
+
+    let rx = |name: &str, about: &str, inbox: &[(&str, &str)], count: &str, result: &str| {
+        let rb = de(&format!("R 42 {count} ?"));
+        let result = de(result);
+        let mut s = base(name, about);
+        s.node.inbox = inbox
+            .iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect();
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} RX K"),
+                read_back: rb.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(result.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &result]);
+        s.expect.last_seq = 43;
+        s
+    };
+    v.push(rx(
+        "rx-empty",
+        "RX with nothing waiting: 0 MSGS, then NIL",
+        &[],
+        "0 MSGS",
+        "R 43 NIL",
+    ));
+    v.push({
+        let mut s = rx(
+            "rx-one",
+            "RX with one message, read out and marked read",
+            &[("MOM", "DRIVE SAFE CALL WHEN YOU CAN")],
+            "1 MSG",
+            "NR 1 FM MOM DRIVE SAFE CALL WHEN YOU CAN = A",
+        );
+        s.expect.read = vec![1];
+        s
+    });
+    v.push({
+        let mut s = rx(
+            "rx-several",
+            "RX with three messages in three 60-character chunks, then AGN B and AGN",
+            &[
+                ("MOM", "DRIVE SAFE CALL WHEN YOU CAN"),
+                ("BOB", "THE GAME WAS POSTPONED TO NEXT SATURDAY AT NOON"),
+                ("MOM", "LOVE YOU"),
+            ],
+            "3 MSGS",
+            "NR 1 FM MOM DRIVE SAFE CALL WHEN YOU CAN NR 2 FM BOB THE = A \
+             GAME WAS POSTPONED TO NEXT SATURDAY AT NOON NR 3 FM MOM LOVE = B \
+             YOU = C",
+        );
+        let Over::Full(all) = s.expect.keyed[1].clone() else {
+            unreachable!()
+        };
+        let b = de("GAME WAS POSTPONED TO NEXT SATURDAY AT NOON NR 3 FM MOM LOVE = B");
+        s.script.push(Step::Say {
+            text: "AGN B K".into(),
+            expect: Some(b.clone()),
+        });
+        s.script.push(Step::Say {
+            text: "AGN K".into(),
+            expect: Some(all.clone()),
+        });
+        s.expect.keyed.extend(full(&[&b, &all]));
+        s.expect.read = vec![1, 2, 3];
+        s
+    });
+    v.push({
+        // 20-character chunks so that the cut is reached in a few minutes of
+        // keying; the node keys at 25 wpm for the same reason.
+        let long = "TEST ".repeat(150);
+        let mut s = rx(
+            "rx-long",
+            "RX of a message too long for one readout: cut to 26 chunks, TRUNCATED, 1 MORE",
+            &[("MOM", long.trim()), ("BOB", "SEE YOU SOON")],
+            "2 MSGS",
+            "",
+        );
+        s.node.chunk_chars = 20;
+        s.node.key_wpm = 25;
+        let mut chunks = vec!["NR 1 FM MOM TEST".to_string()];
+        chunks.extend(std::iter::repeat_n("TEST TEST TEST TEST".to_string(), 24));
+        chunks.push("TRUNCATED 1 MORE".into());
+        let text: Vec<String> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = {}", (b'A' + i as u8) as char))
+            .collect();
+        let result = de(&text.join(" "));
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: Some(result.clone()),
+        };
+        s.expect.keyed[1] = Over::Full(result);
+        s.expect.read = vec![1];
+        s
+    });
+
+    let wx = |name: &str, about: &str, grid: Option<&str>| {
+        let rb = match grid {
+            Some(g) => de(&format!("R 42 WX {g} ?")),
+            None => de("R 42 WX ?"),
+        };
+        let result = de(&format!("WX {} = A", FakeServices::forecast(grid)));
+        let mut s = base(name, about);
+        s.script = vec![
+            Step::Open {
+                text: format!(
+                    "{FIELD_CALL} 42 {{42}} WX {}K",
+                    grid.map(|g| format!("{g} ")).unwrap_or_default()
+                ),
+                read_back: rb.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(result.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &result]);
+        s.expect.weather = vec![grid.map(str::to_string)];
+        s.expect.last_seq = 43;
+        s
+    };
+    v.push(wx("wx-home", "WX for the default location", None));
+    v.push(wx("wx-grid", "WX for a grid square", Some("DL88")));
+
+    v.push({
+        let mut s = base(
+            "no-abort",
+            "NO after the read-back: R NO, and the OK that follows is ignored",
+        );
+        let rb = rb_tx(42, "MOM", "WRONG WORDS");
+        let no = de("R NO");
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM WRONG WORDS K"),
+                read_back: rb.clone(),
+            },
+            Step::Say {
+                text: "NO K".into(),
+                expect: Some(no.clone()),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: None,
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &no]);
+        s.expect.last_seq = 42;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "agn",
+            "AGN repeats the last over; AGN for a chunk that does not exist is ignored",
+            "MOM",
+            "HOME SUN",
+        );
+        let done = de("SENT 43");
+        s.script.push(Step::Say {
+            text: "AGN K".into(),
+            expect: Some(done.clone()),
+        });
+        s.script.push(Step::Say {
+            text: "AGN C K".into(),
+            expect: None,
+        });
+        s.expect.keyed.push(Over::Full(done));
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "lost-read-back",
+            "the read-back is lost: the operator repeats the open and gets it again, free",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.insert(0, Step::MissNext);
+        let rb = rb_tx(42, "MOM", "HOME SUN");
+        s.expect.keyed.insert(0, Over::Full(rb));
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "replayed-code",
+            "a used open and a line below last_seq are both ignored",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.push(Step::Say {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+            expect: None,
+        });
+        s.script.push(Step::Say {
+            text: format!("{FIELD_CALL} 41 {{41}} RX K"),
+            expect: None,
+        });
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "wrong-code",
+            "an open with another line's code is ignored; the right one works",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.insert(
+            0,
+            Step::Say {
+                text: format!("{FIELD_CALL} 42 {{43}} TX MOM HOME SUN K"),
+                expect: None,
+            },
+        );
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "garbled-callsign",
+            "a callsign off by one element is snapped; one far off is ignored",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script[0] = Step::Open {
+            text: "W5XKX 42 {42} TX MOM HOME SUN K".into(),
+            read_back: rb_tx(42, "MOM", "HOME SUN"),
+        };
+        s.script.insert(
+            0,
+            Step::Say {
+                text: "K1ABC 42 {42} TX MOM HOME SUN K".into(),
+                expect: None,
+            },
+        );
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "trailing-noise",
+            "a noise burst after each K is not taken as part of the message",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script[0] = Step::Open {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K ~"),
+            read_back: rb_tx(42, "MOM", "HOME SUN"),
+        };
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K ~".into(),
+            expect: Some(de("SENT 43")),
+        };
+        s
+    });
+    v.push(tx(
+        "over-word-mid-message",
+        "SK, I and AM in the message text do not end it",
+        "MOM",
+        "BACK IN SK I AM IN A MINE TOWN",
+    ));
+
+    for wpm in [10, 15, 20, 25, 30] {
+        v.push(with_fist(
+            tx(
+                &format!("speed-{wpm}wpm"),
+                &format!("TX sent at {wpm} wpm"),
+                "MOM",
+                LONG_TEXT,
+            ),
+            |f| f.wpm = wpm as f32,
+        ));
+    }
+    for snr in [20, 6, 3, 0] {
+        v.push(with_fist(
+            tx(
+                &format!("snr-{snr}db"),
+                &format!("TX at {snr} dB SNR in 2500 Hz"),
+                "BOB",
+                "SEE YOU SUN",
+            ),
+            |f| f.snr_db = Some(snr as f32),
+        ));
+    }
+    v.push(with_fist(
+        tx(
+            "hand-keyed",
+            "a sloppy straight key: 12% timing jitter, stretched gaps, 25 Hz off pitch, 10 dB",
+            "MOM",
+            LONG_TEXT,
+        ),
+        |f| {
+            f.wpm = 15.0;
+            f.jitter = 0.12;
+            f.gap_stretch = 1.4;
+            f.offset_hz = 25.0;
+            f.snr_db = Some(10.0);
+        },
+    ));
+    v.push(with_radio(
+        tx(
+            "sidetone",
+            "the radio's own keying in the receive audio is not decoded",
+            "MOM",
+            LONG_TEXT,
+        ),
+        |r| r.sidetone = true,
+    ));
+    v.push(with_radio(
+        tx(
+            "echo-off",
+            "CI-V USB Echo Back OFF (the radio's default)",
+            "MOM",
+            "HOME SUN",
+        ),
+        |r| r.echo = false,
+    ));
+
+    // Radio faults.
+    let open_long = format!("{FIELD_CALL} 42 {{42}} TX MOM {LONG_TEXT} K");
+    let rb_long = rb_tx(42, "MOM", LONG_TEXT);
+    v.push({
+        let mut s = base(
+            "fault-high-swr",
+            "SWR 3.5: the read-back is cut off, and nothing more is keyed this window",
+        );
+        s.radio.swr = 3.5;
+        s.script = vec![Step::Unanswered {
+            text: open_long.clone(),
+            tries: 2,
+        }];
+        s.expect.keyed = vec![Over::Cut(rb_long.clone())];
+        s.expect.last_seq = 42;
+        s.expect.lockout = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-foldback",
+            "into a bad load the radio folds its output back to nothing: no SWR reading, so the node stops",
+        );
+        s.radio.swr = 4.0;
+        s.radio.foldback = Some(Foldback {
+            above_swr: 3.0,
+            fraction: 0.0,
+        });
+        s.script = vec![Step::Unanswered {
+            text: open_long.clone(),
+            tries: 2,
+        }];
+        s.expect.keyed = vec![Over::Cut(rb_long.clone())];
+        s.expect.last_seq = 42;
+        s.expect.lockout = true;
+        s
+    });
+    let stuck = |name: &str, about: &str, carrier: bool| {
+        let mut s = tx(name, about, "MOM", "HI");
+        s.radio.faults.push(Fault::StickInTx {
+            skip: 0,
+            carrier,
+            recoverable: true,
+        });
+        s
+    };
+    v.push(stuck(
+        "fault-stuck-tx",
+        "the radio stays on transmit after the read-back; the node forces receive and carries on",
+        false,
+    ));
+    v.push(stuck(
+        "fault-stuck-key",
+        "the key sticks down after the read-back; the node forces receive within the stuck margin",
+        true,
+    ));
+    v.push({
+        let mut s = tx(
+            "fault-jammed-tx",
+            "the radio stays on transmit whatever it is told: transmit is inhibited and nothing more is \
+             keyed (the commit still reaches the gateway, unconfirmed)",
+            "MOM",
+            "HI",
+        );
+        s.radio.faults.push(Fault::StickInTx {
+            skip: 0,
+            carrier: false,
+            recoverable: false,
+        });
+        s.script[1] = Step::Unanswered {
+            text: "OK 43 {43} K".into(),
+            tries: 2,
+        };
+        s.script.push(Step::ClearStuck);
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.inhibited = true;
+        s
+    });
+    let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
+        let mut s = tx(name, about, "MOM", LONG_TEXT);
+        s.radio.faults.push(Fault::Reply {
+            cmd: cmd.to_vec(),
+            skip: 0,
+            times: 1,
+            kind,
+        });
+        if cut {
+            s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
+        }
+        s
+    };
+    v.push(civ(
+        "fault-civ-ng",
+        "the radio answers NG to the first CW message: nothing keyed, the operator repeats",
+        &[0x17],
+        ReplyFault::Ng,
+        false,
+    ));
+    v.push(civ(
+        "fault-civ-lost-reply",
+        "the reply to the first CW message is lost: the node stops and forces receive",
+        &[0x17],
+        ReplyFault::Drop,
+        true,
+    ));
+    v.push(civ(
+        "fault-civ-late-reply",
+        "an SWR reading arrives after the driver's timeout: the node stops, resynchronises and recovers",
+        &[0x15, 0x12],
+        ReplyFault::Delay(Duration::from_millis(700)),
+        true,
+    ));
+    v.push(with_radio(
+        tx(
+            "fault-tune-hang",
+            "the tuner never reports done: the node gives up on it, forces receive and still works",
+            "MOM",
+            "HOME SUN",
+        ),
+        |r| r.faults.push(Fault::TuneNeverFinishes),
+    ));
+    v
+}
+
+/// The scenario called `name`.
+pub fn scenario(name: &str) -> Option<Scenario> {
+    scenarios().into_iter().find(|s| s.name == name)
+}
+
+// ---------------------------------------------------------------------------
+// Test vectors: the field operator's side, as audio files.
+
+/// One field transmission.
+#[derive(Debug, Clone)]
+pub struct Vector {
+    pub label: &'static str,
+    /// With `{n}` placeholders.
+    pub text: &'static str,
+    /// What a node configured as in the manifest answers, played in order.
+    pub reply: &'static str,
+}
+
+/// The field transmissions of a session covering the grammar, in order.
+pub fn vectors() -> Vec<Vector> {
+    let v = |label, text, reply| Vector { label, text, reply };
+    vec![
+        v(
+            "open-tx",
+            "W5XXX 42 {42} TX MOM RUNNING LATE HOME SUN K",
+            "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K",
+        ),
+        v("commit-tx", "OK 43 {43} K", "SENT 43 DE N0DE K"),
+        v("again", "AGN K", "SENT 43 DE N0DE K"),
+        v(
+            "replayed-open",
+            "W5XXX 42 {42} TX MOM RUNNING LATE HOME SUN K",
+            "(silence: line 42 is used)",
+        ),
+        v("open-rx", "W5XXX 44 {44} RX K", "R 44 <n> MSGS ? DE N0DE K"),
+        v(
+            "commit-rx",
+            "OK 45 {45} K",
+            "the messages, or R 45 NIL DE N0DE K",
+        ),
+        v(
+            "again-chunk",
+            "AGN A K",
+            "chunk A again (silence if there was none)",
+        ),
+        v("open-wx", "W5XXX 46 {46} WX K", "R 46 WX ? DE N0DE K"),
+        v("commit-wx", "OK 47 {47} K", "the forecast"),
+        v(
+            "open-wx-grid",
+            "W5XXX 48 {48} WX DL88 K",
+            "R 48 WX DL88 ? DE N0DE K",
+        ),
+        v("abort", "NO K", "R NO DE N0DE K"),
+        v(
+            "stale-line",
+            "W5XXX 41 {41} RX K",
+            "(silence: line 41 is below last_seq)",
+        ),
+        v(
+            "wrong-code",
+            "W5XXX 50 {51} RX K",
+            "(silence: the code is line 51's)",
+        ),
+        v(
+            "garbled-call",
+            "W5XKX 50 {50} TX MOM HI K",
+            "R 50 TX MOM HI ? DE N0DE K",
+        ),
+        v(
+            "over-word",
+            "W5XXX 52 {52} TX MOM BACK IN SK I AM IN A MINE TOWN K",
+            "R 52 TX MOM BACK IN SK I AM IN A MINE TOWN ? DE N0DE K",
+        ),
+        v("commit-over-word", "OK 53 {53} K", "SENT 53 DE N0DE K"),
+    ]
+}
+
+/// Write every vector at each speed and noise level as a WAV file in `dir`, with
+/// `manifest.txt` and the test key. Returns the files written.
+pub fn write_vectors(
+    dir: &Path,
+    wpms: &[f32],
+    snrs: &[Option<f32>],
+    jitter: f32,
+    pitch: f32,
+) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let book = CodeBook::new(TEST_KEY);
+    let key = dir.join("test-only.key");
+    std::fs::write(&key, TEST_KEY)?;
+    let mut manifest = format!(
+        "# hfnode test vectors: the field operator's side of a session, as CW audio.\n\
+         #\n\
+         # TEST ONLY. The codes come from the fixed self-test key in test-only.key,\n\
+         # which anyone can compute. Never use it as a node's key on the air.\n\
+         #\n\
+         # Decode-only check:  hfnode decode <file> --pitch {pitch}\n\
+         #   A clean file should decode to exactly the `text` column. A noisy one\n\
+         #   shows the decoder's errors at that SNR: stray E, I or T from the noise\n\
+         #   before the first character are usual, and the node copes with them.\n\
+         # Against a bench node: use a scratch config with node_call = \"{NODE_CALL}\",\n\
+         #   field_calls = [\"{FIELD_CALL}\"], contacts MOM and BOB, auth.key_file =\n\
+         #   test-only.key, and a scratch state_dir whose last_seq is {START_SEQ} (or no\n\
+         #   last_seq file at all). Play the files of one speed and noise level in\n\
+         #   order, waiting for each reply; `reply` is what the node should key.\n\
+         #\n\
+         # Mono 16-bit {SAMPLE_RATE} Hz, {pitch} Hz tone, 1 s of silence before and after.\n\
+         #\n\
+         # file\twpm\tsnr_db\ttext\treply\n"
+    );
+    let mut files = Vec::new();
+    for &wpm in wpms {
+        for &snr in snrs {
+            let level = snr.map_or("clean".to_string(), |s| format!("{s}db"));
+            for (i, vec) in vectors().iter().enumerate() {
+                let text = with_codes(vec.text, &book);
+                let mut k = Keyer::new(SAMPLE_RATE, pitch, wpm);
+                k.amplitude = AMPLITUDE;
+                k.jitter = jitter;
+                k.seed = mix(&[i as u64, wpm.to_bits() as u64]);
+                let mut audio = k.render(&text, 1000.0);
+                if let Some(snr) = snr {
+                    Noise::new(mix(&[i as u64, wpm.to_bits() as u64, snr.to_bits() as u64])).add(
+                        &mut audio,
+                        Noise::sigma_for_snr(AMPLITUDE, snr, SAMPLE_RATE, 2500.0),
+                    );
+                }
+                let name = format!("{:02}-{}-{wpm}wpm-{level}.wav", i + 1, vec.label);
+                let path = dir.join(&name);
+                audio::write_wav(&path, &audio, SAMPLE_RATE)?;
+                let _ = writeln!(
+                    manifest,
+                    "{name}\t{wpm}\t{}\t{text}\t{}",
+                    snr.map_or("-".to_string(), |s| s.to_string()),
+                    vec.reply
+                );
+                files.push(path);
+            }
+        }
+    }
+    std::fs::write(dir.join("manifest.txt"), manifest)?;
+    Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use civ::mock::Keyed;
+
+    #[test]
+    fn codes_are_substituted() {
+        let book = CodeBook::new(TEST_KEY);
+        assert_eq!(
+            with_codes("W5XXX 42 {42} TX MOM {X} K", &book),
+            format!("W5XXX 42 {} TX MOM {{X}} K", book.code(42))
+        );
+    }
+
+    fn piece(text: &str, sent: &str, complete: bool) -> Keyed {
+        Keyed {
+            text: text.into(),
+            sent: sent.into(),
+            accepted: Duration::ZERO,
+            start: Duration::ZERO,
+            end: Duration::ZERO,
+            complete,
+            on_air: true,
+        }
+    }
+
+    #[test]
+    fn overs_are_matched_piece_by_piece() {
+        let rb = "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K".to_string();
+        let a = piece(
+            "R 42 TX MOM RUNNING LATE HOME",
+            "R 42 TX MOM RUNNING LATE HOME",
+            true,
+        );
+        let b = piece("SUN ? DE N0DE K", "SUN ? DE N0DE K", true);
+        let s = piece("SENT 43 DE N0DE K", "SENT 43 DE N0DE K", true);
+        let full = [Over::Full(rb.clone()), Over::Full(s.text.clone())];
+        assert!(match_overs(&[a.clone(), b.clone(), s.clone()], &full).is_ok());
+        assert!(
+            match_overs(&[a.clone(), b.clone()], &full).is_err(),
+            "missing"
+        );
+        assert!(
+            match_overs(&[a.clone(), b.clone(), s.clone(), s.clone()], &full).is_err(),
+            "extra"
+        );
+        // Cut part-way through a piece, or at a piece boundary.
+        let cut = piece("R 42 TX MOM RUNNING LATE HOME", "R 42 TX M", false);
+        let mut with_cut = vec![Over::Cut(rb.clone())];
+        with_cut.extend(full.clone());
+        assert!(match_overs(&[cut, a.clone(), b.clone(), s.clone()], &with_cut).is_ok());
+        assert!(match_overs(&[a.clone(), a.clone(), b.clone(), s.clone()], &with_cut).is_ok());
+        assert!(
+            match_overs(&[a.clone(), b.clone(), s.clone()], &with_cut).is_err(),
+            "not cut"
+        );
+        // A cut where a whole over was expected.
+        let cut = piece("R 42 TX MOM RUNNING LATE HOME", "R 42", false);
+        assert!(match_overs(&[cut, b, s], &full).is_err());
+    }
+}

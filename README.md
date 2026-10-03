@@ -18,7 +18,9 @@ is sending.
 > The code has not yet run against a real radio, so follow the
 > [hardware test plan](docs/hardware-test-plan.md) in order, starting with the
 > receive-only bench steps. The RF power level to watts mapping is an assumption
-> to confirm with the Po meter.
+> to confirm with the Po meter. Before the radio is connected, `hfnode selftest`
+> runs the whole node against a byte-level mock IC-7300 (see
+> [Self-test against a mock radio](#self-test-against-a-mock-radio)).
 
 ## How the code maps to the design
 
@@ -37,7 +39,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API) |
 | Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
-| Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` for tests) |
+| Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
 | Station safety: reduced power, tune at window start, SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
 | Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
@@ -52,10 +54,13 @@ crates/
   auth/       codes, verifier, last_seq store
   cw/         Morse table, decoder, synthesizer (examples/ has decoder experiments)
   protocol/   grammar, fuzzy snapping, replies, chunking, text sanitizing
-  civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig
+  civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig,
+              mock: a byte-level IC-7300 that answers as the manual's Section 19 says
   hfnode/     config, inbox, session state machine, station safety layer,
               gateways (SMTP/IMAP, NWS, Claude filter), node loop, CLI (src/main.rs)
+              selftest: scripted field operator + scenarios against the mock radio
               tests/end_to_end.rs: synthesized CW audio in, keyer text out, no hardware
+              tests/mock_radio_e2e.rs: every selftest scenario, as cargo tests
 hfnode.example.toml   annotated example configuration
 deploy/hfnode.service systemd unit
 docs/                 setup, testing and operating guides
@@ -67,9 +72,13 @@ You need a Rust toolchain (stable) and a C compiler (the TLS library, `ring`,
 compiles some C).
 
 ```sh
-cargo test --workspace          # unit tests plus the end-to-end test; no hardware needed
+cargo test --workspace          # unit tests plus the end-to-end tests; no hardware needed
 cargo build --release -p hfnode # binary at target/release/hfnode
 ```
+
+The mock-radio scenarios (`tests/mock_radio_e2e.rs`) run 100 times faster than
+real time and take about 15 s. On a slow machine such as a Pi, run them slower:
+`HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
 
 **Building on the Pi.** This works on a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS; the
 first build takes a while. See [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md).
@@ -150,6 +159,60 @@ hfnode decode /tmp/hf/t.wav --pitch 600
 `decode` also works on a recording made from the radio with `arecord`, which is
 one of the bench steps.
 
+## Self-test against a mock radio
+
+`hfnode selftest` needs no config, radio, sound card or network. It runs the whole
+node (decoder, parser, session, station safety layer and the real IC-7300 CI-V
+driver) against `civ::mock`, a byte-level IC-7300, with a scripted field operator
+on the other end:
+
+```sh
+hfnode selftest                          # all scenarios, PASS/FAIL table; exit code 1 on failure
+hfnode selftest --list                   # names and what each covers
+hfnode selftest --scenario rx-several -v # one scenario with every check and its transcript
+hfnode selftest --scenario fault- --scale 20   # a group, at 20x real time (for a slow Pi)
+```
+
+The operator keys CW audio (`cw::Keyer` plus noise) into the node's audio queue,
+listens to what the mock radio actually keyed, and reacts: it opens, checks the
+read-back, answers `OK`, `NO` or `AGN`, and repeats an open that got no answer.
+Scenarios cover the grammar (TX, RX, WX, NO, AGN), lost read-backs, replayed and
+wrong codes, garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key,
+sidetone, USB echo off, and radio faults (high SWR, fold-back, stuck transmit or
+key, a transmitter that will not unkey, NG and lost or late CI-V replies, a tuner
+that never finishes). Each one checks the exact text keyed, what the gateway did,
+`last_seq`, that the node sent nothing the manual does not allow (any unknown,
+malformed or disallowed CI-V frame, `17` while the keyer is busy or not on the air,
+`1C 00 01`), and safety bounds: key-down and transmit lengths, duty cycle, receive
+at the end and nothing keyed after a lockout.
+
+The mock answers every command the driver uses with the bytes Section 19 of the
+manual gives, keys `17` text at the set key speed (time-scaled), models semi
+break-in switch-on and hang, the `1C 00` status, Po and SWR meters that read only
+while the key is down, SWR and power fold-back, tuner timing (2 to 3 s, p. 11-2) and
+USB echo (on by default in the mock; the radio's own default is off, p. 12-11). It
+records what it keyed, with timestamps, and can drop, delay or NG a reply, stick in
+transmit, or never finish tuning.
+
+**What the mock cannot prove.** It is written from the same manual as the driver,
+so it cannot catch a place where the real radio differs from the manual, or a
+misreading shared by both (the [hardware test plan](docs/hardware-test-plan.md)'s
+step 0 checks the bytes against the manual by hand, and steps 1 to 13 against the
+radio). The manual gives only end points for key speed and break-in delay, so the
+mock assumes they are linear in between. There is no RF: real SWR, power output,
+the tuner's real timing, RF in the USB or audio, the serial link and the sound card
+are untested, and so is the hardware PTT timer. The CW is synthetic and the noise
+white, so real band conditions and real fists are tested only on the air. Watchdog
+and forced-receive timing runs on real-time timers inside a time-scaled run, so it
+shows the logic, not the real-time margins.
+
+**Test vectors.** `hfnode testvectors --out DIR` writes the field operator's side of
+a session as WAV files at several speeds and noise levels, with `manifest.txt`
+giving what each decodes to and what a node should answer, for playing into a
+bench radio or checking the decoder (`hfnode decode`). Their codes come from a
+fixed, public test-only key (written alongside as `test-only.key`): never use it on
+the air.
+
 ## Commands
 
 | Command | Transmits? | What it does |
@@ -159,6 +222,8 @@ one of the bench steps.
 | `hfnode sim --config C [--offline]` | no | Type field transmissions, see the node's replies. |
 | `hfnode synth TEXT --out F [--wpm] [--pitch] [--snr] [--jitter]` | no | Write CW to a WAV file. |
 | `hfnode decode FILE [--pitch HZ]` | no | Decode CW from a WAV file. |
+| `hfnode selftest [--scenario NAME] [--scale N] [--list] [-v]` | no | Run the scenarios against the mock IC-7300 (no hardware). |
+| `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
 | `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |
 | `hfnode radio --config C rx` | no | Stop the keyer and force the radio to receive. |

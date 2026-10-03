@@ -8,7 +8,7 @@ use hfnode::gateway::OfflineServices;
 use hfnode::inbox::Inbox;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
-use hfnode::{audio, gateway, node};
+use hfnode::{audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,42 @@ enum Cmd {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Run the closed-loop scenarios against a mock IC-7300: no radio, sound card,
+    /// network or config needed. Exits non-zero if any fails.
+    Selftest {
+        /// Run only these scenarios (exact name, or a prefix such as `fault-`).
+        #[arg(long)]
+        scenario: Vec<String>,
+        /// Times faster than real time; lower it on a slow machine.
+        #[arg(long, default_value_t = selftest::DEFAULT_SCALE)]
+        scale: f32,
+        /// Scenarios run at once (default: one per CPU).
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// List the scenarios and exit.
+        #[arg(long)]
+        list: bool,
+        /// Print every check and the transcript of each scenario.
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Write the field side of a test session as WAV files, with a manifest of the
+    /// expected decodes and replies. Codes come from a fixed test-only key.
+    Testvectors {
+        #[arg(long)]
+        out: PathBuf,
+        /// Speeds, comma-separated.
+        #[arg(long, value_delimiter = ',', default_value = "12,18,25")]
+        wpm: Vec<f32>,
+        /// Signal-to-noise ratios in 2500 Hz, comma-separated; `clean` for none.
+        #[arg(long, value_delimiter = ',', default_value = "clean,10")]
+        snr: Vec<String>,
+        /// Hand-keying timing jitter (0-0.2).
+        #[arg(long, default_value_t = 0.03)]
+        jitter: f32,
+        #[arg(long, default_value_t = 600.0)]
+        pitch: f32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -102,8 +138,15 @@ enum RadioCmd {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    // The self-test runs the node many times over; its log is noise unless asked for.
+    let level = if matches!(cli.cmd, Cmd::Selftest { .. }) {
+        "off"
+    } else {
+        "info"
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+    match cli.cmd {
         Cmd::Keygen { out } => keygen(&out),
         Cmd::Codes {
             config,
@@ -123,6 +166,20 @@ fn main() -> Result<()> {
         Cmd::Listen { config } => listen(&Config::load(&config)?),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&Config::load(&config)?),
+        Cmd::Selftest {
+            scenario,
+            scale,
+            jobs,
+            list,
+            verbose,
+        } => run_selftest(&scenario, scale, jobs, list, verbose),
+        Cmd::Testvectors {
+            out,
+            wpm,
+            snr,
+            jitter,
+            pitch,
+        } => testvectors(&out, &wpm, &snr, jitter, pitch),
     }
 }
 
@@ -377,6 +434,137 @@ fn run(cfg: &Config) -> Result<()> {
         cfg.station.frequency_hz
     );
     node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+}
+
+fn run_selftest(
+    names: &[String],
+    scale: f32,
+    jobs: Option<usize>,
+    list: bool,
+    verbose: bool,
+) -> Result<()> {
+    let all = selftest::scenarios();
+    if list {
+        for s in &all {
+            println!("{:<24} {}", s.name, s.about);
+        }
+        return Ok(());
+    }
+    if !(1.0..=1000.0).contains(&scale) {
+        bail!("--scale must be from 1 to 1000");
+    }
+    let picked: Vec<_> = if names.is_empty() {
+        all
+    } else {
+        let picked: Vec<_> = all
+            .into_iter()
+            .filter(|s| {
+                names
+                    .iter()
+                    .any(|n| s.name == *n || (n.ends_with('-') && s.name.starts_with(n.as_str())))
+            })
+            .collect();
+        for n in names {
+            if !picked
+                .iter()
+                .any(|s| s.name == *n || (n.ends_with('-') && s.name.starts_with(n.as_str())))
+            {
+                bail!("no scenario {n:?} (see --list)");
+            }
+        }
+        picked
+    };
+    let jobs = jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .clamp(1, picked.len().max(1));
+    println!(
+        "{} scenarios against the mock IC-7300 at {scale}x real time, {jobs} at once",
+        picked.len()
+    );
+    let t0 = Instant::now();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(vec![None; picked.len()]);
+    std::thread::scope(|sc| {
+        for _ in 0..jobs {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(s) = picked.get(i) else { break };
+                let out = selftest::run(s, scale);
+                if verbose {
+                    print!("{}", out.render());
+                } else {
+                    println!(
+                        "{:<24} {}  {:>5.1} s  {}",
+                        out.scenario,
+                        if out.passed() { "PASS" } else { "FAIL" },
+                        out.wall.as_secs_f32(),
+                        out.summary()
+                    );
+                }
+                results.lock().unwrap()[i] = Some(out);
+            });
+        }
+    });
+    let results: Vec<_> = results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect();
+    let failed: Vec<_> = results.iter().filter(|o| !o.passed()).collect();
+    println!();
+    println!(
+        "{:<24} {:<6} {:>7} {:>9}",
+        "scenario", "result", "wall", "radio"
+    );
+    for o in &results {
+        println!(
+            "{:<24} {:<6} {:>5.1} s {:>7.0} s",
+            o.scenario,
+            if o.passed() { "PASS" } else { "FAIL" },
+            o.wall.as_secs_f32(),
+            o.radio_time.as_secs_f32()
+        );
+    }
+    println!(
+        "\n{} passed, {} failed in {:.1} s",
+        results.len() - failed.len(),
+        failed.len(),
+        t0.elapsed().as_secs_f32()
+    );
+    if !failed.is_empty() {
+        if !verbose {
+            for o in &failed {
+                print!("\n{}", o.render());
+            }
+        }
+        bail!("{} scenario(s) failed", failed.len());
+    }
+    Ok(())
+}
+
+fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f32) -> Result<()> {
+    let snrs = snrs
+        .iter()
+        .map(|s| match s.trim() {
+            "clean" | "none" => Ok(None),
+            v => v
+                .parse::<f32>()
+                .map(Some)
+                .with_context(|| format!("--snr {v:?}: a number or `clean`")),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if wpms.iter().any(|w| !(5.0..=40.0).contains(w)) {
+        bail!("--wpm must be from 5 to 40");
+    }
+    let files = selftest::write_vectors(out, wpms, &snrs, jitter, pitch)?;
+    println!(
+        "wrote {} WAV files, manifest.txt and test-only.key to {}",
+        files.len(),
+        out.display()
+    );
+    println!("TEST ONLY: the codes come from a fixed key anyone can compute.");
+    Ok(())
 }
 
 #[cfg(test)]

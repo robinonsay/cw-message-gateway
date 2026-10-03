@@ -79,6 +79,11 @@ impl BlockSender {
         self.0.ready.notify_one();
         Ok(())
     }
+
+    /// Blocks queued and not yet taken by the receiver.
+    pub fn queued(&self) -> usize {
+        self.0.lock().blocks.len()
+    }
 }
 
 impl Drop for BlockSender {

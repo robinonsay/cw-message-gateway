@@ -81,6 +81,71 @@ load. Keep a hand near the radio's POWER switch during every transmit step.
 **The radio's own meter.** During transmit steps, set the radio's meter to Po or
 SWR (METER key) so you can compare its readings with the node's.
 
+## Step -1: pre-bench self-test against a mock radio (no radio)
+
+No radio, sound card, antenna or network needed: run it on the Pi (or a laptop)
+before the radio is connected, and again after every software update. It proves
+the node's logic end to end before any step below can transmit.
+
+```sh
+hfnode selftest              # every scenario; prints a PASS/FAIL table
+hfnode selftest --list       # what each scenario covers
+hfnode selftest --scenario fault- -v   # one group (or one name), with transcripts
+```
+
+Each scenario runs the whole node (`node::run`: decoder, parser, session, station
+safety layer and the real `Ic7300` CI-V driver) against `civ::mock`, a byte-level
+IC-7300 that answers every command the driver uses exactly as Section 19 of the
+manual says, and flags anything else as a protocol violation. A scripted field
+operator keys CW audio (with noise and hand-keying jitter) into the node's audio
+queue, listens to what the mock radio actually keyed and reacts: it opens, checks
+the read-back, then answers `OK`, `NO` or `AGN`, and repeats an open that got no
+read-back. Every scenario checks the exact text keyed, the gateway side effects
+(messages sent, inbox marked read, weather requests), `last_seq`, zero CI-V
+violations, and safety bounds (longest key-down, longest transmit, duty cycle,
+receive at the end, nothing keyed after a lockout or inhibit).
+
+The scenarios cover the whole field grammar (TX, RX with one to many messages and
+truncation, WX, NO, AGN, AGN with a chunk letter), lost read-backs, replayed and
+wrong codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm,
+SNR 20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand key, the radio's sidetone in the
+receive audio, USB echo off, and radio faults: high SWR, power fold-back, stuck
+transmit, stuck key, a transmitter that will not unkey, NG and lost or late CI-V
+replies, and a tuner that never finishes.
+
+It runs 100 times faster than real time by default (about 15 s for all of them on a
+laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
+depend on it.
+
+**Test vectors for later steps.** Write the field operator's side of a session as
+WAV files, with a manifest of what each should decode to and what the node should
+answer:
+
+```sh
+hfnode testvectors --out ~/vectors --wpm 12,18,25 --snr clean,10
+hfnode decode ~/vectors/01-open-tx-18wpm-clean.wav
+```
+
+The codes in them come from a fixed **test-only** key (`test-only.key`, written
+alongside), which anyone can compute: never use it as a node's key on the air.
+They are for steps 2, 3 and 11 (play them from a second device into the radio's
+receive audio or a dummy-load setup with a scratch config, as the manifest says).
+
+**Pass:** `hfnode selftest` ends with `0 failed`, and the clean vectors decode to
+their manifest text. **Fail:** any scenario fails: do not go on to step 4. Run the
+failing scenario with `-v` and keep its transcript.
+
+**What this cannot prove.** The mock implements what the manual says, so it cannot
+find a place where the manual and the real radio disagree, or where the code and
+the mock share the same misreading of it (step 0 checks that against the manual).
+It has no RF, so nothing about real SWR, power output, the tuner's actual timing,
+the radio's keyer timing, RF getting into USB or audio, the USB serial link or the
+sound card. Its CW is synthetic and its noise is white Gaussian: real band noise,
+QSB, QRM and real fists are only tested from step 2 on. Watchdog and forced-receive
+behaviour runs on real timers inside a time-scaled test, so it shows the logic, not
+the real-time margins (step 9 measures those). The hardware PTT timer (step 10)
+cannot be tested in software at all.
+
 ## Step 0: check every CI-V command against ICOM's IC-7300 guide
 
 No radio needed. This is a desk check, and it must be finished before any step that
@@ -128,9 +193,13 @@ answers `FE FE E0 94 ... FD`. All examples use address 94h.
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
 that has not been ticked.
 
+Also check `15 11`, the Po meter, which the node reads to count SWR readings only
+while there is output (`po_from_meter`): reply `15 11` + 2 BCD bytes, converted with
+"00 00=0%, 01 43=50%, 02 13=100%" (p. 19-3), linear between those points.
+
 Related manual items that are useful during testing but are not used by the node:
-`15 11` reads the Po meter ("00 00=0%, 01 43=50%, 02 13=100%", p. 19-3, not linear in
-level), and `14 09` reads the CW pitch ("01 28=600 Hz", p. 19-3).
+`14 09` reads the CW pitch ("01 28=600 Hz", p. 19-3), and `1A 05 00 75` sets CI-V
+USB Echo Back ("00=ON, 01=OFF", p. 19-5; OFF by default, p. 12-11).
 
 ## Step 1: serial link, read only
 
@@ -483,6 +552,7 @@ weeks: a slow rise in SWR readings means a connector or the antenna needs attent
 
 | Step | Date | Result | Readings / notes |
 |---|---|---|---|
+| -1 Self-test (mock radio) | | | version: / scale: / passed: |
 | 0 CI-V desk check | | | |
 | 1 Status | | | |
 | 2 Listen | | | |

@@ -5,5 +5,6 @@ pub mod config;
 pub mod gateway;
 pub mod inbox;
 pub mod node;
+pub mod selftest;
 pub mod session;
 pub mod station;
