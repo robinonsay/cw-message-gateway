@@ -56,28 +56,33 @@ impl Mailer {
     }
 }
 
-/// Carrier email-to-SMS/MMS gateway domains (US). Replies from a phone come from
-/// one of these, often not the one we send to (vtext.com vs vzwpix.com), so only
-/// for these is the sender matched by phone number rather than full address.
-pub const SMS_GATEWAYS: &[&str] = &[
-    "vtext.com",               // Verizon SMS (also Visible, Xfinity Mobile)
-    "vzwpix.com",              // Verizon MMS
-    "mypixmessages.com",       // Verizon MMS
-    "txt.att.net",             // AT&T SMS
-    "mms.att.net",             // AT&T MMS
-    "tmomail.net",             // T-Mobile
-    "messaging.sprintpcs.com", // Sprint (T-Mobile)
-    "pm.sprint.com",           // Sprint (T-Mobile)
-    "mymetropcs.com",          // Metro by T-Mobile
-    "msg.fi.google.com",       // Google Fi
-    "email.uscc.net",          // US Cellular SMS
-    "mms.uscc.net",            // US Cellular MMS
-    "sms.cricketwireless.net", // Cricket SMS
-    "mms.cricketwireless.net", // Cricket MMS
-    "sms.myboostmobile.com",   // Boost SMS
-    "myboostmobile.com",       // Boost MMS
-    "mailmymobile.net",        // Consumer Cellular
+/// Carrier email-to-SMS/MMS gateway domains (US), one group per carrier network.
+/// Replies from a phone come from one of its carrier's domains, often not the one
+/// we send to (vtext.com vs vzwpix.com), so only for these is the sender matched by
+/// phone number rather than full address, and only within one carrier's group.
+pub const SMS_GATEWAYS: &[&[&str]] = &[
+    // Verizon SMS (also Visible, Xfinity Mobile), MMS.
+    &["vtext.com", "vzwpix.com", "mypixmessages.com"],
+    // AT&T SMS, MMS.
+    &["txt.att.net", "mms.att.net"],
+    // T-Mobile, Sprint (now T-Mobile), Metro by T-Mobile.
+    &[
+        "tmomail.net",
+        "messaging.sprintpcs.com",
+        "pm.sprint.com",
+        "mymetropcs.com",
+    ],
+    &["msg.fi.google.com"],                                  // Google Fi
+    &["email.uscc.net", "mms.uscc.net"],                     // US Cellular SMS, MMS
+    &["sms.cricketwireless.net", "mms.cricketwireless.net"], // Cricket SMS, MMS
+    &["sms.myboostmobile.com", "myboostmobile.com"],         // Boost SMS, MMS
+    &["mailmymobile.net"],                                   // Consumer Cellular
 ];
+
+/// The carrier group in [`SMS_GATEWAYS`] that `domain` belongs to.
+fn carrier(domain: &str) -> Option<&'static [&'static str]> {
+    SMS_GATEWAYS.iter().copied().find(|g| g.contains(&domain))
+}
 
 /// A 10-digit US number from an address local part: exactly the number, optionally
 /// with a leading `1` or `+1`.
@@ -93,11 +98,13 @@ fn us_number(local: &str) -> Option<&str> {
 /// Which contact sent this, if any.
 ///
 /// - From a carrier gateway in [`SMS_GATEWAYS`] whose local part is exactly the
-///   number (optional leading `1`) of a contact whose own address is also at a
-///   carrier gateway: that contact. Carrier gateways do not reliably sign their
-///   mail, so this match rests on the From header alone and a forged From such as
-///   `5551234567@vtext.com` gets through to the filter. That is the price of SMS
-///   replies working at all; keep the filter on.
+///   number (optional leading `1`) of a contact whose own address is at the same
+///   carrier: that contact, unless our own mail server reports that the sender
+///   failed SPF, DKIM or DMARC for the From domain (see [`failed`]). Carrier
+///   gateways do not reliably sign their mail, so otherwise this match rests on the
+///   From header alone, and a forged From such as `5551234567@vtext.com` gets
+///   through to the filter. That is the price of SMS replies working at all; keep
+///   the filter on.
 /// - Anything else must equal a contact's address exactly and be vouched for by
 ///   our own mail server (see [`authenticated`]), so a forged From is refused.
 pub fn contact_for<'c>(
@@ -108,18 +115,16 @@ pub fn contact_for<'c>(
 ) -> Option<&'c Contact> {
     let from = from_addr.trim().to_ascii_lowercase();
     let (fl, fd) = from.rsplit_once('@')?;
-    if SMS_GATEWAYS.contains(&fd) {
-        if let Some(n) = us_number(fl) {
-            let by_number = contacts.iter().find(|c| {
-                let addr = c.address.trim().to_ascii_lowercase();
-                let Some((cl, cd)) = addr.rsplit_once('@') else {
-                    return false;
-                };
-                SMS_GATEWAYS.contains(&cd) && us_number(cl) == Some(n)
-            });
-            if by_number.is_some() {
-                return by_number;
-            }
+    if let (Some(group), Some(n)) = (carrier(fd), us_number(fl)) {
+        let by_number = contacts.iter().find(|c| {
+            let addr = c.address.trim().to_ascii_lowercase();
+            let Some((cl, cd)) = addr.rsplit_once('@') else {
+                return false;
+            };
+            group.contains(&cd) && us_number(cl) == Some(n)
+        });
+        if by_number.is_some() {
+            return by_number.filter(|_| !failed(auth_results, &from, authserv_id));
         }
     }
     contacts
@@ -145,28 +150,43 @@ pub fn authenticated(auth_results: &[&str], from_addr: &str, authserv_id: Option
     let Some((_, from_domain)) = from_addr.rsplit_once('@') else {
         return false;
     };
-    let header = match authserv_id {
+    let Some(header) = trusted_header(auth_results, authserv_id) else {
+        return false;
+    };
+    header.results.iter().any(|r| {
+        let signer = match (r.method.as_str(), r.result.as_str()) {
+            ("dkim", "pass") | ("spf", "pass") => r.domain(),
+            _ => None,
+        };
+        signer.is_some_and(|d| aligned(&d, from_domain))
+    })
+}
+
+/// Whether our own mail server (the header [`authenticated`] believes) reports an
+/// SPF, DKIM or DMARC `fail` for the From domain.
+pub fn failed(auth_results: &[&str], from_addr: &str, authserv_id: Option<&str>) -> bool {
+    let Some((_, from_domain)) = from_addr.rsplit_once('@') else {
+        return false;
+    };
+    let Some(header) = trusted_header(auth_results, authserv_id) else {
+        return false;
+    };
+    header.results.iter().any(|r| {
+        matches!(r.method.as_str(), "spf" | "dkim" | "dmarc")
+            && r.result == "fail"
+            && r.domain().is_some_and(|d| aligned(&d, from_domain))
+    })
+}
+
+/// The one Authentication-Results header that is believed: see [`authenticated`].
+fn trusted_header(auth_results: &[&str], authserv_id: Option<&str>) -> Option<AuthResults> {
+    match authserv_id {
         Some(id) => auth_results
             .iter()
             .filter_map(|h| parse_auth_results(h))
             .find(|h| h.authserv_id.eq_ignore_ascii_case(id.trim())),
         None => auth_results.first().and_then(|h| parse_auth_results(h)),
-    };
-    let Some(header) = header else {
-        return false;
-    };
-    let domain = |v: &str| v.rsplit('@').next().unwrap_or("").to_string();
-    header.results.iter().any(|r| {
-        let signer = match (r.method.as_str(), r.result.as_str()) {
-            ("dkim", "pass") => r
-                .prop("header.d")
-                .map(str::to_string)
-                .or_else(|| r.prop("header.i").map(domain)),
-            ("spf", "pass") => r.prop("smtp.mailfrom").map(domain),
-            _ => None,
-        };
-        signer.is_some_and(|d| aligned(&d, from_domain))
-    })
+    }
 }
 
 /// Relaxed alignment: same domain, or one is a subdomain of the other.
@@ -197,6 +217,21 @@ impl AuthResult {
             .iter()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The domain this result is about: DKIM's signing domain, SPF's envelope
+    /// sender domain, or DMARC's From domain.
+    fn domain(&self) -> Option<String> {
+        let domain = |v: &str| v.rsplit('@').next().unwrap_or("").to_string();
+        match self.method.as_str() {
+            "dkim" => self
+                .prop("header.d")
+                .map(str::to_string)
+                .or_else(|| self.prop("header.i").map(domain)),
+            "spf" => self.prop("smtp.mailfrom").map(domain),
+            "dmarc" => self.prop("header.from").map(domain),
+            _ => None,
+        }
     }
 }
 
@@ -313,9 +348,18 @@ pub fn strip_reply(body: &str) -> String {
         .join(" ")
 }
 
-/// IMAP keyword set on mail the node will never take (not from a contact, no text),
-/// so later polls skip it without marking it read in the mailbox.
+/// IMAP keyword set on mail the node did not take (not from a contact, no text),
+/// so later polls skip it without marking it read in the mailbox. Whether mail is
+/// from a contact depends on the configuration, so the keyword is cleared again
+/// when the node starts (see [`poll_imap`]).
 pub const IGNORED_KEYWORD: &str = "$HfnodeIgnored";
+
+/// UIDs as IMAP sequence sets of at most 200 each, to keep command lines short.
+fn uid_sets(uids: &[u32]) -> Vec<String> {
+    uids.chunks(200)
+        .map(|c| c.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
+        .collect()
+}
 
 /// A message the node takes: who it is from, its de-duplication id and its text.
 #[derive(Debug)]
@@ -374,7 +418,17 @@ pub fn accept<'c>(
 /// keyed on the air (see [`contact_for`]); anything else is tagged
 /// [`IGNORED_KEYWORD`], left unread, and not fetched again. A message the server
 /// fails to fetch or flag is logged and skipped, and tried again next poll.
-pub fn poll_imap(cfg: &Email, contacts: &[Contact], inbox: &Arc<Mutex<Inbox>>) -> Result<usize> {
+///
+/// With `retry_ignored` (the node's first poll after starting), the keyword is
+/// first cleared from every message, so mail turned away under an older
+/// configuration (a contact not yet listed, a wrong `email.authserv_id`) is
+/// considered again.
+pub fn poll_imap(
+    cfg: &Email,
+    contacts: &[Contact],
+    inbox: &Arc<Mutex<Inbox>>,
+    retry_ignored: bool,
+) -> Result<usize> {
     let client = imap::ClientBuilder::new(cfg.imap_host.as_str(), cfg.imap_port)
         .tls_kind(imap::TlsKind::Rust)
         .connect()
@@ -383,6 +437,21 @@ pub fn poll_imap(cfg: &Email, contacts: &[Contact], inbox: &Arc<Mutex<Inbox>>) -
         .login(&cfg.username, password(cfg)?)
         .map_err(|(e, _)| anyhow!("IMAP login: {e}"))?;
     session.select("INBOX")?;
+    if retry_ignored {
+        let mut tagged: Vec<u32> = session
+            .uid_search(format!("KEYWORD {IGNORED_KEYWORD}"))?
+            .into_iter()
+            .collect();
+        tagged.sort_unstable();
+        for set in uid_sets(&tagged) {
+            session
+                .uid_store(set, format!("-FLAGS ({IGNORED_KEYWORD})"))
+                .context("clearing the ignored keyword")?;
+        }
+        if !tagged.is_empty() {
+            log::info!("considering {} ignored message(s) again", tagged.len());
+        }
+    }
     let mut uids: Vec<_> = session
         .uid_search(format!("UNSEEN NOT KEYWORD {IGNORED_KEYWORD}"))?
         .into_iter()
@@ -435,6 +504,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uid_sets_are_chunked() {
+        assert!(uid_sets(&[]).is_empty());
+        assert_eq!(uid_sets(&[3, 5, 9]), ["3,5,9"]);
+        let many: Vec<u32> = (1..=450).collect();
+        let sets = uid_sets(&many);
+        assert_eq!(sets.len(), 3);
+        assert!(sets[2].starts_with("401,") && sets[2].ends_with(",450"));
+    }
+
+    #[test]
     fn strips_quotes_and_signatures() {
         let body = "Sounds good, see you Sunday!\nLove, Mom\n\nOn Sat, Oct 4 2026, hfnode wrote:\n> RUNNING LATE\n";
         assert_eq!(strip_reply(body), "Sounds good, see you Sunday! Love, Mom");
@@ -466,7 +545,7 @@ mod tests {
         for from in [
             "5551234567@vtext.com",
             "15551234567@vzwpix.com",
-            "+15551234567@tmomail.net",
+            "+15551234567@mypixmessages.com",
         ] {
             assert_eq!(
                 name(contact_for(&c, from, &[], None)),
@@ -481,6 +560,9 @@ mod tests {
             "95551234567@vtext.com",
             "5551234567@vtext.com.evil.example",
             "spam@example.net",
+            // MOM's number, but at another carrier.
+            "5551234567@tmomail.net",
+            "5551234567@txt.att.net",
         ] {
             assert_eq!(name(contact_for(&c, from, &[], None)), None, "{from}");
         }
@@ -493,6 +575,45 @@ mod tests {
             name(contact_for(&c, "5551234567@vtext.com", &[], None)),
             None
         );
+    }
+
+    #[test]
+    fn sms_replies_that_our_server_failed_are_refused() {
+        let c = contacts();
+        for header in [
+            "mx.google.com; spf=fail smtp.mailfrom=5551234567@vtext.com; dkim=none",
+            "mx.google.com; dkim=fail header.d=vtext.com",
+            "mx.google.com; dmarc=fail header.from=vtext.com",
+        ] {
+            assert_eq!(
+                name(contact_for(&c, "5551234567@vtext.com", &[header], None)),
+                None,
+                "{header}"
+            );
+        }
+        // Only our own server's header counts, for the fail as for a pass.
+        let forged_fail = "evil.example; spf=fail smtp.mailfrom=5551234567@vtext.com";
+        let ours = "mx.google.com; spf=pass smtp.mailfrom=5551234567@vtext.com";
+        assert_eq!(
+            name(contact_for(
+                &c,
+                "5551234567@vtext.com",
+                &[forged_fail, ours],
+                Some("mx.google.com")
+            )),
+            Some("MOM")
+        );
+        // A softfail, or a fail about another domain, is not an explicit fail.
+        for header in [
+            "mx.google.com; spf=softfail smtp.mailfrom=5551234567@vtext.com",
+            "mx.google.com; dkim=fail header.d=relay.example",
+        ] {
+            assert_eq!(
+                name(contact_for(&c, "5551234567@vtext.com", &[header], None)),
+                Some("MOM"),
+                "{header}"
+            );
+        }
     }
 
     #[test]

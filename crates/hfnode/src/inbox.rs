@@ -68,9 +68,11 @@ impl Inbox {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
+        let dir = match self.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        fs::create_dir_all(dir)?;
         let tmp = self.path.with_extension("tmp");
         {
             let mut f = fs::File::create(&tmp)?;
@@ -78,6 +80,10 @@ impl Inbox {
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;
+        // The rename is only durable once the directory entry is: without this a
+        // power cut can bring back the old file after the caller has acknowledged
+        // the source (the email marked \Seen), losing the message.
+        sync_dir(dir)?;
         Ok(())
     }
 
@@ -168,6 +174,17 @@ impl Inbox {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    // Directories cannot be opened for syncing here; the node runs on Linux.
+    Ok(())
 }
 
 #[cfg(test)]

@@ -352,8 +352,14 @@ impl Config {
             if self.contacts[..i].iter().any(|o| o.name == c.name) {
                 bail!("contact name {:?} is listed twice", c.name);
             }
-            // A bare address: the gateway sends to it and matches replies against it.
-            if c.address.parse::<lettre::Address>().is_err() {
+            // A bare address: the gateway sends to it (parsed as a Mailbox, which
+            // refuses some addresses that Address takes) and matches replies
+            // against it.
+            let bare = c.address.parse::<lettre::Address>().is_ok()
+                && c.address
+                    .parse::<lettre::message::Mailbox>()
+                    .is_ok_and(|m| m.name.is_none());
+            if !bare {
                 bail!(
                     "contact {} address {:?} is not an email address",
                     c.name,
@@ -453,6 +459,13 @@ mod tests {
         let mut cfg = example();
         cfg.contacts[1].address = "Bob <bob@example.com>".into();
         assert!(cfg.validate().is_err());
+        // Taken as an Address, but the mailer cannot send to them.
+        for address in ["bob@[127.0.0.1]", "\"a b\"@example.com"] {
+            assert!(address.parse::<lettre::message::Mailbox>().is_err());
+            let mut cfg = example();
+            cfg.contacts[1].address = address.into();
+            assert!(cfg.validate().is_err(), "{address}");
+        }
         let mut cfg = example();
         cfg.contacts[1].name = cfg.contacts[0].name.clone();
         assert!(cfg.validate().is_err());

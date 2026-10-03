@@ -124,10 +124,16 @@ pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
             log::warn!("inbound filter disabled: third-party text will be transmitted unscreened");
             None
         };
+        // Mail ignored under an earlier configuration is considered again once.
+        let mut retry_ignored = true;
         loop {
-            match gateway::email::poll_imap(&email, &cfg.contacts, &inbox) {
-                Ok(n) if n > 0 => log::info!("{n} new inbound message(s)"),
-                Ok(_) => {}
+            match gateway::email::poll_imap(&email, &cfg.contacts, &inbox, retry_ignored) {
+                Ok(n) => {
+                    retry_ignored = false;
+                    if n > 0 {
+                        log::info!("{n} new inbound message(s)");
+                    }
+                }
                 Err(e) => log::warn!("IMAP poll failed: {e:#}"),
             }
             screen_inbox(&cfg, &inbox, filter.as_ref());
@@ -195,6 +201,11 @@ impl TxGuard {
 /// Over prosigns that end a field transmission, as decoded (`+` is AR); the same
 /// set that `protocol::parse` strips.
 const OVERS: [&str; 5] = ["K", "KN", "+", "AR", "SK"];
+
+/// Silence before a word, in dits, below which it follows the word before at the
+/// sender's rhythm (a word gap is 7 dits; hand keyers stretch it): it is more of
+/// the message, not a noise burst.
+const RHYTHM_DITS: u64 = 12;
 
 /// A word an isolated noise burst could have produced: one or two characters of
 /// one or two elements.
@@ -265,8 +276,11 @@ pub fn run<R: Rig + 'static>(
     let eom = cfg.audio.end_of_message_ms;
     let mut decoder = decoder_for(cfg);
     let mut events: Vec<DecodeEvent> = Vec::new();
-    // (over_end of `events`, ms of audio since it was decoded).
-    let mut over: Option<(usize, u64)> = None;
+    // (over_end of `events`, ms of audio since it was decoded, whether every word
+    // since came after a longer silence than the sender's word gaps).
+    let mut over: Option<(usize, u64, bool)> = None;
+    // Longest key-up time seen since `events` last grew.
+    let mut max_idle: u64 = 0;
     let mut guard = TxGuard::default();
     let mut was_open = false;
     loop {
@@ -319,17 +333,32 @@ pub fn run<R: Rig + 'static>(
             continue;
         }
 
+        let before = events.len();
         events.extend(decoder.push(&block.samples));
         let block_ms = block.samples.len() as u64 * 1000 / sample_rate;
+        // The silence before the words just decoded: short if they follow the last
+        // ones at the sender's rhythm.
+        let gap = max_idle;
+        max_idle = max_idle.max(decoder.idle_ms());
+        let grew = events.len() > before;
+        if grew {
+            max_idle = decoder.idle_ms();
+        }
+        let rhythm_ms = (RHYTHM_DITS as f32 * 1200.0 / decoder.wpm()) as u64;
         over = match (over_end(&events), over) {
-            (Some(n), Some((m, ms))) if n == m => Some((n, ms + block_ms)),
-            (Some(n), _) => Some((n, 0)),
+            (Some(n), Some((m, ms, isolated))) if n == m => {
+                Some((n, ms + block_ms, isolated && !(grew && gap < rhythm_ms)))
+            }
+            (Some(n), _) => Some((n, 0, true)),
             (None, _) => None,
         };
         let heard = !events.is_empty() || decoder.key_down();
         let quiet = !decoder.key_down() && decoder.idle_ms() >= eom;
-        // After an over prosign, noise bursts do not hold the message open.
-        let over_quiet = !decoder.has_partial() && over.is_some_and(|(_, ms)| ms >= eom);
+        // After an over prosign, isolated noise bursts do not hold the message
+        // open. Short words that follow it in rhythm (I AM, AR as a state) may be
+        // more of the message, so then only real quiet ends it.
+        let over_quiet =
+            !decoder.has_partial() && over.is_some_and(|(_, ms, isolated)| isolated && ms >= eom);
         if heard && (quiet || over_quiet) {
             events.extend(decoder.flush());
             if let Some(n) = over_end(&events) {
@@ -511,6 +540,27 @@ mod tests {
         assert_eq!(h.sent, [("MOM".into(), "RUNNING LATE HOME SUN".into())]);
         assert_eq!(h.last_seq, 43);
         assert!(!h.rx_log.contains("K E"), "{}", h.rx_log);
+    }
+
+    #[test]
+    fn short_words_after_an_over_word_are_still_the_message() {
+        // AR (a state), SK and K are over words, and I, AM, IN, A... could be noise
+        // bursts; sent in rhythm, they are the operator still sending.
+        for (wpm, text) in [
+            (10.0, "HOME FROM AR I AM IN A CAB"),
+            (18.0, "BACK IN SK I AM IN A MINE TOWN"),
+            (8.0, "OK K I AM AT TENT"),
+        ] {
+            let k = Keyer::new(8000, 610.0, wpm);
+            let mut audio = k.render(&format!("W5XXX 42 {} TX MOM {text} K", code(42)), 3000.0);
+            let read_back = format!("R 42 TX MOM {text} ? DE N0DE K");
+            audio.extend(ms(cw::duration_ms(&read_back, 18) + 6000));
+            audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+            audio.extend(ms(8000));
+            let h = run_node(noisy(audio, &k, 20.0));
+            assert_eq!(h.sent, [("MOM".into(), text.into())], "{}", h.rx_log);
+            assert!(h.keyed.starts_with(&read_back), "{}", h.keyed);
+        }
     }
 
     #[test]
