@@ -21,7 +21,7 @@ mod reply;
 mod text;
 
 pub use fuzzy::{morse_distance, snap};
-pub use reply::{chunk, Chunk, Reply};
+pub use reply::{chunk, chunk_count, Chunk, Reply, MAX_CHUNKS};
 pub use text::sanitize;
 
 use std::fmt;
@@ -160,9 +160,13 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         let joined = format!("{}{}", tokens[i], tokens[i + 1]);
         tokens.splice(i..i + 2, [joined]);
     }
-    // Skip leading noise until something that starts a message.
-    let start = tokens.iter().position(|t| {
-        snap(t, &starts, 0).is_some() || snap(t, &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
+    // Skip leading noise until something that starts a message. OK, NO and AGN
+    // are ordinary words too, so they count only when nothing but noise comes
+    // before them: otherwise a garbled callsign would turn a message ending in
+    // "NO" into an abort.
+    let start = tokens.iter().enumerate().position(|(i, t)| {
+        snap(t, &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
+            || (snap(t, &starts, 0).is_some() && tokens[..i].iter().all(|n| is_noise(n)))
     });
     let tokens = &tokens[start.ok_or(ParseError::NoStart)?..];
     let first = &tokens[0];
@@ -227,6 +231,12 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         code,
         cmd,
     })
+}
+
+/// A token that a noise burst could have produced: one or two short characters, or
+/// the `DE` an operator may send before a callsign.
+fn is_noise(t: &str) -> bool {
+    t == "DE" || (t.len() <= 2 && t.chars().all(|c| NOISE_CHARS.contains(c)))
 }
 
 /// Read `seq code` from the front of `tokens`. A code split across tokens by a
@@ -387,6 +397,27 @@ mod tests {
         ));
         // Only short noise characters are peeled.
         assert_eq!(parse("QOK 43 WBNFHJGC K", &v), Err(ParseError::NoStart));
+    }
+
+    #[test]
+    fn message_words_never_become_start_words() {
+        let v = vocab();
+        // The callsign is garbled beyond tolerance: the NO, AGN or OK in the
+        // message text must not turn the open into an abort, repeat or commit.
+        for text in [
+            "W5XX 42 KRTPQMLD TX MOM SAY NO K",
+            "W5XX 42 KRTPQMLD TX MOM SAY AGN K",
+            "W5XX 42 KRTPQMLD TX MOM OK 43 WBNFHJGC K",
+            "CQ NO K",
+        ] {
+            assert_eq!(parse(text, &v), Err(ParseError::NoStart), "{text}");
+        }
+        // Leading noise is still skipped.
+        assert_eq!(parse("E T NO K", &v), Ok(FieldMsg::Abort));
+        assert_eq!(
+            parse("IE AGN B K", &v),
+            Ok(FieldMsg::Again { chunk: Some('B') })
+        );
     }
 
     #[test]

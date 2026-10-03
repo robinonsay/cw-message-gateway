@@ -7,9 +7,14 @@
 //!
 //! Rules from the design:
 //! - A code is accepted only if its sequence number is greater than `last_seq`.
+//! - The open code is burned (saved as `last_seq`) when the transaction opens, so a
+//!   heard open can never be reused, whether the transaction commits, aborts or
+//!   times out.
 //! - Nothing beyond a read-back is transmitted until a second code commits it.
-//! - Retries are idempotent and cost no new codes: re-sending the open repeats the
-//!   read-back, re-sending the commit repeats its result.
+//! - Retries are idempotent and cost no new codes: re-sending exactly the pending
+//!   open repeats the read-back; any other open while one is pending is refused.
+//!   Re-sending the commit repeats its result, but only a few times, only shortly
+//!   after the commit, and only until a newer transaction opens.
 //! - Silence is the NACK. Anything that fails to parse or authenticate gets no reply.
 //! - `last_seq` is saved to disk before acting, so a crash can never let a used code
 //!   be replayed.
@@ -19,7 +24,9 @@
 
 use crate::inbox::Message;
 use auth::{SeqStore, Verifier};
-use protocol::{chunk, parse, Chunk, Command, FieldMsg, Reply, Vocabulary};
+use protocol::{
+    chunk, chunk_count, parse, sanitize, Chunk, Command, FieldMsg, Reply, Vocabulary, MAX_CHUNKS,
+};
 use std::time::{Duration, Instant};
 
 /// What the session needs from the outside world.
@@ -28,6 +35,7 @@ pub trait Services {
     fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String>;
     /// Screened inbound messages waiting to be read, oldest first.
     fn ready_messages(&mut self) -> Vec<Message>;
+    /// Called by the node once a transmission carrying these messages was keyed.
     fn mark_read(&mut self, ids: &[u64]);
     /// A short forecast for `grid`, or the default location.
     fn weather(&mut self, grid: Option<&str>) -> Result<String, String>;
@@ -37,12 +45,16 @@ pub trait Services {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transmission {
     pub segments: Vec<String>,
+    /// Inbound messages whose whole text is in `segments`. The node marks them read
+    /// only after the transmission was keyed. Empty for anything but an `RX` result.
+    pub read_ids: Vec<u64>,
 }
 
 impl Transmission {
     fn single(text: String) -> Self {
         Self {
             segments: vec![text],
+            read_ids: Vec::new(),
         }
     }
 
@@ -65,9 +77,16 @@ pub struct SessionConfig {
     pub chunk_chars: usize,
     /// Most inbound messages read out per `RX`.
     pub max_rx_messages: usize,
-    /// `AGN` is honoured only this long after the last transmission.
+    /// `AGN` is honoured only this long after the last transmission, and a repeated
+    /// commit only this long after the commit.
     pub again_window: Duration,
 }
+
+/// How many times a repeated commit is answered before it is ignored.
+const MAX_COMMIT_RETRIES: u32 = 3;
+
+/// Ends an inbound message that was too long for one `RX` and was cut.
+const CUT_MARKER: &str = "TRUNCATED";
 
 #[derive(Debug, Clone)]
 struct Pending {
@@ -81,6 +100,9 @@ struct Pending {
 #[derive(Debug, Clone)]
 struct LastCommit {
     seq: u64,
+    /// When the commit was acted on; retries do not move it.
+    at: Instant,
+    retries: u32,
     transmission: Transmission,
     chunks: Vec<Chunk>,
 }
@@ -170,16 +192,32 @@ impl Session {
         now: Instant,
         svc: &mut dyn Services,
     ) -> Outcome {
-        // Idempotent retry of the open we are already holding.
+        // Idempotent retry of the open we are already holding. Anything else is
+        // refused while a transaction is pending, so a heard code can never swap in
+        // a different command for the field's OK to commit. Silence, not "R NO":
+        // keying a reply to an unauthenticated open would only give an attacker
+        // airtime, and the field can still send NO or wait for the timeout.
         if let Some(p) = &self.pending {
             if p.open_seq == seq && p.cmd == cmd && self.verifier.check_code_only(seq, code).is_ok()
             {
                 return Outcome::Transmit(p.read_back.clone());
             }
+            return Outcome::Silent(format!(
+                "open {seq} from {call} refused: transaction {} is pending",
+                p.open_seq
+            ));
         }
         if let Err(e) = self.verifier.check(seq, code) {
             return Outcome::Silent(format!("open from {call} rejected: {e}"));
         }
+        // Burn the open code before the read-back: if this write fails, do nothing.
+        if let Err(e) = self.store.save(seq) {
+            log::error!("cannot save last_seq {seq}: {e}; not opening");
+            return Outcome::Silent(format!("state write failed: {e}"));
+        }
+        self.verifier.commit(seq);
+        // A newer transaction ends the repeat of the previous commit.
+        self.last_commit = None;
         let reply = match &cmd {
             Command::Tx { dest, text } => Reply::ReadBackTx {
                 seq,
@@ -207,10 +245,18 @@ impl Session {
         Outcome::Transmit(read_back)
     }
 
-    fn commit(&mut self, seq: u64, code: &str, _now: Instant, svc: &mut dyn Services) -> Outcome {
-        // Idempotent retry of the commit we already acted on.
-        if let Some(c) = &self.last_commit {
+    fn commit(&mut self, seq: u64, code: &str, now: Instant, svc: &mut dyn Services) -> Outcome {
+        // Idempotent retry of the commit we already acted on, bounded so that a
+        // heard OK cannot make the node key the whole result again and again.
+        if let Some(c) = &mut self.last_commit {
             if c.seq == seq && self.verifier.check_code_only(seq, code).is_ok() {
+                if now.duration_since(c.at) > self.cfg.again_window
+                    || c.retries >= MAX_COMMIT_RETRIES
+                {
+                    self.last_commit = None;
+                    return Outcome::Silent(format!("repeat of commit {seq} no longer honoured"));
+                }
+                c.retries += 1;
                 return Outcome::Transmit(c.transmission.clone());
             }
         }
@@ -259,18 +305,12 @@ impl Session {
                         Vec::new(),
                     )
                 } else {
-                    let take = msgs.len().min(self.cfg.max_rx_messages);
-                    let mut text = String::new();
-                    for (i, m) in msgs[..take].iter().enumerate() {
-                        let body = m.screened.as_deref().unwrap_or_default();
-                        text.push_str(&format!("NR {} FM {} {} ", i + 1, m.from, body));
-                    }
-                    if msgs.len() > take {
-                        text.push_str(&format!("{} MORE", msgs.len() - take));
-                    }
-                    let ids: Vec<u64> = msgs[..take].iter().map(|m| m.id).collect();
-                    svc.mark_read(&ids);
-                    self.chunked(&text, &call)
+                    // Messages are not marked read here: the node does that once the
+                    // transmission was keyed, using `read_ids`.
+                    let (text, ids) = self.rx_batch(&msgs);
+                    let (mut t, chunks) = self.chunked(&text, &call);
+                    t.read_ids = ids;
+                    (t, chunks)
                 }
             }
             Command::Wx { grid } => match svc.weather(grid.as_deref()) {
@@ -292,10 +332,74 @@ impl Session {
         };
         self.last_commit = Some(LastCommit {
             seq,
+            at: now,
+            retries: 0,
             transmission: transmission.clone(),
             chunks: chunks.clone(),
         });
         Outcome::Transmit(transmission)
+    }
+
+    /// The text of one `RX` result and the ids of the messages it carries in full.
+    ///
+    /// Messages are taken oldest first while they fit in [`MAX_CHUNKS`] chunks, so
+    /// nothing is cut off by [`chunk`]; the rest stay ready and are counted as
+    /// `n MORE`. A message too long to fit even on its own is cut and ends with
+    /// [`CUT_MARKER`]. It is counted as read: it can never be sent whole, and left
+    /// ready it would come back cut on every later `RX` and block the ones behind it.
+    fn rx_batch(&self, msgs: &[Message]) -> (String, Vec<u64>) {
+        let fits = |t: &str| chunk_count(t, self.cfg.chunk_chars) <= MAX_CHUNKS;
+        let more = |left: usize| {
+            if left > 0 {
+                format!("{left} MORE")
+            } else {
+                String::new()
+            }
+        };
+        let mut text = String::new();
+        let mut ids = Vec::new();
+        for (i, m) in msgs.iter().take(self.cfg.max_rx_messages).enumerate() {
+            let body = sanitize(m.screened.as_deref().unwrap_or_default());
+            let head = format!("NR {} FM {} ", i + 1, m.from);
+            let tail = more(msgs.len() - (i + 1));
+            let entry = format!("{head}{body} ");
+            if fits(&format!("{text}{entry}{tail}")) {
+                text.push_str(&entry);
+                ids.push(m.id);
+                continue;
+            }
+            if i == 0 {
+                // Longest prefix that fits with the marker (sanitize leaves ASCII).
+                let fits_cut =
+                    |n: usize| fits(&format!("{head}{} {CUT_MARKER} {tail}", &body[..n]));
+                let (mut lo, mut hi) = (0, body.len());
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    if fits_cut(mid) {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                // Prefer to end on a whole word.
+                let n = match body[..lo].rfind(' ') {
+                    Some(sp) if lo < body.len() && !body[lo..].starts_with(' ') && fits_cut(sp) => {
+                        sp
+                    }
+                    _ => lo,
+                };
+                log::warn!(
+                    "inbound message {} cut from {} to {n} characters to fit one RX",
+                    m.id,
+                    body.len()
+                );
+                text.push_str(&format!("{head}{} {CUT_MARKER} ", body[..n].trim_end()));
+                ids.push(m.id);
+            }
+            break;
+        }
+        text.push_str(&more(msgs.len() - ids.len()));
+        (text, ids)
     }
 
     fn chunked(&self, text: &str, call: &str) -> (Transmission, Vec<Chunk>) {
@@ -309,7 +413,13 @@ impl Session {
             }
             None => segments.push(end),
         }
-        (Transmission { segments }, chunks)
+        (
+            Transmission {
+                segments,
+                read_ids: Vec::new(),
+            },
+            chunks,
+        )
     }
 
     fn again(&mut self, letter: Option<char>, now: Instant) -> Outcome {
@@ -427,12 +537,10 @@ mod tests {
         }
 
         fn send(&mut self, secs: u64, text: &str) -> Outcome {
-            let text = text
-                .replace("{42}", &self.book.code(42))
-                .replace("{43}", &self.book.code(43));
-            let text = text
-                .replace("{44}", &self.book.code(44))
-                .replace("{45}", &self.book.code(45));
+            let mut text = text.to_string();
+            for n in 42..=47 {
+                text = text.replace(&format!("{{{n}}}"), &self.book.code(n));
+            }
             self.session
                 .handle(&text, self.t0 + Duration::from_secs(secs), &mut self.svc)
         }
@@ -459,7 +567,7 @@ mod tests {
         let o = r.send(0, "W5XXX 42 {42} TX MOM RUNNING LATE HOME SUN K");
         assert_eq!(tx(&o), "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K");
         assert!(r.svc.sent.is_empty(), "nothing is sent before the commit");
-        assert_eq!(r.stored_seq(), 41);
+        assert_eq!(r.stored_seq(), 42, "the open code is burned on open");
 
         let o = r.send(30, "OK 43 {43} K");
         assert_eq!(tx(&o), "SENT 43 DE N0DE K");
@@ -523,7 +631,9 @@ mod tests {
         tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
         assert!(silent(&r.send(601, "OK 43 {43} K")));
         assert!(r.svc.sent.is_empty());
-        assert_eq!(r.stored_seq(), 41, "an expired transaction burns no codes");
+        assert_eq!(r.stored_seq(), 42, "only the open code is burned");
+        // The expired open cannot be replayed.
+        assert!(silent(&r.send(700, "W5XXX 42 {42} TX MOM HI K")));
     }
 
     #[test]
@@ -562,7 +672,12 @@ mod tests {
         assert!(t.segments[0].ends_with("= A"), "{:?}", t.segments);
         assert!(t.segments.last().unwrap().ends_with("DE N0DE K"));
         assert!(t.text().contains("NR 1 FM MOM DRIVE SAFE"));
-        assert!(r.svc.ready_messages().is_empty());
+        assert_eq!(t.read_ids, [1, 2, 3]);
+        assert_eq!(
+            r.svc.ready_messages().len(),
+            3,
+            "the node marks them read only once keyed"
+        );
 
         // Repeat one chunk.
         let b = tx(&r.send(20, "AGN B K"));
@@ -602,5 +717,142 @@ mod tests {
         let mut r = Rig::new();
         assert!(silent(&r.send(0, "CQ CQ DE K1ABC K")));
         assert!(silent(&r.send(0, "E E T")));
+    }
+
+    #[test]
+    fn a_heard_open_cannot_replace_the_pending_one() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        // An eavesdropper reuses the heard code with other text.
+        assert!(silent(&r.send(10, "W5XXX 42 {42} TX BOB EVIL K")));
+        // Nor can a different open take over while one is pending.
+        assert!(silent(&r.send(15, "W5XXX 44 {44} TX BOB EVIL K")));
+        // The exact retry is still answered.
+        assert_eq!(
+            tx(&r.send(20, "W5XXX 42 {42} TX MOM HI K")),
+            "R 42 TX MOM HI ? DE N0DE K"
+        );
+        tx(&r.send(30, "OK 43 {43} K"));
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "HI".to_string())]);
+    }
+
+    #[test]
+    fn an_aborted_open_cannot_be_replayed() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        tx(&r.send(10, "NO K"));
+        // Replaying the burned open keys nothing and does not hold the window open.
+        assert!(silent(&r.send(20, "W5XXX 42 {42} TX MOM EVIL K")));
+        assert!(!r.session.has_pending(r.t0 + Duration::from_secs(20)));
+        // Nor can it replace a later transaction.
+        tx(&r.send(30, "W5XXX 44 {44} TX MOM HELLO K"));
+        assert!(silent(&r.send(40, "W5XXX 42 {42} TX BOB EVIL K")));
+        tx(&r.send(50, "OK 45 {45} K"));
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "HELLO".to_string())]);
+    }
+
+    #[test]
+    fn a_repeated_commit_is_bounded() {
+        let open_and_commit = || {
+            let mut r = Rig::new();
+            tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+            let sent = tx(&r.send(10, "OK 43 {43} K"));
+            (r, sent)
+        };
+        // A few repeats only.
+        let (mut r, sent) = open_and_commit();
+        for i in 0..MAX_COMMIT_RETRIES {
+            assert_eq!(tx(&r.send(20 + u64::from(i), "OK 43 {43} K")), sent);
+        }
+        assert!(silent(&r.send(30, "OK 43 {43} K")));
+        assert!(silent(&r.send(31, "OK 43 {43} K")));
+
+        // Only shortly after the commit; repeats do not extend that.
+        let (mut r, sent) = open_and_commit();
+        assert_eq!(tx(&r.send(800, "OK 43 {43} K")), sent);
+        assert!(silent(&r.send(911, "OK 43 {43} K")));
+
+        // Never once a newer transaction has opened.
+        let (mut r, _) = open_and_commit();
+        tx(&r.send(20, "W5XXX 44 {44} RX K"));
+        assert!(silent(&r.send(30, "OK 43 {43} K")));
+        tx(&r.send(40, "NO K"));
+        assert!(silent(&r.send(50, "OK 43 {43} K")));
+        assert_eq!(r.svc.sent.len(), 1);
+    }
+
+    #[test]
+    fn a_garbled_retry_ending_in_no_does_not_abort() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM SAY NO K"));
+        // The retry is heard with the callsign garbled beyond tolerance.
+        assert!(silent(&r.send(10, "W5XX 42 {42} TX MOM SAY NO K")));
+        assert_eq!(tx(&r.send(20, "OK 43 {43} K")), "SENT 43 DE N0DE K");
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "SAY NO".to_string())]);
+    }
+
+    #[test]
+    fn rx_messages_stay_ready_until_the_node_keyed_them() {
+        let mut r = Rig::new();
+        r.svc.inbox = vec![msg(1, "MOM", "DRIVE SAFE"), msg(2, "BOB", "LOVE YOU")];
+        tx(&r.send(0, "W5XXX 42 {42} RX K"));
+        let Outcome::Transmit(t) = r.send(10, "OK 43 {43} K") else {
+            panic!()
+        };
+        assert_eq!(t.read_ids, [1, 2]);
+        // Keying failed, so the node never marked them: a new RX reads them again.
+        assert_eq!(
+            tx(&r.send(20, "W5XXX 44 {44} RX K")),
+            "R 44 2 MSGS ? DE N0DE K"
+        );
+        let Outcome::Transmit(t) = r.send(30, "OK 45 {45} K") else {
+            panic!()
+        };
+        assert_eq!(t.read_ids, [1, 2]);
+        assert!(t.text().contains("NR 2 FM BOB LOVE"), "{}", t.text());
+        // Non-RX results carry no ids.
+        tx(&r.send(40, "W5XXX 46 {46} WX K"));
+        let Outcome::Transmit(t) = r.send(50, "OK 47 {47} K") else {
+            panic!()
+        };
+        assert!(t.read_ids.is_empty());
+    }
+
+    #[test]
+    fn rx_sends_only_what_fits_and_cuts_a_message_that_never_can() {
+        let mut r = Rig::new();
+        // 2000 characters: more than 26 chunks of 40 on its own.
+        let long = "WORD ".repeat(400);
+        r.svc.inbox = vec![
+            msg(1, "MOM", "SHORT ONE"),
+            msg(2, "BOB", &long),
+            msg(3, "MOM", "LAST"),
+        ];
+        let rx = |r: &mut Rig, at: u64, open: &str, commit: &str| {
+            tx(&r.send(at, open));
+            let Outcome::Transmit(t) = r.send(at + 10, commit) else {
+                panic!()
+            };
+            assert!(t.segments.len() <= MAX_CHUNKS, "{}", t.segments.len());
+            r.svc.mark_read(&t.read_ids);
+            t
+        };
+
+        // The long one does not fit after the first: it waits for the next RX.
+        let t = rx(&mut r, 0, "W5XXX 42 {42} RX K", "OK 43 {43} K");
+        assert_eq!(t.read_ids, [1]);
+        assert_eq!(t.text(), "NR 1 FM MOM SHORT ONE 2 MORE = A DE N0DE K");
+
+        // On its own it still does not fit, so it is cut, says so, and is done with.
+        let t = rx(&mut r, 100, "W5XXX 44 {44} RX K", "OK 45 {45} K");
+        assert_eq!(t.read_ids, [2]);
+        let text = t.text();
+        assert!(text.starts_with("NR 1 FM BOB WORD WORD"), "{text}");
+        assert!(text.contains("WORD TRUNCATED 1 MORE = "), "{text}");
+        assert!(!text.contains(" MORE MORE"), "{text}");
+
+        let t = rx(&mut r, 200, "W5XXX 46 {46} RX K", "OK 47 {47} K");
+        assert_eq!(t.read_ids, [3]);
+        assert!(r.svc.ready_messages().is_empty());
     }
 }

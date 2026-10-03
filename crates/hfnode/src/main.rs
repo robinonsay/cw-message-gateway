@@ -222,6 +222,9 @@ fn sim(cfg: &Config, offline: bool) -> Result<()> {
                     for s in &t.segments {
                         println!("  NODE> {s}");
                     }
+                    if !t.read_ids.is_empty() {
+                        svc.mark_read(&t.read_ids);
+                    }
                 }
                 Outcome::Silent(why) => println!("  (silence: {why})"),
             }
@@ -326,6 +329,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             if let RadioCmd::Cw { text } = action {
                 let t = hfnode::session::Transmission {
                     segments: vec![sanitize(&text)],
+                    read_ids: Vec::new(),
                 };
                 st.transmit(&t).map_err(|e| anyhow::anyhow!("{e}"))?;
                 println!("sent; see health.csv for the SWR reading");
