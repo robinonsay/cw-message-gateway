@@ -4,13 +4,13 @@
 use auth::CodeBook;
 use civ::sim::SimRig;
 use cw::{Keyer, Noise};
+use hfnode::audio::{self, Block};
 use hfnode::config::Config;
 use hfnode::inbox::Message;
 use hfnode::node;
 use hfnode::session::Services;
 use hfnode::station::{Station, StationConfig};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct Fake {
@@ -87,7 +87,8 @@ fn field_message_over_the_air_is_sent() {
 
     // Feed 50 ms blocks 100x faster than real time, matching the simulated radio's
     // time scale, so audio heard while "transmitting" is discarded as it would be.
-    let (tx, rx) = mpsc::channel();
+    // Never full: every block is delivered, as in real time.
+    let (tx, rx) = audio::queue(usize::MAX);
     let blocks: Vec<Vec<f32>> = audio
         .chunks(sr as usize / 20)
         .map(<[f32]>::to_vec)
@@ -95,7 +96,11 @@ fn field_message_over_the_air_is_sent() {
     std::thread::spawn(move || {
         for b in blocks {
             std::thread::sleep(Duration::from_micros(500));
-            if tx.send(b).is_err() {
+            let block = Block {
+                at: Instant::now(),
+                samples: b,
+            };
+            if tx.send(block).is_err() {
                 break;
             }
         }

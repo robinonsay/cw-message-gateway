@@ -1,5 +1,6 @@
 //! The running node: audio in, decode, session, transmit, on a listening schedule.
 
+use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
 use crate::gateway::{self, filter, LiveServices};
 use crate::inbox::Inbox;
@@ -12,7 +13,8 @@ use cw::{events_to_text, DecodeEvent, Decoder, DecoderConfig};
 use protocol::{sanitize, Vocabulary};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -155,18 +157,117 @@ fn decoder_for(cfg: &Config) -> Decoder {
     Decoder::new(d)
 }
 
+/// Audio still discarded once the radio is back on receive after transmitting or
+/// tuning, while the receiver and its AGC recover. It also covers the part of the
+/// first block read afterwards that was captured before.
+const RX_RECOVERY_MS: u64 = 250;
+
+/// Discards audio captured while the node was transmitting or tuning.
+#[derive(Debug, Default)]
+struct TxGuard {
+    /// Blocks read before this were captured while transmitting or tuning.
+    until: Option<Instant>,
+    /// Samples still to discard after that.
+    recovery: usize,
+}
+
+impl TxGuard {
+    /// Transmitting or tuning ended at `at`; discard `recovery` more samples after it.
+    fn ended(&mut self, at: Instant, recovery: usize) {
+        self.until = Some(at);
+        self.recovery = recovery;
+    }
+
+    /// Whether `block` may be decoded. The recovery margin is counted in samples
+    /// rather than wall time, so it holds however fast the audio is delivered.
+    fn keep(&mut self, block: &Block) -> bool {
+        if self.until.is_some_and(|t| block.at < t) {
+            return false;
+        }
+        if self.recovery > 0 {
+            self.recovery = self.recovery.saturating_sub(block.samples.len());
+            return false;
+        }
+        true
+    }
+}
+
+/// Over prosigns that end a field transmission, as decoded (`+` is AR); the same
+/// set that `protocol::parse` strips.
+const OVERS: [&str; 5] = ["K", "KN", "+", "AR", "SK"];
+
+/// A word an isolated noise burst could have produced: one or two characters of
+/// one or two elements.
+fn is_noise_word(w: &str) -> bool {
+    w.len() <= 2 && w.chars().all(|c| "ETIANM".contains(c))
+}
+
+/// If the last real word decoded is an over prosign followed by a word gap, the
+/// number of events up to and including that gap. Anything after it is noise.
+fn over_end(events: &[DecodeEvent]) -> Option<usize> {
+    let mut over = None;
+    let mut word = String::new();
+    for (i, e) in events.iter().enumerate() {
+        match e {
+            DecodeEvent::Char(c) => word.push(*c),
+            DecodeEvent::Unknown(_) => word.push('*'),
+            DecodeEvent::WordGap if word.is_empty() => {}
+            DecodeEvent::WordGap => {
+                if OVERS.contains(&word.as_str()) {
+                    over = Some(i + 1);
+                } else if !is_noise_word(&word) {
+                    over = None;
+                }
+                word.clear();
+            }
+        }
+    }
+    // A word without its gap yet (after a flush) ends the message only as noise.
+    if is_noise_word(&word) || word.is_empty() {
+        over
+    } else {
+        None
+    }
+}
+
+/// Whether to listen: in a scheduled window, while a transaction is pending, or
+/// while a transmission heard in the window is still being received.
+fn listening(
+    scheduled: bool,
+    pending: bool,
+    was_open: bool,
+    decoder: &Decoder,
+    events: &[DecodeEvent],
+) -> bool {
+    scheduled || pending || (was_open && (decoder.has_partial() || !events.is_empty()))
+}
+
+fn log_rx(rx_log: &Path, text: &str) {
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(rx_log)
+        .and_then(|mut f| writeln!(f, "{},{text}", gateway::unix_now()));
+}
+
 /// The main loop. Returns only on a fatal error or when the audio source ends.
 pub fn run<R: Rig + 'static>(
     cfg: &Config,
     station: &mut Station<R>,
-    audio: &Receiver<Vec<f32>>,
+    audio: &BlockReceiver,
     session: &mut Session,
     svc: &mut dyn Services,
 ) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     let rx_log = cfg.state_dir.join("rx.log");
+    let sample_rate = u64::from(cfg.audio.sample_rate.max(1));
+    let recovery = (sample_rate * RX_RECOVERY_MS / 1000) as usize;
+    let eom = cfg.audio.end_of_message_ms;
     let mut decoder = decoder_for(cfg);
     let mut events: Vec<DecodeEvent> = Vec::new();
+    // (over_end of `events`, ms of audio since it was decoded).
+    let mut over: Option<(usize, u64)> = None;
+    let mut guard = TxGuard::default();
     let mut was_open = false;
     loop {
         let block = match audio.recv_timeout(Duration::from_secs(5)) {
@@ -177,42 +278,75 @@ pub fn run<R: Rig + 'static>(
             }
             Err(RecvTimeoutError::Disconnected) => anyhow::bail!("audio source ended"),
         };
+        if !guard.keep(&block) {
+            continue;
+        }
         let now = Instant::now();
-        let open = cfg.schedule.is_open(gateway::unix_now()) || session.has_pending(now);
+        let open = listening(
+            cfg.schedule.is_open(gateway::unix_now()),
+            session.has_pending(now),
+            was_open,
+            &decoder,
+            &events,
+        );
         if open && !was_open {
             log::info!("listening window open");
             if let Err(e) = station.start_window() {
                 log::error!("tune failed at window start: {e}");
             }
-            drain(audio);
+            guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
             events.clear();
+            over = None;
             was_open = true;
             continue;
         }
         if !open {
             if was_open {
+                // Normally nothing is left (a reception keeps the window open), but
+                // never drop decoded text without a trace.
+                events.extend(decoder.flush());
+                let text = events_to_text(&events);
+                events.clear();
+                over = None;
+                if !text.is_empty() {
+                    log::warn!("window closed, not handled: {text}");
+                    log_rx(&rx_log, &text);
+                }
                 log::info!("listening window closed");
             }
             was_open = false;
             continue;
         }
 
-        events.extend(decoder.push(&block));
+        events.extend(decoder.push(&block.samples));
+        let block_ms = block.samples.len() as u64 * 1000 / sample_rate;
+        over = match (over_end(&events), over) {
+            (Some(n), Some((m, ms))) if n == m => Some((n, ms + block_ms)),
+            (Some(n), _) => Some((n, 0)),
+            (None, _) => None,
+        };
         let heard = !events.is_empty() || decoder.key_down();
-        if heard && !decoder.key_down() && decoder.idle_ms() >= cfg.audio.end_of_message_ms {
+        let quiet = !decoder.key_down() && decoder.idle_ms() >= eom;
+        // After an over prosign, noise bursts do not hold the message open.
+        let over_quiet = !decoder.has_partial() && over.is_some_and(|(_, ms)| ms >= eom);
+        if heard && (quiet || over_quiet) {
             events.extend(decoder.flush());
+            if let Some(n) = over_end(&events) {
+                let noise = events_to_text(&events[n..]);
+                if !noise.is_empty() {
+                    log::info!("ignored after over: {noise}");
+                }
+                events.truncate(n);
+            }
             let text = events_to_text(&events);
             events.clear();
+            over = None;
             if text.is_empty() {
                 continue;
             }
             log::info!("heard: {text}");
-            let _ = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&rx_log)
-                .and_then(|mut f| writeln!(f, "{},{text}", gateway::unix_now()));
+            log_rx(&rx_log, &text);
             match session.handle(&text, Instant::now(), svc) {
                 Outcome::Silent(why) => log::info!("no reply: {why}"),
                 Outcome::Transmit(t) => {
@@ -223,15 +357,253 @@ pub fn run<R: Rig + 'static>(
                         Ok(()) => {}
                         Err(e) => log::error!("transmit failed: {e}"),
                     }
-                    // Discard whatever was captured while transmitting.
-                    drain(audio);
-                    decoder = decoder_for(cfg);
+                    // Discard whatever was captured while transmitting, and relearn
+                    // the levels, but keep the field operator's speed: their reply
+                    // follows at once.
+                    guard.ended(Instant::now(), recovery);
+                    decoder.reset_levels();
                 }
             }
         }
     }
 }
 
-fn drain(audio: &Receiver<Vec<f32>>) {
-    while audio.try_recv().is_ok() {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio;
+    use crate::inbox::Message;
+    use crate::station::StationConfig;
+    use civ::sim::SimRig;
+    use cw::{Keyer, Noise};
+
+    #[derive(Default)]
+    struct Fake {
+        sent: Vec<(String, String)>,
+    }
+
+    impl Services for Fake {
+        fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+            self.sent.push((dest.into(), text.into()));
+            Ok(())
+        }
+        fn ready_messages(&mut self) -> Vec<Message> {
+            Vec::new()
+        }
+        fn mark_read(&mut self, _: &[u64]) {}
+        fn weather(&mut self, _: Option<&str>) -> Result<String, String> {
+            Ok("SUNNY".into())
+        }
+    }
+
+    struct Heard {
+        sent: Vec<(String, String)>,
+        keyed: String,
+        rx_log: String,
+        last_seq: u64,
+    }
+
+    const KEY: &[u8] = b"node unit test key 0123456789";
+
+    /// Run the node on `audio` (8 kHz) with a simulated radio, delivering 50 ms
+    /// blocks 100x faster than real time to match the radio's time scale.
+    fn run_node(audio: Vec<f32>) -> Heard {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("node.key");
+        std::fs::write(&key, KEY).unwrap();
+        let cfg: Config = toml::from_str(&format!(
+            r#"
+            state_dir = "{state}"
+            [station]
+            node_call = "N0DE"
+            field_calls = ["W5XXX"]
+            frequency_hz = 7030000
+            serial_port = "/dev/null"
+            chunk_pause_ms = 10
+            [audio]
+            end_of_message_ms = 2500
+            [auth]
+            key_file = "{key}"
+            [schedule]
+            always = true
+            [[contacts]]
+            name = "MOM"
+            address = "mom@example.com"
+            "#,
+            state = dir.path().join("state").display(),
+            key = key.display()
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.audio.sample_rate, 8000);
+
+        let (tx, rx) = audio::queue(usize::MAX);
+        let blocks: Vec<Vec<f32>> = audio.chunks(400).map(<[f32]>::to_vec).collect();
+        thread::spawn(move || {
+            for samples in blocks {
+                thread::sleep(Duration::from_micros(500));
+                let b = Block {
+                    at: Instant::now(),
+                    samples,
+                };
+                if tx.send(b).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut rig = SimRig::new();
+        rig.time_scale = 100.0;
+        let mut sc = StationConfig::from_config(&cfg.station);
+        sc.poll = Duration::from_millis(2);
+        sc.swr_delay = Duration::from_millis(2);
+        let mut station = Station::new(rig, sc, None);
+        station.configure().unwrap();
+        let mut session = build_session(&cfg).unwrap();
+        let mut svc = Fake::default();
+        let end = run(&cfg, &mut station, &rx, &mut session, &mut svc).unwrap_err();
+        assert!(end.to_string().contains("audio source ended"));
+        let keyed = station.rig().lock().unwrap().sent.join(" ");
+        Heard {
+            sent: svc.sent,
+            keyed,
+            rx_log: std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default(),
+            last_seq: session.last_seq(),
+        }
+    }
+
+    fn code(seq: u64) -> String {
+        CodeBook::new(KEY).code(seq)
+    }
+
+    fn ms(n: u64) -> Vec<f32> {
+        vec![0.0; 8 * n as usize]
+    }
+
+    fn noisy(mut audio: Vec<f32>, k: &Keyer, snr_db: f32) -> Vec<f32> {
+        Noise::new(5).add(
+            &mut audio,
+            Noise::sigma_for_snr(k.amplitude, snr_db, 8000, 2500.0),
+        );
+        audio
+    }
+
+    fn read_back_ms() -> u64 {
+        cw::duration_ms("R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K", 18)
+    }
+
+    #[test]
+    fn noise_after_the_over_is_not_part_of_the_message() {
+        let k = Keyer::new(8000, 610.0, 18.0);
+        // A noise burst decodes as a lone E after each K.
+        let burst = k.render("E", 0.0);
+        let mut audio = k.render(
+            &format!("W5XXX 42 {} TX MOM RUNNING LATE HOME SUN K", code(42)),
+            3000.0,
+        );
+        audio.extend(ms(1500));
+        audio.extend(&burst);
+        audio.extend(ms(read_back_ms() + 6000));
+        audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+        audio.extend(ms(1500));
+        audio.extend(&burst);
+        audio.extend(ms(8000));
+        let h = run_node(noisy(audio, &k, 15.0));
+        assert_eq!(h.sent, [("MOM".into(), "RUNNING LATE HOME SUN".into())]);
+        assert_eq!(h.last_seq, 43);
+        assert!(!h.rx_log.contains("K E"), "{}", h.rx_log);
+    }
+
+    #[test]
+    fn slow_operator_is_decoded_after_a_reply() {
+        let k = Keyer::new(8000, 610.0, 6.0);
+        let mut audio = k.render(&format!("W5XXX 42 {} TX MOM HI K", code(42)), 3000.0);
+        audio.extend(ms(cw::duration_ms("R 42 TX MOM HI ? DE N0DE K", 18) + 6000));
+        audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+        audio.extend(ms(8000));
+        let h = run_node(noisy(audio, &k, 15.0));
+        assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
+        assert_eq!(h.keyed, "R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K");
+    }
+
+    #[test]
+    fn over_end_finds_the_over_and_ignores_noise_after_it() {
+        fn ev(text: &str) -> Vec<DecodeEvent> {
+            let mut v = Vec::new();
+            for c in text.chars() {
+                v.push(match c {
+                    ' ' => DecodeEvent::WordGap,
+                    '*' => DecodeEvent::Unknown("........".into()),
+                    c => DecodeEvent::Char(c),
+                });
+            }
+            v
+        }
+        assert_eq!(over_end(&ev("OK 43 ABCDEFGH K ")), Some(17));
+        assert_eq!(over_end(&ev("OK 43 ABCDEFGH K E I ")), Some(17));
+        assert_eq!(over_end(&ev("OK 43 ABCDEFGH K E")), Some(17));
+        assert_eq!(over_end(&ev("HOME SUN AR ")), Some(12));
+        // No gap after the K yet: it may still become another word.
+        assert_eq!(over_end(&ev("OK 43 ABCDEFGH K")), None);
+        // Real words after a K: it was not the over ("AGN K K" asks for chunk K).
+        assert_eq!(over_end(&ev("AGN K ")), Some(6));
+        assert_eq!(over_end(&ev("AGN K K ")), Some(8));
+        assert_eq!(over_end(&ev("TX MOM K SEE ")), None);
+        assert_eq!(over_end(&ev("TX MOM K * ")), None);
+        assert_eq!(over_end(&ev("")), None);
+    }
+
+    #[test]
+    fn tx_guard_skips_audio_from_transmit_and_recovery() {
+        let t0 = Instant::now();
+        let at = |ms| Block {
+            at: t0 + Duration::from_millis(ms),
+            samples: vec![0.0; 400],
+        };
+        let mut g = TxGuard::default();
+        assert!(g.keep(&at(0)));
+        g.ended(t0 + Duration::from_millis(30_000), 1000);
+        // Read late, but captured while transmitting.
+        assert!(!g.keep(&at(10_000)));
+        assert!(!g.keep(&at(29_999)));
+        // The receiver recovering: 1000 samples, three blocks.
+        assert!(!g.keep(&at(30_000)));
+        assert!(!g.keep(&at(30_050)));
+        assert!(!g.keep(&at(30_100)));
+        assert!(g.keep(&at(30_150)));
+        assert!(g.keep(&at(30_200)));
+    }
+
+    #[test]
+    fn a_reception_keeps_the_window_open() {
+        let mut d = Decoder::new(DecoderConfig::new(8000, 610.0));
+        let k = Keyer::new(8000, 610.0, 18.0);
+        // Mid-character: nothing returned yet.
+        let mut a = ms(500);
+        a.extend(k.render("T", 0.0));
+        a.truncate(a.len() - 8 * 20);
+        assert!(d.push(&a).is_empty());
+        assert!(d.has_partial());
+        assert!(listening(false, false, true, &d, &[]));
+        // Decoded words waiting for the end of the message.
+        let idle = Decoder::new(DecoderConfig::new(8000, 610.0));
+        assert!(listening(
+            false,
+            false,
+            true,
+            &idle,
+            &[DecodeEvent::Char('W')]
+        ));
+        // Nothing in progress: the window closes.
+        assert!(!listening(false, false, true, &idle, &[]));
+        // A reception never opens a window by itself.
+        assert!(!listening(
+            false,
+            false,
+            false,
+            &d,
+            &[DecodeEvent::Char('W')]
+        ));
+        assert!(listening(true, false, false, &idle, &[]));
+        assert!(listening(false, true, false, &idle, &[]));
+    }
 }

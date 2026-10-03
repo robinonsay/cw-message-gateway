@@ -5,6 +5,7 @@ use auth::{format_for_print, CodeBook};
 use clap::{Parser, Subcommand};
 use hfnode::config::Config;
 use hfnode::gateway::OfflineServices;
+use hfnode::inbox::Inbox;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
 use hfnode::{audio, gateway, node};
@@ -210,11 +211,7 @@ fn sim(cfg: &Config, offline: bool) -> Result<()> {
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             let (name, text) = rest.split_once(' ').unwrap_or((rest, ""));
             let mut ib = inbox.lock().map_err(|_| anyhow::anyhow!("inbox lock"))?;
-            let id = format!("sim:{}", gateway::unix_now());
-            ib.add(&name.to_ascii_uppercase(), &id, text, gateway::unix_now())?;
-            if let Some(m) = ib.unscreened().into_iter().find(|m| m.source_id == id) {
-                ib.set_screened(m.id, &sanitize(text))?;
-            }
+            sim_add(&mut ib, name, text, gateway::unix_now())?;
             println!("  added message from {}", name.to_ascii_uppercase());
         } else if !line.is_empty() {
             match session.handle(line, Instant::now(), svc.as_mut()) {
@@ -229,6 +226,24 @@ fn sim(cfg: &Config, offline: bool) -> Result<()> {
                 Outcome::Silent(why) => println!("  (silence: {why})"),
             }
         }
+    }
+    Ok(())
+}
+
+/// Add a screened inbound message for `hfnode sim`.
+fn sim_add(ib: &mut Inbox, name: &str, text: &str, now: u64) -> Result<()> {
+    // Several messages can be added within a second: number them so that each has
+    // its own source id and none is taken for a duplicate.
+    let mut n = 0;
+    let id = loop {
+        let id = format!("sim:{now}:{n}");
+        if ib.add(&name.to_ascii_uppercase(), &id, text, now)? {
+            break id;
+        }
+        n += 1;
+    };
+    if let Some(m) = ib.unscreened().into_iter().find(|m| m.source_id == id) {
+        ib.set_screened(m.id, &sanitize(text))?;
     }
     Ok(())
 }
@@ -277,8 +292,8 @@ fn listen(cfg: &Config) -> Result<()> {
     let mut d = cw::Decoder::new(dc);
     println!("listening on {} (Ctrl-C to stop)", cfg.audio.device);
     let mut out = std::io::stdout();
-    for block in cap.samples.iter() {
-        for e in d.push(&block) {
+    while let Some(block) = cap.samples.recv() {
+        for e in d.push(&block.samples) {
             match e {
                 cw::DecodeEvent::Char(c) => print!("{c}"),
                 cw::DecodeEvent::Unknown(_) => print!("*"),
@@ -359,4 +374,19 @@ fn run(cfg: &Config) -> Result<()> {
         cfg.station.frequency_hz
     );
     node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sim_messages_added_in_the_same_second_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ib = Inbox::open(dir.path().join("inbox.json")).unwrap();
+        sim_add(&mut ib, "mom", "first", 1000).unwrap();
+        sim_add(&mut ib, "mom", "second", 1000).unwrap();
+        let ready: Vec<String> = ib.ready().into_iter().map(|m| m.raw).collect();
+        assert_eq!(ready, ["first", "second"]);
+    }
 }
