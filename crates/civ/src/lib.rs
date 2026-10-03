@@ -9,6 +9,7 @@ pub mod ic7300;
 pub mod sim;
 
 use std::fmt;
+use std::time::Duration;
 
 /// Longest text the radio's keyer accepts in one command.
 pub const MAX_CW_CHARS: usize = 30;
@@ -55,12 +56,22 @@ pub trait Rig: Send {
     fn set_key_speed(&mut self, wpm: u32) -> Result<()>;
     /// Semi break-in on, so text sent with [`Rig::send_cw`] keys the transmitter.
     fn set_break_in(&mut self, on: bool) -> Result<()>;
+    /// Semi break-in delay, in dots: how long the key must stay up before the radio
+    /// drops back to receive. Above 7 dots (a word gap) the radio stays on transmit
+    /// for a whole keyer message.
+    fn set_break_in_delay(&mut self, dots: f32) -> Result<()>;
+    /// Length of one dot at the keyer speed the radio is actually using (after
+    /// its own range limits), so callers can time [`Rig::send_cw`] text.
+    fn dot_duration(&mut self) -> Result<Duration>;
     /// Start an internal antenna tuner cycle.
     fn start_tune(&mut self) -> Result<()>;
     /// Whether a tuner cycle is still running.
     fn tuner_busy(&mut self) -> Result<bool>;
-    /// SWR meter reading. Only meaningful while transmitting.
+    /// SWR meter reading. Only meaningful while transmitting with the key down;
+    /// with no RF out it reads 1.0.
     fn read_swr(&mut self) -> Result<f32>;
+    /// Po (RF output) meter reading, in percent of full output.
+    fn read_po(&mut self) -> Result<f32>;
     /// Key `text` (at most [`MAX_CW_CHARS`]) with the internal keyer.
     fn send_cw(&mut self, text: &str) -> Result<()>;
     /// Abort any keyer text still being sent.
