@@ -82,6 +82,11 @@ impl Inbox {
     }
 
     /// Add a received message. Returns false if `source_id` was already seen.
+    ///
+    /// Every change is saved before it counts: if the save fails, memory is rolled
+    /// back to match the file, so what is in memory is always on disk. A caller may
+    /// therefore treat `Ok` (either value) as "safely stored" and acknowledge the
+    /// source (e.g. mark the email \Seen).
     pub fn add(
         &mut self,
         from: &str,
@@ -102,7 +107,11 @@ impl Inbox {
             screened: None,
             state: State::Unscreened,
         });
-        self.save()?;
+        if let Err(e) = self.save() {
+            self.data.messages.pop();
+            self.data.next_id -= 1;
+            return Err(e);
+        }
         Ok(true)
     }
 
@@ -116,10 +125,16 @@ impl Inbox {
     }
 
     pub fn set_screened(&mut self, id: u64, text: &str) -> Result<()> {
-        if let Some(m) = self.data.messages.iter_mut().find(|m| m.id == id) {
-            m.screened = Some(text.to_string());
-            m.state = State::Ready;
-            self.save()?;
+        let Some(i) = self.data.messages.iter().position(|m| m.id == id) else {
+            return Ok(());
+        };
+        let before = self.data.messages[i].clone();
+        let m = &mut self.data.messages[i];
+        m.screened = Some(text.to_string());
+        m.state = State::Ready;
+        if let Err(e) = self.save() {
+            self.data.messages[i] = before;
+            return Err(e);
         }
         Ok(())
     }
@@ -138,6 +153,7 @@ impl Inbox {
     }
 
     pub fn mark_read(&mut self, ids: &[u64], now_unix: u64) -> Result<()> {
+        let before = self.data.messages.clone();
         for m in self.data.messages.iter_mut() {
             if ids.contains(&m.id) {
                 m.state = State::Read;
@@ -146,7 +162,11 @@ impl Inbox {
         self.data.messages.retain(|m| {
             m.state != State::Read || now_unix.saturating_sub(m.received_unix) < KEEP_READ_SECS
         });
-        self.save()
+        if let Err(e) = self.save() {
+            self.data.messages = before;
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -179,5 +199,33 @@ mod tests {
         // Read messages are pruned after 30 days.
         inbox.mark_read(&[], 50 + KEEP_READ_SECS).unwrap();
         assert_eq!(Inbox::open(&path).unwrap().data.messages.len(), 1);
+    }
+
+    #[test]
+    fn failed_save_leaves_memory_matching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inbox.json");
+        let mut inbox = Inbox::open(&path).unwrap();
+        assert!(inbox.add("BOB", "<b@x>", "ok", 50).unwrap());
+        // A directory where the temp file goes makes every save fail, even as root.
+        let blocker = path.with_extension("tmp");
+        fs::create_dir(&blocker).unwrap();
+        assert!(inbox.add("MOM", "<a@x>", "Drive safe!", 100).is_err());
+        // Not on disk, so it must not look like a stored duplicate either.
+        assert!(inbox.add("MOM", "<a@x>", "Drive safe!", 100).is_err());
+        let id = inbox.unscreened()[0].id;
+        assert!(inbox.set_screened(id, "OK").is_err());
+        assert_eq!(inbox.unscreened().len(), 1);
+        fs::remove_dir(&blocker).unwrap();
+        inbox.set_screened(id, "OK").unwrap();
+        fs::create_dir(&blocker).unwrap();
+        assert!(inbox.mark_read(&[id], 60).is_err());
+        assert_eq!(inbox.ready().len(), 1);
+        fs::remove_dir(&blocker).unwrap();
+        assert!(inbox.add("MOM", "<a@x>", "Drive safe!", 100).unwrap());
+        let on_disk = Inbox::open(&path).unwrap();
+        assert_eq!(on_disk.data.messages.len(), 2);
+        assert_eq!(on_disk.data.next_id, 2);
+        assert_eq!(on_disk.ready().len(), 1);
     }
 }
