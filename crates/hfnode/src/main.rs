@@ -305,9 +305,8 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             println!("transmitting: {}", rig.is_transmitting()?);
         }
         RadioCmd::Rx => {
-            rig.stop_cw()?;
-            rig.set_transmit(false)?;
-            println!("receive");
+            hfnode::station::force_receive(&mut rig).context("radio not confirmed on receive")?;
+            println!("receive (confirmed)");
         }
         RadioCmd::Setup | RadioCmd::Tune | RadioCmd::Cw { .. } => {
             let mut st = Station::new(
