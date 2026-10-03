@@ -51,14 +51,26 @@ impl Nws {
             bail!("no forecast for {grid} (outside NWS coverage?)");
         };
         let fc = self.get(url)?;
+        // A failed alerts fetch must not read as "no alerts": say so on the air.
         let alerts = self
             .get(&format!(
                 "{}/alerts/active?point={lat:.4},{lon:.4}",
                 self.base
             ))
-            .map(|a| alert_events(&a))
-            .unwrap_or_default();
-        Ok(format_forecast(grid, &alerts, &fc, self.cfg.periods))
+            .and_then(|a| alert_events(&a).context("alerts response has no features"));
+        let alerts = match alerts {
+            Ok(a) => Some(a),
+            Err(e) => {
+                log::warn!("NWS alerts unavailable for {grid}: {e:#}");
+                None
+            }
+        };
+        Ok(format_forecast(
+            grid,
+            alerts.as_deref(),
+            &fc,
+            self.cfg.periods,
+        ))
     }
 }
 
@@ -80,22 +92,35 @@ pub fn grid_center(grid: &str) -> Option<(f64, f64)> {
     Some((lat, lon))
 }
 
-fn alert_events(alerts: &Value) -> Vec<String> {
+/// Event names of the active alerts, or None if the response is not an alert list.
+fn alert_events(alerts: &Value) -> Option<Vec<String>> {
     let mut events: Vec<String> = alerts["features"]
-        .as_array()
-        .into_iter()
-        .flatten()
+        .as_array()?
+        .iter()
         .filter_map(|f| f["properties"]["event"].as_str().map(str::to_string))
         .collect();
     events.dedup();
-    events
+    Some(events)
 }
 
 /// `WX DL89 ALERT RED FLAG WARNING TNGT CLEAR LO 58 WIND W 5 MPH SAT SUNNY HI 97 ...`
-pub fn format_forecast(grid: &str, alerts: &[String], fc: &Value, periods: usize) -> String {
+///
+/// `alerts` is None when the alerts could not be fetched; that is sent as
+/// `ALERTS UNAVBL` so it is never mistaken for "no alerts in effect".
+pub fn format_forecast(
+    grid: &str,
+    alerts: Option<&[String]>,
+    fc: &Value,
+    periods: usize,
+) -> String {
     let mut parts = vec![grid.to_string()];
-    for a in alerts {
-        parts.push(format!("ALERT {a}"));
+    match alerts {
+        Some(alerts) => {
+            for a in alerts {
+                parts.push(format!("ALERT {a}"));
+            }
+        }
+        None => parts.push("ALERTS UNAVBL".to_string()),
     }
     for p in fc["properties"]["periods"]
         .as_array()
@@ -193,10 +218,78 @@ mod tests {
                 {"name":"Saturday Night","isDaytime":false,"temperature":60,"windSpeed":"5 mph","windDirection":"S","shortForecast":"Clear"}]}}"#,
         )
         .unwrap();
-        let s = format_forecast("DL89", &["Red Flag Warning".to_string()], &fc, 2);
+        let s = format_forecast("DL89", Some(&["Red Flag Warning".to_string()]), &fc, 2);
         assert_eq!(
             s,
             "DL89 ALERT Red Flag Warning TNGT MSTLY CLEAR LO 58 WIND W 5 MPH SAT SLGT CHC SHWRS TSTMS HI 97 WIND SW 10 TO 15 MPH"
+        );
+        assert_eq!(
+            format_forecast("DL89", None, &fc, 1),
+            "DL89 ALERTS UNAVBL TNGT MSTLY CLEAR LO 58 WIND W 5 MPH"
+        );
+    }
+
+    /// Serve canned NWS responses on localhost. Anything that is not the points or
+    /// forecast endpoint (i.e. the alerts request) gets `alerts_status`/`alerts_body`.
+    fn fake_nws(alerts_status: u16, alerts_body: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let fc_url = format!("{base}/forecast");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let (status, body) = if path.starts_with("/points/") {
+                    (
+                        200,
+                        format!(r#"{{"properties":{{"forecast":"{fc_url}"}}}}"#),
+                    )
+                } else if path == "/forecast" {
+                    (200, r#"{"properties":{"periods":[{"name":"Today","isDaytime":true,"temperature":97,"windSpeed":"5 mph","windDirection":"W","shortForecast":"Sunny"}]}}"#.to_string())
+                } else {
+                    (alerts_status, alerts_body.to_string())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/geo+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        base
+    }
+
+    fn test_cfg() -> Weather {
+        Weather {
+            default_grid: "DL89".into(),
+            user_agent: "hfnode test".into(),
+            periods: 1,
+        }
+    }
+
+    #[test]
+    fn failed_alerts_fetch_is_announced_not_hidden() {
+        let nws = Nws::with_base(&test_cfg(), &fake_nws(503, "{}"));
+        assert_eq!(
+            nws.forecast(None).unwrap(),
+            "DL89 ALERTS UNAVBL TDA SUNNY HI 97 WIND W 5 MPH"
+        );
+        // A 200 that is not an alert list is no better.
+        let nws = Nws::with_base(&test_cfg(), &fake_nws(200, r#"{"title":"oops"}"#));
+        assert!(nws.forecast(None).unwrap().contains("ALERTS UNAVBL"));
+        // An empty list really is "no alerts".
+        let nws = Nws::with_base(&test_cfg(), &fake_nws(200, r#"{"features":[]}"#));
+        assert_eq!(
+            nws.forecast(None).unwrap(),
+            "DL89 TDA SUNNY HI 97 WIND W 5 MPH"
         );
     }
 }

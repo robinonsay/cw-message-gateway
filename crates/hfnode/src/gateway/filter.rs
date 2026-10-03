@@ -73,6 +73,7 @@ pub fn apply(text: &str, v: &Verdict) -> String {
         Action::Drop => WITHHELD.to_string(),
         Action::Redact => {
             let mut out = text.to_string();
+            let mut applied = false;
             for span in &v.spans {
                 let span = span.trim();
                 if span.is_empty() {
@@ -83,6 +84,12 @@ pub fn apply(text: &str, v: &Verdict) -> String {
                     return WITHHELD.to_string();
                 }
                 out = out.replace(span, MARKER);
+                applied = true;
+            }
+            if !applied {
+                // Flagged for redaction but nothing named to redact: withhold rather
+                // than send the flagged text unchanged.
+                return WITHHELD.to_string();
             }
             out
         }
@@ -206,6 +213,9 @@ mod tests {
         assert_eq!(apply(t, &verdict(Action::Drop, &[])), WITHHELD);
         // A span that is not in the text withholds the message.
         assert_eq!(apply(t, &verdict(Action::Redact, &["SEE YA"])), WITHHELD);
+        // A redact verdict with no usable span withholds rather than passes.
+        assert_eq!(apply(t, &verdict(Action::Redact, &[])), WITHHELD);
+        assert_eq!(apply(t, &verdict(Action::Redact, &[" ", ""])), WITHHELD);
     }
 
     #[test]

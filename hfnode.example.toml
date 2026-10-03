@@ -43,6 +43,10 @@ username = "hfnode@example.com"
 password_env = "HFNODE_EMAIL_PASSWORD"
 from_address = "hfnode@example.com"
 poll_secs = 300
+# Replies from email contacts must pass DKIM or SPF for the From domain, as reported
+# in your mail server's Authentication-Results header. Name that server here (the
+# first word of its header) if it does not add the topmost one.
+# authserv_id = "mx.example.com"
 
 # Contacts the field operator can name in TX. For SMS use the carrier's
 # email-to-SMS address; replies from the phone come back by email.

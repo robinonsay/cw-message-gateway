@@ -145,6 +145,11 @@ pub struct Email {
     pub from_address: String,
     #[serde(default = "default_poll_secs")]
     pub poll_secs: u64,
+    /// authserv-id your mail server puts in its Authentication-Results header (for
+    /// example `mx.google.com`). Unset, the topmost such header is trusted; see
+    /// `gateway::email::authenticated`.
+    #[serde(default)]
+    pub authserv_id: Option<String>,
 }
 
 /// Someone the field operator can message by name. SMS goes through the carrier's
