@@ -7,5 +7,5 @@ pub mod morse;
 pub mod synth;
 
 pub use decoder::{events_to_text, DecodeEvent, Decoder, DecoderConfig};
-pub use morse::{decode_pattern, encode_char, is_sendable};
+pub use morse::{decode_pattern, duration_ms, encode_char, is_sendable, units};
 pub use synth::{Keyer, Noise};

@@ -90,6 +90,9 @@ pub struct Vocabulary {
     pub contacts: Vec<String>,
 }
 
+/// Characters of one or two elements, which is what isolated noise bursts decode as.
+const NOISE_CHARS: &str = "ETIANM";
+
 /// Maximum Morse distance for snapping keywords, callsigns and contact names.
 const KEYWORD_TOLERANCE: usize = 2;
 
@@ -108,8 +111,31 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         return Err(ParseError::Empty);
     }
 
-    // Skip leading noise until something that starts a message.
+    // A noise burst just before the first word often decodes as a stray short
+    // character glued onto it ("EOK"). Peel up to two such characters off a token
+    // when what remains is a start word.
     let starts = ["OK", "NO", "AGN"];
+    for t in tokens.iter_mut() {
+        let is_start = |w: &str| snap(w, &starts, 0).is_some() || snap(w, &vocab.field_calls, KEYWORD_TOLERANCE).is_some();
+        if is_start(t) {
+            break;
+        }
+        let peel = t.chars().take(2).take_while(|c| NOISE_CHARS.contains(*c)).count();
+        if let Some(n) = (1..=peel).find(|&n| is_start(&t[n..])) {
+            *t = t[n..].to_string();
+            break;
+        }
+    }
+    // A stretched gap can split the callsign ("W 5XXX"): rejoin a pair of tokens
+    // when together, but not alone, they match a field callsign.
+    if let Some(i) = (0..tokens.len().saturating_sub(1)).find(|&i| {
+        snap(&tokens[i], &vocab.field_calls, KEYWORD_TOLERANCE).is_none()
+            && snap(&format!("{}{}", tokens[i], tokens[i + 1]), &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
+    }) {
+        let joined = format!("{}{}", tokens[i], tokens[i + 1]);
+        tokens.splice(i..i + 2, [joined]);
+    }
+    // Skip leading noise until something that starts a message.
     let start = tokens.iter().position(|t| {
         snap(t, &starts, 0).is_some() || snap(t, &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
     });
@@ -272,6 +298,17 @@ mod tests {
                 cmd: Command::Tx { dest: "MOM".into(), text: "HI".into() },
             }
         );
+    }
+
+    #[test]
+    fn peels_noise_glued_to_the_first_word() {
+        let v = vocab();
+        assert_eq!(parse("EOK 43 WBNFHJGC K", &v), Ok(FieldMsg::Commit { seq: 43, code: "WBNFHJGC".into() }));
+        assert!(matches!(parse("TW5XXX 44 ABCDEFGH RX K", &v), Ok(FieldMsg::Open { .. })));
+        // A callsign split by a long gap is rejoined.
+        assert!(matches!(parse("E W 5XXX 44 ABCDEFGH RX K", &v), Ok(FieldMsg::Open { .. })));
+        // Only short noise characters are peeled.
+        assert_eq!(parse("QOK 43 WBNFHJGC K", &v), Err(ParseError::NoStart));
     }
 
     #[test]

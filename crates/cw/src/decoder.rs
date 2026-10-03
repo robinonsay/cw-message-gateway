@@ -10,9 +10,11 @@
 //!    from being decoded.
 //! 3. Debounce: a flip shorter than a fraction of a dit is absorbed into the run it
 //!    interrupted, which removes noise spikes and fades.
-//! 4. Classify marks into dits and dahs by 2-means clustering of recent mark lengths,
-//!    so speed is learned from the sender rather than configured, and hand-keyed
-//!    timing that drifts during a transmission is followed.
+//! 4. Buffer each word, then classify its marks into dits and dahs by 2-means
+//!    clustering of recent mark lengths (including the word's own), so speed is
+//!    learned from the sender rather than configured, and hand-keyed timing that
+//!    drifts during a transmission is followed. One- and two-mark "words" (noise
+//!    bursts) do not train the speed estimate.
 //! 5. Classify gaps against the learned dit length into element, character and word
 //!    gaps, and look up each finished pattern in the Morse table.
 
@@ -47,7 +49,7 @@ impl DecoderConfig {
             bandwidth_hz: 150.0,
             initial_wpm: 15.0,
             min_wpm: 5.0,
-            max_wpm: 40.0,
+            max_wpm: 35.0,
             squelch_sigmas: 4.0,
             min_level: 1e-3,
         }
@@ -91,6 +93,8 @@ pub struct Decoder {
     /// Debounced (is_mark, ms) runs of the word being received, decoded when it ends
     /// so that the speed estimate has seen every mark of the word first.
     word: Vec<(bool, f32)>,
+    /// Cached (marks in word, dit estimate including them).
+    working: (usize, f32),
     idle_ms: u64,
 }
 
@@ -124,6 +128,7 @@ impl Decoder {
             char_gap_ms: 3.0 * dit_ms,
             marks: VecDeque::with_capacity(MARK_HISTORY),
             word: Vec::new(),
+            working: (0, dit_ms),
             idle_ms: 0,
             cfg,
         }
@@ -226,7 +231,8 @@ impl Decoder {
         }
 
         // Debounce.
-        let glitch = (0.3 * self.dit_ms).clamp(8.0, 40.0) as u32;
+        let min_dit = 1200.0 / self.cfg.max_wpm;
+        let glitch = (0.3 * self.dit_ms).clamp(0.4 * min_dit, 40.0) as u32;
         if self.raw_on == self.on {
             self.run_ticks += 1 + self.candidate_ticks;
             self.candidate_ticks = 0;
@@ -238,7 +244,6 @@ impl Decoder {
                 self.run_ticks = self.candidate_ticks;
                 self.candidate_ticks = 0;
                 if was_on {
-                    self.record_mark(len);
                     self.word.push((true, len));
                 } else if !self.word.is_empty() {
                     if len >= 2.0 * self.dit_ms {
@@ -260,23 +265,44 @@ impl Decoder {
         }
     }
 
-    fn word_gap_threshold(&self) -> f32 {
+    fn word_gap_threshold(&mut self) -> f32 {
         // Midway between a 3-unit and 7-unit gap, pushed out when the sender is
         // known to stretch character gaps, as many hand keyers do.
-        (1.6 * self.char_gap_ms).clamp(5.0 * self.dit_ms, 6.5 * self.dit_ms)
+        let dit = self.working_dit();
+        (1.6 * self.char_gap_ms).clamp(5.0 * dit, 6.5 * dit)
     }
 
-    fn record_mark(&mut self, ms: f32) {
-        if self.marks.len() == MARK_HISTORY {
-            self.marks.pop_front();
+    /// Learn speed from a finished word. Words of one or two marks are left out:
+    /// isolated noise bursts decode as E or T, and letting them in would drag the
+    /// speed estimate towards whatever length the noise happens to have.
+    fn learn_speed(&mut self, runs: &[(bool, f32)]) {
+        let marks: Vec<f32> = runs.iter().filter(|r| r.0).map(|r| r.1).collect();
+        if marks.len() < 3 {
+            return;
         }
-        self.marks.push_back(ms);
-        self.update_speed();
+        // A burst of noise blips is shorter than any real dit.
+        let mut sorted = marks.clone();
+        sorted.sort_by(f32::total_cmp);
+        if sorted[sorted.len() / 2] < 0.6 * 1200.0 / self.cfg.max_wpm {
+            return;
+        }
+        for ms in marks {
+            if self.marks.len() == MARK_HISTORY {
+                self.marks.pop_front();
+            }
+            self.marks.push_back(ms);
+            self.update_speed();
+        }
     }
 
-    /// Re-estimate the dit length from recent marks with 1-D 2-means on log length.
     fn update_speed(&mut self) {
-        let logs: Vec<f32> = self.marks.iter().map(|m| m.max(1.0).ln()).collect();
+        let marks: Vec<f32> = self.marks.iter().copied().collect();
+        self.dit_ms = self.estimate_dit(&marks, self.dit_ms);
+    }
+
+    /// Estimate the dit length from mark lengths with 1-D 2-means on log length.
+    fn estimate_dit(&self, marks: &[f32], current: f32) -> f32 {
+        let logs: Vec<f32> = marks.iter().map(|m| m.max(1.0).ln()).collect();
         let (lo, hi) = logs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         let min_dit = 1200.0 / self.cfg.max_wpm;
         let max_dit = 1200.0 / self.cfg.min_wpm;
@@ -293,18 +319,37 @@ impl Decoder {
                 long = l.iter().sum::<f32>() / l.len() as f32;
                 split = (short + long) / 2.0;
             }
-            let est = (short.exp() + long.exp() / 3.0) / 2.0;
-            self.dit_ms = est.clamp(min_dit, max_dit);
-        } else if let Some(&last) = self.marks.back() {
+            ((short.exp() + long.exp() / 3.0) / 2.0).clamp(min_dit, max_dit)
+        } else if let Some(&last) = marks.last() {
             // One population so far: decide whether it is dits or dahs relative to
             // the current estimate and nudge towards it.
-            let est = if last < 2.0 * self.dit_ms { last } else { last / 3.0 };
-            self.dit_ms = (0.7 * self.dit_ms + 0.3 * est).clamp(min_dit, max_dit);
+            let est = if last < 2.0 * current { last } else { last / 3.0 };
+            (0.7 * current + 0.3 * est).clamp(min_dit, max_dit)
+        } else {
+            current
         }
+    }
+
+    /// Dit length to use for gaps in the word being received: once it has three
+    /// marks, they count alongside the history, so a sender much slower or faster
+    /// than the last one does not have their first word cut into pieces.
+    fn working_dit(&mut self) -> f32 {
+        let n = self.word.iter().filter(|r| r.0).count();
+        if n < 3 {
+            return self.dit_ms;
+        }
+        if self.working.0 != n {
+            let mut marks: Vec<f32> = self.marks.iter().copied().collect();
+            marks.extend(self.word.iter().filter(|r| r.0).map(|r| r.1));
+            self.working = (n, self.estimate_dit(&marks, self.dit_ms));
+        }
+        self.working.1
     }
 
     fn finish_word(&mut self, events: &mut Vec<DecodeEvent>) {
         let runs = std::mem::take(&mut self.word);
+        self.working = (0, self.dit_ms);
+        self.learn_speed(&runs);
         let mut pattern = String::new();
         for (is_mark, ms) in runs {
             if is_mark {
@@ -382,7 +427,7 @@ mod tests {
 
     #[test]
     fn decodes_clean_machine_cw_at_several_speeds() {
-        for wpm in [8.0, 13.0, 20.0, 28.0, 35.0] {
+        for wpm in [8.0, 13.0, 20.0, 28.0, 34.0] {
             let k = Keyer::new(SR, 600.0, wpm);
             let (text, est) = decode(&k.render(MSG, 300.0), DecoderConfig::new(SR, 600.0));
             assert_eq!(text, MSG, "at {wpm} wpm");

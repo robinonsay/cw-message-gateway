@@ -33,6 +33,7 @@ fn main() {
                 Noise::new(seed + 100).add(&mut audio, Noise::sigma_for_snr(k.amplitude, snr, SR, 2500.0));
                 let mut cfg = DecoderConfig::new(SR, 600.0);
                 cfg.bandwidth_hz = bw;
+                if let Ok(q) = std::env::var("SQUELCH") { cfg.squelch_sigmas = q.parse().unwrap(); }
                 let mut d = Decoder::new(cfg);
                 let mut ev = d.push(&audio);
                 ev.extend(d.flush());

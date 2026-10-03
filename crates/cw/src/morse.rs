@@ -94,3 +94,41 @@ mod tests {
         assert!(!is_sendable('#'));
     }
 }
+
+/// Length of `text` in Morse units (dit = 1), as keyed: dah 3, element gap 1,
+/// character gap 3, word gap 7. Unsendable characters are skipped.
+pub fn units(text: &str) -> u32 {
+    let mut total = 0;
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for (wi, word) in words.iter().enumerate() {
+        let chars: Vec<&str> = word.chars().filter_map(encode_char).collect();
+        for (ci, p) in chars.iter().enumerate() {
+            total += p.chars().map(|e| if e == '.' { 1 } else { 3 }).sum::<u32>() + p.len() as u32 - 1;
+            if ci + 1 < chars.len() {
+                total += 3;
+            }
+        }
+        if wi + 1 < words.len() {
+            total += 7;
+        }
+    }
+    total
+}
+
+/// How long `text` takes to key at `wpm` (PARIS timing), in milliseconds.
+pub fn duration_ms(text: &str, wpm: u32) -> u64 {
+    units(text) as u64 * 1200 / wpm.max(1) as u64
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn paris() {
+        // PARIS is 43 units without its trailing word gap.
+        assert_eq!(units("PARIS"), 43);
+        assert_eq!(units("PARIS PARIS"), 93);
+        assert_eq!(duration_ms("PARIS", 20), 43 * 60);
+    }
+}

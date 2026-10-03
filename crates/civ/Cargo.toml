@@ -1,8 +1,9 @@
 [package]
 name = "civ"
 version = "0.1.0"
-description = "ICOM CI-V protocol for the IC-7300"
+description = "ICOM CI-V control of the IC-7300, plus a simulated radio for tests"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cw = { path = "../cw" }
