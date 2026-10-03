@@ -4,6 +4,9 @@
 //! `IC-7300_ENG_FM_12b`), Section 19 "CONTROL COMMAND": the data format on p. 19-2,
 //! the command table on pp. 19-3 to 19-8 and the data content descriptions on
 //! pp. 19-9 to 19-15. Quoted values are copied from those pages.
+//! A text copy of the manual is kept in the project files at
+//! `reference/IC-7300_ENG_FM_12b.txt`; Section 19 starts at line 8531 and the
+//! command table at line 8771.
 //!
 //! Points from the manual that the node relies on:
 //! - Frames are `FE FE 94 E0 Cn Sc Data FD`; the radio answers `FE FE E0 94 FB FD`
