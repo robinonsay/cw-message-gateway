@@ -184,18 +184,21 @@ impl<P: Port> Ic7300<P> {
 
     /// Discard anything already received, so that a reply to an earlier command
     /// cannot be read as the answer to the next one. After a timeout, first read
-    /// until the link goes quiet (one read timeout with nothing), since the late
-    /// reply may not have arrived yet.
+    /// until the link has been quiet for a whole reply timeout, since the late reply
+    /// may not have arrived yet (an OK carries no command echo, so a late one would
+    /// pass for the next set command's). A link that never goes quiet is read for
+    /// at most four timeouts.
     fn drain(&mut self) -> Result<()> {
         self.buf.clear();
         if std::mem::take(&mut self.resync) {
-            let deadline = Instant::now() + self.timeout;
+            let give_up = Instant::now() + self.timeout * 4;
+            let mut quiet_until = Instant::now() + self.timeout;
             let mut chunk = [0u8; 64];
-            while Instant::now() < deadline {
+            while Instant::now() < quiet_until.min(give_up) {
                 match self.port.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) if is_quiet(&e) => break,
+                    Ok(0) => {}
+                    Ok(_) => quiet_until = Instant::now() + self.timeout,
+                    Err(e) if is_quiet(&e) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -368,6 +371,10 @@ mod tests {
         /// Bytes still on their way: not seen by `discard_input`, readable (ahead of
         /// anything sent after them) on the next read.
         late: Vec<u8>,
+        /// Bytes that arrive at a given time, in order.
+        timed: VecDeque<(Instant, Vec<u8>)>,
+        /// When set, each scripted reply arrives this long after its command.
+        reply_delay: Option<Duration>,
     }
 
     impl Port for Script {
@@ -382,11 +389,16 @@ mod tests {
             for b in self.late.drain(..).rev() {
                 self.pending.push_front(b);
             }
+            while self.timed.front().is_some_and(|t| t.0 <= Instant::now()) {
+                self.pending.extend(self.timed.pop_front().unwrap().1);
+            }
             let n = buf.len().min(self.pending.len());
             for b in buf.iter_mut().take(n) {
                 *b = self.pending.pop_front().unwrap();
             }
             if n == 0 {
+                // Like the serial port's read timeout, shortened.
+                std::thread::sleep(Duration::from_millis(5));
                 return Err(std::io::ErrorKind::TimedOut.into());
             }
             Ok(n)
@@ -400,7 +412,10 @@ mod tests {
                 self.pending.extend(buf);
             }
             if let Some(r) = self.replies.pop_front() {
-                self.pending.extend(r);
+                match self.reply_delay {
+                    Some(d) => self.timed.push_back((Instant::now() + d, r)),
+                    None => self.pending.extend(r),
+                }
             }
             Ok(buf.len())
         }
@@ -421,6 +436,8 @@ mod tests {
                 pending: VecDeque::new(),
                 echo,
                 late: vec![],
+                timed: VecDeque::new(),
+                reply_delay: None,
             },
             0x94,
         )
@@ -542,6 +559,22 @@ mod tests {
         // The late OK to stop_cw turns up after the timeout, while the next command
         // is being prepared; the radio rejects that next command.
         r.port.late = reply(OK);
+        r.port.replies.push_back(reply(&[0xFA]));
+        assert!(matches!(r.set_transmit(false), Err(RigError::Rejected)));
+    }
+
+    #[test]
+    fn late_reply_after_a_pause_is_not_taken_as_the_next_one() {
+        let mut r = radio(&[], false);
+        r.timeout = Duration::from_millis(100);
+        // The OK to stop_cw arrives 160 ms after it was sent: after the timeout and
+        // after more than one quiet serial read.
+        r.port
+            .timed
+            .push_back((Instant::now() + Duration::from_millis(160), reply(OK)));
+        assert!(matches!(r.stop_cw(), Err(RigError::Timeout)));
+        // The radio answers the next command NG, slowly.
+        r.port.reply_delay = Some(Duration::from_millis(80));
         r.port.replies.push_back(reply(&[0xFA]));
         assert!(matches!(r.set_transmit(false), Err(RigError::Rejected)));
     }

@@ -255,7 +255,8 @@ hfnode radio --config $C cw "VVV DE N0CALL"
 hfnode radio --config $C status
 ```
 
-The node reads SWR (`15 12`) about 400 ms into the first piece it keys.
+The node reads SWR (`15 12`) repeatedly during the first second of the first piece
+it keys, counting only readings taken while the Po meter (`15 11`) shows output.
 
 **Look for:** the CW sent correctly at 18 wpm, `health: swr 1.0x` in the log, a
 `<time>,swr,1.0x` line in `health.csv`, `sent; see health.csv for the SWR reading`,
@@ -282,7 +283,8 @@ hfnode radio --config $C cw "VVV"
 hfnode radio --config $C status
 ```
 
-**Look for:** an error containing `SWR x.x above limit`, a `swr` line in
+**Look for:** an error containing `SWR x.x above limit` (or `no output while
+keying`, if the radio cut its own power into the load), a `swr` line in
 `health.csv`, and `transmitting: false`.
 
 **Pass:** with the 150-ohm load the node stops with the SWR error after well under a
@@ -466,8 +468,8 @@ The second station plays the field operator, inside a listening window, using
 
 **Look for:** in the log, `heard:`, `opened transaction`, `committed transaction`,
 `sending:`, and `no reply:` with a reason for each silent case. In `state_dir`:
-`last_seq` equal to the last commit, `rx.log` with every decoded transmission,
-`health.csv` with tune and SWR lines.
+`last_seq` equal to the highest line used (an open burns its line too), `rx.log`
+with every decoded transmission, `health.csv` with tune and SWR lines.
 
 **Pass:** every item behaves as described, the radio is on receive between
 exchanges, SWR readings stay steady.

@@ -150,8 +150,9 @@ outside NWS coverage). Those codes are used up.
 Send `NO K` after a wrong read-back. The node replies `R NO DE N0CALL K` and forgets
 the request. Cross off the open line and start over with the next two lines.
 
-A pending request is also forgotten if you do not commit within **10 minutes** of
-the read-back. A late `OK` then gets silence; start over with new lines.
+A pending request is also forgotten if you open a new one on fresh lines (the node
+reads back the new request), or if you do not commit within **10 minutes** of the
+read-back. A late `OK` then gets silence; start over with new lines.
 
 ### AGN: repeat
 

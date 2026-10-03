@@ -10,8 +10,8 @@
 //!   does not drop to receive part-way through a piece.
 //! - **Forced receive.** After any failure, and on shutdown, the keyer is stopped
 //!   and the radio switched to receive, then receive is confirmed by reading the
-//!   radio's status. If it cannot be confirmed, transmitting is inhibited until the
-//!   node is restarted.
+//!   radio's status, allowing for the break-in delay. If it cannot be confirmed,
+//!   transmitting is inhibited until the node is restarted.
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
 //!   receive is confirmed. It backs up, and does not replace, the hardware PTT
@@ -19,7 +19,9 @@
 //! - **SWR check.** SWR is sampled repeatedly during the first second or so of
 //!   keying, counting only samples taken with the Po meter showing output, and the
 //!   highest is used; above the limit the node stops and stays silent until the
-//!   next window. Until one such sample is obtained, every piece is sampled.
+//!   next window. If a piece is keyed without one such sample, the node also stops
+//!   and stays silent: the radio's own protection cuts its output into a bad load,
+//!   so missing output is itself a sign of one.
 //! - **Reduced power**, set at start-up.
 //! - **Tuning** at start-up and at the top of each listening window.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
@@ -91,6 +93,9 @@ pub enum TxError {
     SwrLockout,
     /// SWR was too high just now; the transmission was cut off.
     HighSwr(f32),
+    /// A piece was keyed without the Po meter showing output, so SWR could not be
+    /// measured; treated like high SWR (the radio cuts its power into a bad load).
+    NoOutput,
     /// The radio stayed on transmit too long and was forced back to receive.
     Stuck,
     /// The radio could not be confirmed back on receive; nothing more is sent until
@@ -104,6 +109,7 @@ impl std::fmt::Display for TxError {
         match self {
             Self::SwrLockout => write!(f, "transmit locked out after high SWR"),
             Self::HighSwr(s) => write!(f, "SWR {s:.1} above limit"),
+            Self::NoOutput => write!(f, "no output while keying: SWR not measured"),
             Self::Stuck => write!(f, "transmitter did not return to receive"),
             Self::Inhibited => write!(
                 f,
@@ -120,15 +126,33 @@ impl From<civ::RigError> for TxError {
     }
 }
 
-/// How many times [`force_receive`] tries before giving up.
+/// How many times [`force_receive`] tries, at least, before giving up.
 const FORCE_RX_ATTEMPTS: u32 = 3;
+
+/// Longest semi break-in delay the radio can be set to, in dots: "00 00=2.0d to
+/// 02 55=13.0d" (14 0F, p. 19-3).
+const MAX_BREAK_IN_DOTS: f32 = 13.0;
+
+/// A dot at the keyer's slowest speed, 6 wpm ("00 00=6wpm", 14 0C, p. 19-3), for
+/// when the speed cannot be read.
+const SLOWEST_DOT: Duration = Duration::from_millis(200);
 
 /// Put the radio on receive and confirm it: stop the keyer and switch to receive
 /// (each sent whether or not the other worked), then read the transmit status.
-/// Repeated a few times; an error means receive could not be confirmed.
+/// Repeated until receive is seen; an error means receive could not be confirmed.
+///
+/// With semi break-in the radio "returns to receive after a preset time after you
+/// stop keying" (p. 4-15), and the receive command may not cut that short, so the
+/// attempts go on for the longest break-in delay at the keyer's speed before giving
+/// up.
 pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
+    let dot = r.dot_duration().unwrap_or(SLOWEST_DOT);
+    let deadline = Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS);
     let mut last = RigError::Timeout;
-    for attempt in 0..FORCE_RX_ATTEMPTS {
+    for attempt in 0.. {
+        if attempt >= FORCE_RX_ATTEMPTS && Instant::now() >= deadline {
+            break;
+        }
         if attempt > 0 {
             thread::sleep(Duration::from_millis(100));
         }
@@ -340,14 +364,21 @@ impl<R: Rig + 'static> Station<R> {
 
     /// Sample SWR from `swr_delay` after `sent` until `swr_window` or `on_air` has
     /// passed, using only samples with the Po meter showing output on both sides of
-    /// the SWR reading (key-up reads as SWR 1.0). Marks SWR as checked only if
-    /// there was such a sample.
+    /// the SWR reading (key-up reads as SWR 1.0). Without such a sample by then,
+    /// sampling goes on until `on_air` has passed, and if there is still none the
+    /// piece is a fault: the radio reduces its output when the SWR is high
+    /// ("Power down transmission", p. 13-4), so the Po meter may never reach
+    /// `swr_min_po` into a bad load.
     fn check_swr(&mut self, sent: Instant, on_air: Duration) -> Result<(), TxError> {
-        let end = sent + self.cfg.swr_window.min(on_air);
+        let (first_end, end) = (sent + self.cfg.swr_window.min(on_air), sent + on_air);
         let min_po = self.cfg.swr_min_po;
         let mut worst: Option<f32> = None;
         self.sleep_until(sent + self.cfg.swr_delay)?;
-        while Instant::now() < end {
+        loop {
+            let now = Instant::now();
+            if now >= end || now >= first_end && worst.is_some() {
+                break;
+            }
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(TxError::Stuck);
             }
@@ -375,10 +406,15 @@ impl<R: Rig + 'static> Station<R> {
             Some(swr) => {
                 self.swr_checked = true;
                 self.health("swr", &format!("{swr:.2}"));
+                Ok(())
             }
-            None => log::warn!("no SWR reading with the key down; will sample the next piece"),
+            None => {
+                self.health("swr", "no-output");
+                self.swr_lockout = true;
+                log::error!("no output on the Po meter while keying: silent until next window");
+                Err(TxError::NoOutput)
+            }
         }
-        Ok(())
     }
 
     /// Sleep until `t`, stopping early if the watchdog fires.
@@ -578,13 +614,140 @@ mod tests {
     fn swr_is_checked_only_with_output_present() {
         let mut st = Station::new(fast_rig(), cfg(), None);
         st.configure().unwrap();
-        // No sample reaches the Po threshold: not checked, so sampled next time.
+        // No sample reaches the Po threshold: not checked, and treated as a fault.
         st.cfg.swr_min_po = 1000.0;
-        st.transmit(&tx(&["TEST"])).unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::NoOutput));
         assert!(!st.swr_checked);
         st.cfg.swr_min_po = 10.0;
+        st.start_window().unwrap();
         st.rig().lock().unwrap().swr = 3.5;
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+    }
+
+    /// A [`SimRig`] with two things a real radio may do: fold its output back to a
+    /// fifth when the SWR is above 3:1 ("Power down transmission", p. 13-4), and
+    /// stay on transmit for the break-in delay after being told to stop.
+    struct Radio {
+        sim: SimRig,
+        foldback: bool,
+        hang_after_stop: bool,
+        hang_until: Option<Instant>,
+    }
+
+    impl Radio {
+        fn new(sim: SimRig) -> Self {
+            Self {
+                sim,
+                foldback: false,
+                hang_after_stop: false,
+                hang_until: None,
+            }
+        }
+
+        fn hang(&mut self) -> civ::Result<()> {
+            if self.hang_after_stop && self.hang_until.is_none() && self.sim.is_transmitting()? {
+                let hang = self
+                    .sim
+                    .dot_duration()?
+                    .mul_f32(self.sim.break_in_delay_dots);
+                self.hang_until = Some(Instant::now() + hang);
+            }
+            Ok(())
+        }
+    }
+
+    impl Rig for Radio {
+        fn frequency(&mut self) -> civ::Result<u64> {
+            self.sim.frequency()
+        }
+        fn set_frequency(&mut self, hz: u64) -> civ::Result<()> {
+            self.sim.set_frequency(hz)
+        }
+        fn set_mode_cw(&mut self) -> civ::Result<()> {
+            self.sim.set_mode_cw()
+        }
+        fn set_rf_power_watts(&mut self, watts: u32) -> civ::Result<()> {
+            self.sim.set_rf_power_watts(watts)
+        }
+        fn set_key_speed(&mut self, wpm: u32) -> civ::Result<()> {
+            self.sim.set_key_speed(wpm)
+        }
+        fn set_break_in(&mut self, on: bool) -> civ::Result<()> {
+            self.sim.set_break_in(on)
+        }
+        fn set_break_in_delay(&mut self, dots: f32) -> civ::Result<()> {
+            self.sim.set_break_in_delay(dots)
+        }
+        fn dot_duration(&mut self) -> civ::Result<Duration> {
+            self.sim.dot_duration()
+        }
+        fn start_tune(&mut self) -> civ::Result<()> {
+            self.sim.start_tune()
+        }
+        fn tuner_busy(&mut self) -> civ::Result<bool> {
+            self.sim.tuner_busy()
+        }
+        fn read_swr(&mut self) -> civ::Result<f32> {
+            self.sim.read_swr()
+        }
+        fn read_po(&mut self) -> civ::Result<f32> {
+            let po = self.sim.read_po()?;
+            Ok(if self.foldback && self.sim.swr > 3.0 {
+                po / 5.0
+            } else {
+                po
+            })
+        }
+        fn send_cw(&mut self, text: &str) -> civ::Result<()> {
+            self.hang_until = None;
+            self.sim.send_cw(text)
+        }
+        fn stop_cw(&mut self) -> civ::Result<()> {
+            self.hang()?;
+            self.sim.stop_cw()
+        }
+        fn is_transmitting(&mut self) -> civ::Result<bool> {
+            let hanging = self.hang_until.is_some_and(|t| Instant::now() < t);
+            Ok(hanging || self.sim.is_transmitting()?)
+        }
+        fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
+            if !tx {
+                self.hang()?;
+            }
+            self.sim.set_transmit(tx)
+        }
+    }
+
+    #[test]
+    fn output_cut_back_by_a_bad_load_stops_keying() {
+        // 10:1 SWR: the radio's output drops to 8 W, below the 10 W threshold, so no
+        // SWR sample ever counts.
+        let mut rig = Radio::new(fast_rig());
+        rig.foldback = true;
+        rig.sim.swr = 10.0;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        let long = tx(&["R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K"]);
+        assert_eq!(st.transmit(&long), Err(TxError::NoOutput));
+        assert_eq!(st.transmit(&long), Err(TxError::SwrLockout));
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        assert_eq!(r.sim.sent.len(), 1, "stopped after the first piece");
+        assert!(!r.is_transmitting().unwrap());
+    }
+
+    #[test]
+    fn forced_receive_waits_out_the_break_in_delay() {
+        // Real time: the radio holds transmit for 10 dots (600 ms at 20 wpm) after
+        // the high-SWR cut-off, longer than three quick status checks.
+        let mut rig = Radio::new(SimRig::new());
+        rig.hang_after_stop = true;
+        rig.sim.swr = 3.5;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        assert!(!st.tx_inhibited());
+        assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
     }
 
     #[test]

@@ -12,7 +12,8 @@
 //!   times out.
 //! - Nothing beyond a read-back is transmitted until a second code commits it.
 //! - Retries are idempotent and cost no new codes: re-sending exactly the pending
-//!   open repeats the read-back; any other open while one is pending is refused.
+//!   open repeats the read-back. Any other open with the pending sequence number or
+//!   lower is refused; a valid open on fresh lines replaces the pending one.
 //!   Re-sending the commit repeats its result, but only a few times, only shortly
 //!   after the commit, and only until a newer transaction opens.
 //! - Silence is the NACK. Anything that fails to parse or authenticate gets no reply.
@@ -192,9 +193,9 @@ impl Session {
         now: Instant,
         svc: &mut dyn Services,
     ) -> Outcome {
-        // Idempotent retry of the open we are already holding. Anything else is
-        // refused while a transaction is pending, so a heard code can never swap in
-        // a different command for the field's OK to commit. Silence, not "R NO":
+        // Idempotent retry of the open we are already holding. Any other open with
+        // that sequence number or lower is refused, so a heard code can never swap
+        // in a different command for the field's OK to commit. Silence, not "R NO":
         // keying a reply to an unauthenticated open would only give an attacker
         // airtime, and the field can still send NO or wait for the timeout.
         if let Some(p) = &self.pending {
@@ -202,13 +203,22 @@ impl Session {
             {
                 return Outcome::Transmit(p.read_back.clone());
             }
-            return Outcome::Silent(format!(
-                "open {seq} from {call} refused: transaction {} is pending",
-                p.open_seq
-            ));
+            if seq <= p.open_seq {
+                return Outcome::Silent(format!(
+                    "open {seq} from {call} refused: transaction {} is pending",
+                    p.open_seq
+                ));
+            }
         }
+        // A later open with a valid code replaces a pending transaction: the field
+        // may have missed the read-back and moved on to fresh lines. Every code up
+        // to the pending open is burned, so a heard one cannot do this, and the
+        // field's OK must follow the new open.
         if let Err(e) = self.verifier.check(seq, code) {
             return Outcome::Silent(format!("open from {call} rejected: {e}"));
+        }
+        if let Some(p) = &self.pending {
+            log::info!("open {seq} from {call} replaces transaction {}", p.open_seq);
         }
         // Burn the open code before the read-back: if this write fails, do nothing.
         if let Err(e) = self.store.save(seq) {
@@ -725,8 +735,6 @@ mod tests {
         tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
         // An eavesdropper reuses the heard code with other text.
         assert!(silent(&r.send(10, "W5XXX 42 {42} TX BOB EVIL K")));
-        // Nor can a different open take over while one is pending.
-        assert!(silent(&r.send(15, "W5XXX 44 {44} TX BOB EVIL K")));
         // The exact retry is still answered.
         assert_eq!(
             tx(&r.send(20, "W5XXX 42 {42} TX MOM HI K")),
@@ -734,6 +742,28 @@ mod tests {
         );
         tx(&r.send(30, "OK 43 {43} K"));
         assert_eq!(r.svc.sent, [("MOM".to_string(), "HI".to_string())]);
+    }
+
+    #[test]
+    fn a_fresh_open_replaces_the_pending_one() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM RUNNING LATE K"));
+        // The field missed the read-back; its repeat is miscopied, so it is refused.
+        assert!(silent(&r.send(10, "W5XXX 42 {42} TX MOM RUNNING LATF K")));
+        // It moves on to fresh lines, as the operating guide says.
+        assert_eq!(
+            tx(&r.send(20, "W5XXX 44 {44} TX MOM RUNNING LATE K")),
+            "R 44 TX MOM RUNNING LATE ? DE N0DE K"
+        );
+        assert_eq!(r.stored_seq(), 44);
+        // The old transaction's OK no longer commits anything; the new one's does.
+        assert!(silent(&r.send(30, "OK 43 {43} K")));
+        assert!(r.svc.sent.is_empty());
+        tx(&r.send(40, "OK 45 {45} K"));
+        assert_eq!(
+            r.svc.sent,
+            [("MOM".to_string(), "RUNNING LATE".to_string())]
+        );
     }
 
     #[test]
