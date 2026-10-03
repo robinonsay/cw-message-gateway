@@ -19,9 +19,12 @@
 //!    gaps, and look up each finished pattern in the Morse table.
 //!
 //! Since the floor only moves while the key is up, a jump in the noise level (or a
-//! steady carrier) would hold the key down, or chattering, indefinitely. If the key
-//! has not been up for a real gap in longer than any character can last, what was
-//! heard since is dropped and the levels are learned afresh.
+//! steady carrier) would hold the key down, or chattering, indefinitely. A tone's
+//! envelope is steady while noise's fluctuates, so a mark whose envelope varies like
+//! noise is taken for a jump in the noise level as soon as it has lasted long enough
+//! to tell (about 100 ms): what was heard since the last real gap is dropped and the
+//! levels are learned afresh. The same happens if the key has not been up for a real
+//! gap in longer than any character can last (a steady carrier).
 
 use crate::morse::decode_pattern;
 use std::collections::VecDeque;
@@ -138,11 +141,29 @@ pub struct Decoder {
     /// of `word` at that time.
     busy_ticks: u32,
     busy_word_len: usize,
+    /// Detector magnitude inside the current mark, edges left out: (count, sum, sum
+    /// of squares), and the latest samples, held back until they are clear of the
+    /// mark's end.
+    texture: (u32, f64, f64),
+    texture_tail: VecDeque<f32>,
+    /// Set while settling again after [`Decoder::relearn_levels`]: the mean envelope
+    /// so far, whose lower half alone teaches the floor.
+    relearn_mean: Option<f32>,
 }
 
 const MARK_HISTORY: usize = 24;
 /// Ticks of audio before the floor estimate is trusted.
 const SETTLE_TICKS: u32 = 100;
+/// Ticks left out at each end of a mark when judging its texture: the filter's rise
+/// and fall, plus the debounce at the end.
+const TEXTURE_EDGE_TICKS: usize = 20;
+/// Inside ticks needed before a mark's texture is judged.
+const TEXTURE_MIN_TICKS: u32 = 60;
+/// Coefficient of variation of the magnitude above which a mark is noise. Band
+/// noise gives a Rayleigh envelope (0.52); a tone at the lowest usable SNR (-4 dB in
+/// 2500 Hz) stays below about 0.35. Only fast elements that noise has already run
+/// together go above it.
+const NOISE_CV: f64 = 0.4;
 
 impl Decoder {
     pub fn new(cfg: DecoderConfig) -> Self {
@@ -174,6 +195,9 @@ impl Decoder {
             idle_ms: 0,
             busy_ticks: 0,
             busy_word_len: 0,
+            texture: (0, 0.0, 0.0),
+            texture_tail: VecDeque::new(),
+            relearn_mean: None,
             cfg,
         }
     }
@@ -225,9 +249,14 @@ impl Decoder {
     pub fn push(&mut self, samples: &[f32]) -> Vec<DecodeEvent> {
         let mut events = Vec::new();
         for &x in samples {
-            // One NaN would poison every filter and level for good; zero keeps the
-            // time base.
-            let x = if x.is_finite() { x } else { 0.0 };
+            // One NaN, or a sample so large that its square overflows, would poison
+            // every filter and level for good; zero or clamp it (full scale is 1.0),
+            // keeping the time base.
+            let x = if x.is_finite() {
+                x.clamp(-4.0, 4.0)
+            } else {
+                0.0
+            };
             self.phase = (self.phase + self.phase_step).rem_euclid(2.0 * PI);
             let (s, c) = self.phase.sin_cos();
             let mut i = x * c;
@@ -262,7 +291,24 @@ impl Decoder {
         self.env += (mag - self.env) / tau;
 
         self.ticks_seen = self.ticks_seen.saturating_add(1);
-        if self.ticks_seen <= SETTLE_TICKS {
+        if let Some(mean) = &mut self.relearn_mean {
+            // Learning the levels again, perhaps while a station is keying: only the
+            // lower half of the envelope teaches the floor, and only samples near the
+            // floor teach the deviation, so the tone is not taken for noise and
+            // squelched.
+            *mean += 0.05 * (self.env - *mean);
+            if self.env <= *mean {
+                self.floor += 0.1 * (self.env - self.floor);
+            }
+            if self.env > 0.5 * self.floor && self.env < 2.0 * self.floor {
+                self.dev += 0.05 * ((self.env - self.floor).abs() - self.dev);
+            }
+            if self.ticks_seen <= SETTLE_TICKS {
+                self.peak = self.floor;
+                return;
+            }
+            self.relearn_mean = None;
+        } else if self.ticks_seen <= SETTLE_TICKS {
             // Filter settling: just learn the floor.
             self.floor += 0.05 * (self.env - self.floor);
             self.dev += 0.05 * ((self.env - self.floor).abs() - self.dev);
@@ -325,6 +371,26 @@ impl Decoder {
             }
         }
 
+        // Noise held above a stale floor.
+        if self.on {
+            if self.run_ticks as usize > glitch as usize + TEXTURE_EDGE_TICKS {
+                self.texture_tail.push_back(mag);
+            }
+            while self.texture_tail.len() > glitch as usize + TEXTURE_EDGE_TICKS {
+                let m = f64::from(self.texture_tail.pop_front().unwrap_or(0.0));
+                self.texture.0 += 1;
+                self.texture.1 += m;
+                self.texture.2 += m * m;
+            }
+            if self.texture.0 >= TEXTURE_MIN_TICKS && self.mark_is_noise() {
+                self.relearn_levels(events);
+                return;
+            }
+        } else if self.texture.0 > 0 || !self.texture_tail.is_empty() {
+            self.texture = (0, 0.0, 0.0);
+            self.texture_tail.clear();
+        }
+
         // Stale levels: no real gap for longer than any character lasts.
         if !self.on && self.run_ticks as f32 >= 2.0 * min_dit {
             self.busy_ticks = 0;
@@ -348,6 +414,14 @@ impl Decoder {
         }
     }
 
+    /// Whether the inside of the current mark fluctuates like noise.
+    fn mark_is_noise(&self) -> bool {
+        let (n, sum, sq) = self.texture;
+        let mean = sum / f64::from(n);
+        let var = (sq / f64::from(n) - mean * mean).max(0.0);
+        mean > 0.0 && var.sqrt() > NOISE_CV * mean
+    }
+
     /// Longest real CW can go without the key up for `2 * min_dit`: a dah at the
     /// slowest speed, or the longest character (0, 19 units) at the speed whose
     /// element gaps are that short, with 30% to spare for hand keying.
@@ -359,7 +433,8 @@ impl Decoder {
 
     /// The noise level jumped or a carrier came up while the floor was frozen. Drop
     /// the runs heard since the last real gap so they neither decode nor train the
-    /// speed, finish the word before them, and learn the levels again from here.
+    /// speed, finish the word before them, and learn the levels again from here (a
+    /// station may already be keying, so see `relearn_mean`).
     fn relearn_levels(&mut self, events: &mut Vec<DecodeEvent>) {
         self.word.truncate(self.busy_word_len);
         if !self.word.is_empty() {
@@ -372,7 +447,10 @@ impl Decoder {
         self.candidate_ticks = 0;
         self.busy_ticks = 0;
         self.busy_word_len = 0;
+        self.texture = (0, 0.0, 0.0);
+        self.texture_tail.clear();
         self.floor = self.env;
+        self.relearn_mean = Some(self.env);
         self.ticks_seen = 0;
     }
 
@@ -609,9 +687,16 @@ mod tests {
     }
 
     /// Quiet band for `quiet_s`, then the noise jumps by `step_db` and stays up, and
-    /// `msg` starts `delay_s` after the step.
-    fn noise_step(quiet_s: f32, step_db: f32, delay_s: f32, msg: &str, seed: u64) -> Vec<f32> {
-        let k = Keyer::new(SR, 600.0, 18.0);
+    /// `msg` starts `delay_s` after the step, sent at `wpm`.
+    fn noise_step(
+        wpm: f32,
+        quiet_s: f32,
+        step_db: f32,
+        delay_s: f32,
+        msg: &str,
+        seed: u64,
+    ) -> Vec<f32> {
+        let k = Keyer::new(SR, 600.0, wpm);
         let quiet = (quiet_s * SR as f32) as usize;
         let mut audio = vec![0.0; quiet];
         audio.extend(k.render(msg, delay_s * 1000.0));
@@ -632,7 +717,7 @@ mod tests {
     fn noise_step_does_not_latch_a_false_mark() {
         const SHORT: &str = "OK 43 WBNFHJGC K";
         for (seed, step_db) in [(1, 10.0), (2, 10.0), (3, 15.0), (5, 20.0)] {
-            let audio = noise_step(5.0, step_db, 4.0, SHORT, seed);
+            let audio = noise_step(18.0, 5.0, step_db, 4.0, SHORT, seed);
             let (text, est) = decode(&audio, DecoderConfig::new(SR, 600.0));
             assert!(
                 ends_with_message(&text, SHORT),
@@ -643,11 +728,67 @@ mod tests {
         // A decoder that settled on digital silence, then hears band noise.
         for (seed, step_db) in [(1, 0.0), (2, 10.0)] {
             let mut audio = vec![0.0; SR as usize / 8];
-            audio.extend(noise_step(0.0, step_db, 4.0, SHORT, seed));
+            audio.extend(noise_step(18.0, 0.0, step_db, 4.0, SHORT, seed));
             let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
             assert!(
                 ends_with_message(&text, SHORT),
                 "noise +{step_db} dB after silence, seed {seed}: {text:?}"
+            );
+        }
+    }
+
+    /// `msg` decoded as a run of words of its own, whatever noise letters come
+    /// before or after it.
+    fn contains_message(text: &str, msg: &str) -> bool {
+        let words: Vec<&str> = text.split(' ').collect();
+        let want: Vec<&str> = msg.split(' ').collect();
+        words.windows(want.len()).any(|w| w == want.as_slice())
+    }
+
+    #[test]
+    fn noise_step_just_before_a_message() {
+        const SHORT: &str = "OK 43 WBNFHJGC K";
+        // The message starts a second after the step: sooner than the noise can be
+        // told from a carrier by length alone.
+        for step_db in [10.0, 20.0, 30.0] {
+            for seed in 1..=3 {
+                let audio = noise_step(18.0, 5.0, step_db, 1.0, SHORT, seed);
+                let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+                assert!(
+                    ends_with_message(&text, SHORT),
+                    "+{step_db} dB step, seed {seed}: {text:?}"
+                );
+            }
+        }
+        // A fresh decoder, as at a window opening: it settles on digital silence,
+        // then band noise arrives with the message close behind.
+        for wpm in [18.0, 25.0] {
+            for delay_s in [1.0, 1.4] {
+                for seed in 1..=4 {
+                    let mut audio = vec![0.0; SR as usize / 8];
+                    audio.extend(noise_step(wpm, 0.0, 0.0, delay_s, SHORT, seed));
+                    let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+                    assert!(
+                        ends_with_message(&text, SHORT),
+                        "{wpm} wpm {delay_s} s after the noise, seed {seed}: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noise_step_does_not_train_the_speed() {
+        // A small step holds the key down for a few hundred ms at a time. Those
+        // marks must not be learned as dahs, or the message's words run together
+        // long after.
+        const SHORT: &str = "OK 43 WBNFHJGC K";
+        for (wpm, delay_s, seed) in [(25.0, 15.0, 3), (25.0, 30.0, 3), (32.0, 15.0, 1)] {
+            let audio = noise_step(wpm, 5.0, 6.0, delay_s, SHORT, seed);
+            let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
+            assert!(
+                contains_message(&text, SHORT),
+                "{wpm} wpm, {delay_s} s after a +6 dB step: {text:?}"
             );
         }
     }
@@ -677,6 +818,22 @@ mod tests {
         audio[SR as usize] = f32::INFINITY;
         let (text, _) = decode(&audio, DecoderConfig::new(SR, 600.0));
         assert_eq!(text, MSG);
+    }
+
+    #[test]
+    fn survives_huge_samples() {
+        // Finite, but its square overflows to infinity.
+        let k = Keyer::new(SR, 600.0, 18.0);
+        for big in [3e38, f32::MAX, f32::MIN] {
+            let mut audio = vec![big];
+            audio.extend(k.render(MSG, 300.0));
+            let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+            let mut events = d.push(&audio);
+            events.extend(d.push(&vec![0.0; SR as usize * 2]));
+            assert_eq!(events_to_text(&events), MSG, "after {big}");
+            let (floor, dev, peak) = d.levels();
+            assert!(floor.is_finite() && dev.is_finite() && peak.is_finite());
+        }
     }
 
     #[test]
