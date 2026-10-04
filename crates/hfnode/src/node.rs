@@ -550,8 +550,9 @@ mod tests {
     /// Unix time at the top of an hour: inside the default window (minutes 0-9).
     const WINDOW_OPEN: u64 = 1_699_999_200;
 
-    /// Run the node on `audio` (8 kHz) with a simulated radio (time scale 100),
-    /// delivering 50 ms blocks as fast as the node takes them.
+    /// Run the node on `audio` (8 kHz) with a simulated radio (time scale 100, or
+    /// `HFNODE_E2E_SCALE` as for the mock-radio tests), delivering 50 ms blocks as
+    /// fast as the node takes them.
     fn run_node(audio: Vec<f32>) -> Heard {
         run_node_with(audio, Opts::default())
     }
@@ -592,7 +593,13 @@ mod tests {
         assert_eq!(cfg.audio.sample_rate, 8000);
 
         let mut rig = SimRig::new();
-        rig.time_scale = 100.0;
+        // The window's `DE N0DE` is on the air for about 35 ms at 100x: a machine
+        // that wakes the SWR check late (GitHub's macOS runner) can miss all of
+        // its output and lock the window out, so CI runs these slower there.
+        rig.time_scale = std::env::var("HFNODE_E2E_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100.0);
         rig.tuner_bypassed = opts.tuner_bypassed;
         let mut sc = StationConfig::from_config(&cfg.station);
         sc.poll = Duration::from_millis(2);

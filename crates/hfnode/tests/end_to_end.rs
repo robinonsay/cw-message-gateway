@@ -88,7 +88,12 @@ fn field_message_over_the_air_is_sent() {
     );
 
     let mut rig = SimRig::new();
-    rig.time_scale = 100.0;
+    // 100x real time, or `HFNODE_E2E_SCALE` on a slow machine: there the short
+    // window ID can go by before the SWR check samples it.
+    rig.time_scale = std::env::var("HFNODE_E2E_SCALE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100.0);
     let mut sc = StationConfig::from_config(&cfg.station);
     sc.poll = Duration::from_millis(2);
     sc.swr_delay = Duration::from_millis(2);
