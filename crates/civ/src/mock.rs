@@ -1669,8 +1669,13 @@ mod tests {
                 }
             })
         };
+        // The dial really is at 7 030 010 for a moment between the two turns, so a
+        // read may see either setting; what matters is that every reply is the
+        // driver's own and never a transceive frame.
+        let dial = |hz: u64| hz == 7_030_000 || hz == 7_030_010;
         for _ in 0..50 {
-            assert_eq!(r.frequency().unwrap(), 7_030_000);
+            let hz = r.frequency().unwrap();
+            assert!(dial(hz), "{hz}");
             assert!(!r.is_transmitting().unwrap());
             r.set_break_in(true).unwrap();
         }
@@ -1684,9 +1689,11 @@ mod tests {
         });
         assert!(matches!(r.frequency(), Err(RigError::Timeout)));
         assert!(!r.is_transmitting().unwrap());
-        assert_eq!(r.frequency().unwrap(), 7_030_000);
+        let hz = r.frequency().unwrap();
+        assert!(dial(hz), "{hz}");
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         knob.join().unwrap();
+        assert_eq!(r.frequency().unwrap(), 7_030_000);
         assert!(m.report().violations.is_empty());
     }
 
