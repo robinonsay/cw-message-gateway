@@ -522,9 +522,11 @@ impl<R: Rig + 'static> Station<R> {
         let min_po = self.cfg.swr_min_po;
         let mut worst: Option<f32> = None;
         self.sleep_until(sent + self.cfg.swr_delay)?;
+        // At least one sample, however late this thread gets to run.
+        let mut sampled = false;
         loop {
             let now = Instant::now();
-            if now >= end || now >= first_end && worst.is_some() {
+            if sampled && (now >= end || now >= first_end && worst.is_some()) {
                 break;
             }
             if self.watchdog_fired.load(Ordering::SeqCst) {
@@ -549,6 +551,7 @@ impl<R: Rig + 'static> Station<R> {
                 );
                 return Err(TxError::Inhibited);
             }
+            sampled = true;
             if let Some((swr, _)) = sample {
                 worst = Some(worst.map_or(swr, |w| w.max(swr)));
                 if swr > self.cfg.swr_limit {
@@ -711,8 +714,12 @@ mod tests {
 
     #[test]
     fn keying_run_stays_watched_until_receive() {
-        // Keying ends long after send_cw returns; the watchdog must still see it.
-        let mut rig = fast_rig();
+        // Keying ends long after send_cw returns, and 1.5 s (simulated) after the
+        // station's own estimate of its end; the watchdog must still see it. At 10x
+        // the SWR check has about 200 ms of key-down to sample, so a busy machine
+        // does not turn this into a missed SWR reading.
+        let mut rig = SimRig::new();
+        rig.time_scale = 10.0;
         rig.tx_on_delay = Duration::from_millis(1500);
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
@@ -720,7 +727,8 @@ mod tests {
         let rig = st.rig();
         let watcher = thread::spawn(move || {
             let mut unwatched = 0;
-            for _ in 0..200 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
                 {
                     let mut r = rig.lock().unwrap();
                     if r.keyer_busy() && since.lock().unwrap().is_none() {
@@ -734,7 +742,7 @@ mod tests {
             }
             unwatched
         });
-        st.transmit(&tx(&["TEST"])).unwrap();
+        st.transmit(&tx(&["TEST TEST"])).unwrap();
         assert_eq!(watcher.join().unwrap(), 0);
     }
 

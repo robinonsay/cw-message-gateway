@@ -23,7 +23,8 @@ pub struct SimRig {
     /// Every piece of text keyed, in order.
     pub sent: Vec<String>,
     pub tunes: u32,
-    /// When set, the transmitter never drops back to receive by itself.
+    /// When set, the key sticks down once keying starts: the carrier stays on and
+    /// the transmitter never drops back to receive by itself, until stopped.
     pub stuck_key: bool,
     /// Time from a CW message being accepted to the transmitter switching on and the
     /// keyer starting (simulated time).
@@ -135,6 +136,11 @@ impl SimRig {
         }
     }
 
+    fn key_down(&self, now: Instant) -> bool {
+        let stuck = self.stuck_key && self.keying.as_ref().is_some_and(|k| now >= k.start);
+        stuck || self.phase(now).key_down
+    }
+
     /// Whether the keyer still has text to send.
     pub fn keyer_busy(&self) -> bool {
         self.phase(Instant::now()).busy
@@ -203,7 +209,7 @@ impl Rig for SimRig {
     }
 
     fn read_swr(&mut self) -> Result<f32> {
-        Ok(if self.phase(Instant::now()).key_down {
+        Ok(if self.key_down(Instant::now()) {
             self.swr
         } else {
             1.0
@@ -211,7 +217,7 @@ impl Rig for SimRig {
     }
 
     fn read_po(&mut self) -> Result<f32> {
-        Ok(if self.phase(Instant::now()).key_down {
+        Ok(if self.key_down(Instant::now()) {
             self.power_watts as f32
         } else {
             0.0
