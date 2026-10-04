@@ -240,8 +240,10 @@ does not allow. Turn off "Install macOS updates" under System Settings > General
 Software Update > Automatic Updates, so that an update does not restart the Mac
 and leave the node stopped.
 
-**Clock.** Listening windows are computed from UTC, so keep "Set time and date
-automatically" on (System Settings > General > Date & Time).
+**Clock.** If you set the node to listen in windows (`schedule.always = false`),
+they are computed from UTC, so keep "Set time and date automatically" on (System
+Settings > General > Date & Time). Listening all the time, the default, does not
+depend on the clock.
 
 ## 8. Stopping, updating, and the transmit inhibit
 
@@ -250,6 +252,10 @@ agent). The node stops the radio's keyer and confirms receive before it exits; t
 radio may first finish the text already in its keyer (at most 30 characters). The
 script then checks receive again. Closing the window sends the same stop, but
 you cannot see whether receive was confirmed, so prefer Ctrl-C.
+
+**Using the radio yourself.** Stop the node first, and start it again when you
+are done. While it runs, it puts its frequency, mode, power and keyer settings back
+every `schedule.check_minutes` (10) and before every transmission.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive, it stops transmitting and writes
