@@ -89,14 +89,21 @@ right.
 
 **Thinking.** Many current models reason ("think") before they answer, and do so
 by default. It makes each reply slower (on a Mac, seconds to half a minute
-instead of a second or two) and can make the verdict better. Speed rarely
-matters here: replies are screened when the mail arrives, long before you ask for
-them with `RX`. The filter leaves the model about 6,000 tokens to think and answer
-in; a model that uses them all without answering has the reply withheld, and
-`hfnode filter test` says so. Set `think = false` to turn thinking off, then run
-`hfnode filter test` again: in testing on a Mac, two 9B models stayed 10 out of 10
-without thinking and a third let profanity through. Some models reason whatever
-the setting.
+instead of a second or two) and can make the verdict better. On a Mac, speed
+rarely matters: replies are screened when the mail arrives, long before you ask
+for them with `RX`. The filter leaves the model about 6,000 tokens to think and
+answer in; a model that uses them all without answering has the reply withheld,
+and `hfnode filter test` says so. Set `think = false` to turn thinking off, then
+run `hfnode filter test` again: in testing on a Mac, two 9B models stayed 10 out
+of 10 without thinking and a third let profanity through. Some models, gpt-oss
+(including `gpt-oss-safeguard`) among them, reason whatever the setting.
+
+On a Raspberry Pi or another computer without a GPU, thinking is far slower and
+usually runs past `timeout_secs` before it reaches that limit. The reply is then
+held and tried again, and withheld after the third timeout; `hfnode filter test`
+shows a timeout. There, set `think = false` and run `hfnode filter test` again, or
+point `base_url` at a faster machine. A longer `timeout_secs` only takes more
+CPU from the CW decoder.
 
 Local models get the same rules as Claude, plus worked examples, the instruction to
 treat the message as data rather than instructions, and a different tie-break:

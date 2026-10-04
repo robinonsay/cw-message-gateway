@@ -660,7 +660,14 @@ fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
                             println!("    expected: {:?}", s.expect);
                         }
                     }
-                    Err(e) => println!("    FAIL filter unavailable after {secs:.1} s: {e:#}"),
+                    Err(e) => {
+                        println!("    FAIL filter unavailable after {secs:.1} s: {e:#}");
+                        if filter::timed_out(&e) && cfg.filter.think != Some(false) {
+                            println!(
+                                "    a model that thinks may not finish in time: see filter.think"
+                            );
+                        }
+                    }
                 }
             }
             let total = filter::SAMPLES.len();

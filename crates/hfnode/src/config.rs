@@ -225,7 +225,8 @@ pub struct Filter {
     pub threads: Option<u32>,
     /// Ollama only: whether a model that can reason before answering does so.
     /// Unset, the model decides (those that can, do). `false` is much faster, but
-    /// some models then judge worse: check with `hfnode filter test`.
+    /// some models then judge worse: check with `hfnode filter test`. Some models,
+    /// gpt-oss among them, reason whatever this says.
     #[serde(default)]
     pub think: Option<bool>,
     /// How long one screening may take. A message is held and tried again after a

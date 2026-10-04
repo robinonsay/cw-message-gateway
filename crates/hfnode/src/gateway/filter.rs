@@ -263,8 +263,8 @@ impl Screener {
                 f.model,
                 f.base,
                 match f.think {
-                    Some(true) => ", thinking on",
-                    Some(false) => ", thinking off",
+                    Some(true) => ", think = true",
+                    Some(false) => ", think = false",
                     None => "",
                 }
             ),
@@ -452,13 +452,15 @@ pub fn parse_ollama(v: &Value) -> Result<Verdict> {
         bail!("Ollama response has no message");
     };
     if v["done_reason"] == "length" {
+        // Out of room before the answer began: the model spent it all thinking.
+        let still_thinking = content.trim().is_empty()
+            && v["message"]["thinking"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty());
         return Ok(withhold(format!(
             "answer cut off at {NUM_PREDICT} tokens{}",
-            if v["message"]["thinking"]
-                .as_str()
-                .is_some_and(|t| !t.is_empty())
-            {
-                ", most of them spent thinking (see filter.think)"
+            if still_thinking {
+                ", all of them spent thinking (see filter.think)"
             } else {
                 ""
             }
@@ -718,9 +720,11 @@ mod tests {
             let f = Screener::new(&cfg).unwrap();
             let Screener::Ollama(o) = &f else { panic!() };
             assert_eq!(o.request("MOM", "X")["think"], think);
-            assert!(f
-                .describe()
-                .contains(if think { "thinking on" } else { "thinking off" }));
+            assert!(f.describe().contains(if think {
+                "think = true"
+            } else {
+                "think = false"
+            }));
         }
     }
 
@@ -788,6 +792,11 @@ mod tests {
         let v = parse_ollama(&thought).unwrap();
         assert_eq!(v.action, Action::Drop);
         assert!(v.reason.contains("filter.think"), "{}", v.reason);
+        // One that started answering and ran on is not blamed on thinking.
+        thought["message"]["content"] = json!(r#"{"action":"keep","spans":[],"reason":"xxxx"#);
+        let v = parse_ollama(&thought).unwrap();
+        assert_eq!(v.action, Action::Drop);
+        assert!(!v.reason.contains("thinking"), "{}", v.reason);
         let mut unfinished = ollama_answer(r#"{"action":"keep","spans":[],"reason":"x"}"#);
         unfinished["done"] = json!(false);
         assert_eq!(parse_ollama(&unfinished).unwrap().action, Action::Drop);
