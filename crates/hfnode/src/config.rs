@@ -21,6 +21,8 @@ pub struct Config {
     #[serde(default)]
     pub contacts: Vec<Contact>,
     pub weather: Option<Weather>,
+    /// Storm stand-down. `run` refuses to start without this section.
+    pub storm: Option<Storm>,
     #[serde(default)]
     pub filter: Filter,
 }
@@ -219,6 +221,32 @@ pub struct Preset {
     pub name: String,
 }
 
+/// No tuning or transmitting while the NWS forecasts or warns of thunder at the
+/// station (crate::storm).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Storm {
+    /// `false` runs the node without the stand-down; `run` needs the section either
+    /// way, so that is a choice someone made.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Where the station's antenna is, in decimal degrees (north and east
+    /// positive). Not the field operator's location.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// How many hours of the hourly forecast, from now, to look through for thunder.
+    #[serde(default = "default_storm_lookahead")]
+    pub lookahead_hours: u32,
+    /// How often to ask the NWS.
+    #[serde(default = "default_storm_check")]
+    pub check_minutes: u64,
+    /// Minutes without thunder in the forecast or alerts before transmitting again.
+    #[serde(default = "default_storm_clear")]
+    pub clear_minutes: u64,
+    /// Contact for api.weather.gov; `weather.user_agent` if not set.
+    pub user_agent: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
@@ -401,6 +429,15 @@ fn is_loopback(host: &str) -> bool {
 
 fn yes() -> bool {
     true
+}
+fn default_storm_lookahead() -> u32 {
+    2
+}
+fn default_storm_check() -> u64 {
+    5
+}
+fn default_storm_clear() -> u64 {
+    30
 }
 fn default_pending_timeout() -> u64 {
     600
@@ -650,6 +687,35 @@ impl Config {
                 }
             }
         }
+        if let Some(st) = self.storm.as_ref().filter(|st| st.enabled) {
+            match (st.latitude, st.longitude) {
+                (Some(lat), Some(lon))
+                    if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) => {}
+                (Some(_), Some(_)) => bail!(
+                    "storm.latitude must be -90 to 90 and storm.longitude -180 to 180 \
+                     (decimal degrees)"
+                ),
+                _ => bail!(
+                    "storm.latitude and storm.longitude (the station's location) are \
+                     required, or set storm.enabled = false"
+                ),
+            }
+            if self.storm_user_agent().is_none() {
+                bail!(
+                    "storm.user_agent (or weather.user_agent) is required; api.weather.gov \
+                     refuses requests without one"
+                );
+            }
+            if !(1..=12).contains(&st.lookahead_hours) {
+                bail!("storm.lookahead_hours must be 1-12");
+            }
+            if !(1..=30).contains(&st.check_minutes) {
+                bail!("storm.check_minutes must be 1-30");
+            }
+            if st.clear_minutes > 240 {
+                bail!("storm.clear_minutes must be 0-240");
+            }
+        }
         self.filter.validate()?;
         let sch = &self.schedule;
         if sch.window_minutes == 0 {
@@ -674,6 +740,23 @@ impl Config {
             .validate()
             .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
         Ok(())
+    }
+
+    /// The User-Agent for the storm check: `storm.user_agent`, else
+    /// `weather.user_agent`.
+    pub fn storm_user_agent(&self) -> Option<&str> {
+        fn usable(ua: &str) -> Option<&str> {
+            Some(ua.trim()).filter(|ua| !ua.is_empty())
+        }
+        self.storm
+            .as_ref()
+            .and_then(|st| st.user_agent.as_deref())
+            .and_then(usable)
+            .or_else(|| {
+                self.weather
+                    .as_ref()
+                    .and_then(|w| usable(w.user_agent.as_str()))
+            })
     }
 
     /// Decoder settings for the receiver audio.
@@ -1068,5 +1151,64 @@ mod tests {
         assert!(!s.is_open(0));
         assert!(s.is_open(35 * 60));
         assert!(Schedule { always: true, ..s }.is_open(12345));
+    }
+
+    #[test]
+    fn storm_needs_the_station_location_and_a_contact() {
+        let base = example();
+        let st = base
+            .storm
+            .clone()
+            .expect("the example has a [storm] section");
+        assert!(st.enabled);
+        base.validate().unwrap();
+        let with = |f: &dyn Fn(&mut Storm)| {
+            let mut cfg = base.clone();
+            f(cfg.storm.as_mut().unwrap());
+            cfg
+        };
+        for (lat, lon, ok) in [
+            (Some(29.25), Some(-103.25), true),
+            (Some(-90.0), Some(180.0), true),
+            (None, Some(-103.25), false),
+            (Some(29.25), None, false),
+            (Some(91.0), Some(-103.25), false),
+            (Some(29.25), Some(-181.0), false),
+            (Some(f64::NAN), Some(-103.25), false),
+        ] {
+            let cfg = with(&|s| {
+                s.latitude = lat;
+                s.longitude = lon;
+            });
+            assert_eq!(cfg.validate().is_ok(), ok, "{lat:?} {lon:?}");
+        }
+        // Off, the location is not needed.
+        let cfg = with(&|s| {
+            s.enabled = false;
+            s.latitude = None;
+        });
+        cfg.validate().unwrap();
+        // The User-Agent falls back to [weather]; with neither, it is refused.
+        let mut cfg = with(&|s| s.user_agent = None);
+        assert_eq!(cfg.storm_user_agent(), Some("hfnode (you@example.com)"));
+        let blank = with(&|s| s.user_agent = Some("  ".into()));
+        assert_eq!(blank.storm_user_agent(), Some("hfnode (you@example.com)"));
+        cfg.weather = None;
+        assert!(cfg.validate().is_err());
+        cfg.storm.as_mut().unwrap().user_agent = Some("me@example.com".into());
+        assert_eq!(cfg.storm_user_agent(), Some("me@example.com"));
+        cfg.validate().unwrap();
+        for (f, field) in [
+            (
+                &(|s: &mut Storm| s.lookahead_hours = 0) as &dyn Fn(&mut Storm),
+                "lookahead",
+            ),
+            (&|s: &mut Storm| s.lookahead_hours = 13, "lookahead"),
+            (&|s: &mut Storm| s.check_minutes = 0, "check"),
+            (&|s: &mut Storm| s.check_minutes = 31, "check"),
+            (&|s: &mut Storm| s.clear_minutes = 241, "clear"),
+        ] {
+            assert!(with(f).validate().is_err(), "{field}");
+        }
     }
 }

@@ -45,6 +45,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
 | Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks so that no more than 8 minutes pass without it (the rule allows 10); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
 | Owner alert when the node stops transmitting (transmit inhibit) | `crates/hfnode/src/alert.rs` (email to `[email] alert_to`; the latch is in `station.rs`) |
+| Storm stand-down: no tune or transmit while thunder is forecast or warned at the station, fails closed | `[storm]` in the config, `crates/hfnode/src/storm.rs` |
 | Listening all the time (default) or in scheduled windows; radio set up again while idle | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
 The hardware PTT timer in the design is external hardware, not part of this
@@ -356,6 +357,7 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. Not identified: `run` identifies its tunes, here you do. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
 | `hfnode run --config C` | **yes** | Run the node (and email `[email] alert_to` if transmitting is inhibited). |
 
 Logging goes to stderr (the journal, under systemd) at level `info`; `RUST_LOG`

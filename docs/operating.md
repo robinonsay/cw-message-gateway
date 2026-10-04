@@ -289,6 +289,8 @@ The node never answers anything it cannot decode or authenticate. There is no
 - the node has stopped transmitting after a radio fault: it then stays silent until
   it is cleared at home (the owner is emailed when this happens, if an alert
   address is set);
+- a thunderstorm is forecast or warned at the node, or the node could not get a
+  forecast (storm stand-down: it keeps listening but will not transmit; see below);
 - the node or its radio is down.
 
 **Retries are free.** Send exactly the same transmission again with the same line;
@@ -309,6 +311,20 @@ window). If repeated tries get no answer, try again in an hour (or at the next
 window, if the node uses them). If you are not sure what the node did, skipping to
 fresh lines is always safe for your codes, but if the node did act on your `OK`,
 the message is sent a second time.
+
+### Storm stand-down
+
+The node will not tune or transmit while the National Weather Service hourly forecast
+for the node's own location (`[storm]` in its config) mentions thunder within the next
+`lookahead_hours` (default 2), or an active alert there mentions thunder, lightning or
+a tornado. It holds for `clear_minutes` (default 30) after the last thunder, and also
+whenever it cannot get a forecast. A transmission under way stops and the radio
+returns to receive. It keeps decoding, so try again later with fresh lines. If the
+stand-down began after your `OK`, the message may already have gone without a
+`SENT`, and repeats of that `OK` get no answer while it lasts (they also count
+against the usual repeat limits). Check with the recipient, or with an `RX`, before
+sending it again. This is about the weather at home, not where you are: check the
+forecast for the node before a trip in storm season.
 
 ## Timing
 

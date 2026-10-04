@@ -48,8 +48,12 @@
 //!   of a transmission, or from its last ID, to the next ID.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
+//! - **Storm stand-down.** With a [`StormHold`] attached, nothing is tuned or keyed
+//!   while it is on, and a transmission under way is stopped and the radio forced to
+//!   receive ([`crate::storm`]).
 
 use crate::session::Transmission;
+use crate::storm::StormHold;
 use civ::{split_for_keyer, Rig, RigError};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -147,6 +151,9 @@ pub enum TxError {
     /// The radio could not be set up again before keying, or would not transmit on
     /// the configured frequency (split or ∂TX on); nothing was keyed.
     NotReady(String),
+    /// Thunder near the station (or no storm check to say otherwise): nothing is
+    /// keyed, and a transmission under way was stopped.
+    Storm(String),
     Rig(String),
 }
 
@@ -167,6 +174,7 @@ impl std::fmt::Display for TxError {
                  restarted with {INHIBIT_FILE} removed from the state directory"
             ),
             Self::NotReady(e) => write!(f, "radio not ready to transmit: {e}"),
+            Self::Storm(why) => write!(f, "storm stand-down: {why}"),
             Self::Rig(e) => write!(f, "radio error: {e}"),
         }
     }
@@ -374,6 +382,26 @@ pub struct Station<R: Rig + 'static> {
     /// SWR has been measured on the current transmission.
     swr_checked: bool,
     health_log: Option<PathBuf>,
+    /// While this says so, nothing is tuned or keyed.
+    storm: Option<Arc<StormHold>>,
+}
+
+/// Append `<unix time>,<event>,<value>` to the health log at `path`.
+pub(crate) fn append_health(path: &Path, event: &str, value: &str) {
+    // One line, three fields.
+    let value: String = value
+        .chars()
+        .map(|c| if c == ',' || c.is_control() { ' ' } else { c })
+        .collect();
+    let line = format!("{},{event},{value}\n", crate::gateway::unix_now());
+    if let Err(e) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+    {
+        log::warn!("cannot write health log: {e}");
+    }
 }
 
 impl<R: Rig + 'static> Station<R> {
@@ -394,6 +422,7 @@ impl<R: Rig + 'static> Station<R> {
             tuner_ran: false,
             swr_checked: false,
             health_log,
+            storm: None,
         };
         s.spawn_watchdog();
         s
@@ -401,6 +430,24 @@ impl<R: Rig + 'static> Station<R> {
 
     pub fn rig(&self) -> Arc<Mutex<R>> {
         self.rig.clone()
+    }
+
+    /// Stand down whenever `hold` says so (see [`crate::storm`]).
+    pub fn set_storm_hold(&mut self, hold: Arc<StormHold>) {
+        self.storm = Some(hold);
+    }
+
+    /// Why the storm stand-down is on, if it is.
+    fn storm_reason(&self) -> Option<String> {
+        self.storm.as_ref().and_then(|h| h.reason())
+    }
+
+    /// Stop with [`TxError::Storm`] if the storm stand-down is on.
+    fn check_storm(&self) -> Result<(), TxError> {
+        match self.storm_reason() {
+            Some(why) => Err(TxError::Storm(why)),
+            None => Ok(()),
+        }
     }
 
     /// Whether transmitting has been inhibited (see [`INHIBIT_FILE`]).
@@ -461,15 +508,7 @@ impl<R: Rig + 'static> Station<R> {
     fn health(&self, event: &str, value: &str) {
         log::info!("health: {event} {value}");
         if let Some(path) = &self.health_log {
-            let line = format!("{},{event},{value}\n", crate::gateway::unix_now());
-            if let Err(e) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut f| f.write_all(line.as_bytes()))
-            {
-                log::warn!("cannot write health log: {e}");
-            }
+            append_health(path, event, value);
         }
     }
 
@@ -568,6 +607,13 @@ impl<R: Rig + 'static> Station<R> {
                 .map_err(|e| RigError::Protocol(e.to_string()))?;
             return Err(e);
         }
+        if let Some(why) = self.storm_reason() {
+            // Tuning transmits. Not a lockout, and the tuner has not run, so the
+            // node tunes again before its first reply once the stand-down ends.
+            self.health("tune", "storm");
+            log::warn!("storm stand-down, not tuning: {why}");
+            return Err(RigError::Protocol(format!("storm stand-down: {why}")));
+        }
         let t0 = Instant::now();
         self.tuner_ran = true;
         if let Err(e) = self.tune(t0) {
@@ -597,6 +643,10 @@ impl<R: Rig + 'static> Station<R> {
 
     /// Start a tuner cycle and wait for it to end, for at most `tune_timeout`.
     fn tune(&self, t0: Instant) -> civ::Result<()> {
+        // Tuning transmits: whoever calls this, not during a storm stand-down.
+        if let Some(why) = self.storm_reason() {
+            return Err(RigError::Protocol(format!("storm stand-down: {why}")));
+        }
         self.with_rig(|r| r.start_tune())?;
         // The manual does not say how soon 1C 01 reads 02 ("tuning") after the
         // command: allow a moment for it, so that a tune is not taken as finished
@@ -646,6 +696,7 @@ impl<R: Rig + 'static> Station<R> {
         if self.swr_lockout {
             return Err(TxError::SwrLockout);
         }
+        self.check_storm()?;
         // SWR is measured on every transmission, not once per window: the antenna
         // or a connector can fail in the middle of one.
         self.swr_checked = false;
@@ -757,6 +808,7 @@ impl<R: Rig + 'static> Station<R> {
 
     /// Key one keyer piece and wait for the radio to be back on receive.
     fn key_piece(&mut self, piece: &str) -> Result<(), TxError> {
+        self.check_storm()?;
         self.wait_for_receive(Instant::now() + Duration::from_secs(2))?;
         // Timed at the speed the radio's keyer is really using.
         let dot = self.with_rig(|r| r.dot_duration())?;
@@ -800,6 +852,7 @@ impl<R: Rig + 'static> Station<R> {
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(TxError::Stuck);
             }
+            self.check_storm()?;
             let sample = self.with_rig(|r| {
                 let before = r.read_po()?;
                 let tx = r.is_transmitting()?;
@@ -849,12 +902,14 @@ impl<R: Rig + 'static> Station<R> {
         }
     }
 
-    /// Sleep until `t`, stopping early if the watchdog fires.
+    /// Sleep until `t`, stopping early if the watchdog fires or the storm
+    /// stand-down comes on.
     fn sleep_until(&self, t: Instant) -> Result<(), TxError> {
         loop {
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(TxError::Stuck);
             }
+            self.check_storm()?;
             let now = Instant::now();
             if now >= t {
                 return Ok(());
@@ -864,11 +919,13 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     /// Wait until the radio reports receive, or declare it stuck at `deadline`.
+    /// Stops early, to force receive, if the storm stand-down comes on.
     fn wait_for_receive(&self, deadline: Instant) -> Result<(), TxError> {
         loop {
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(TxError::Stuck);
             }
+            self.check_storm()?;
             if !self.with_rig(|r| r.is_transmitting())? {
                 return Ok(());
             }
@@ -2078,5 +2135,82 @@ mod tests {
             text.contains(",tune,") && text.contains(",swr,1.30"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_storm_hold_stops_tuning_and_keying_until_lifted() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("health.csv");
+        let mut st = Station::new(fast_rig(), cfg(), Some(log.clone()));
+        st.configure().unwrap();
+        // On until the first check clears it.
+        let hold = StormHold::new(Duration::from_secs(60));
+        st.set_storm_hold(hold.clone());
+        {
+            st.rig().lock().unwrap().frequency_hz = 14_074_000;
+        }
+        let err = st.start_window().unwrap_err().to_string();
+        assert!(err.contains("storm stand-down"), "{err}");
+        // So the node tunes again before its first reply after the stand-down.
+        assert!(!st.tuner_ran());
+        assert_eq!(
+            st.transmit(&tx(&["TEST"])),
+            Err(TxError::Storm("no storm check yet".into()))
+        );
+        {
+            let rig = st.rig();
+            let r = rig.lock().unwrap();
+            // Set up again, but not tuned and nothing keyed.
+            assert_eq!(r.frequency_hz, 7_030_000);
+            assert_eq!((r.tunes, r.sent.len()), (0, 0));
+        }
+        assert!(!st.tx_inhibited());
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains(",tune,storm"));
+        // Lifted: the next transmission goes out, SWR-checked as always.
+        hold.set(None);
+        st.transmit(&tx(&["TEST"])).unwrap();
+        st.start_window().unwrap();
+        assert!(st.tuner_ran());
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.tunes, r.sent.join(" ")), (1, "TEST".to_string()));
+    }
+
+    #[test]
+    fn a_storm_hold_stops_a_transmission_under_way() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        let hold = StormHold::new(Duration::from_secs(60));
+        hold.set(None);
+        st.set_storm_hold(hold.clone());
+        st.start_window().unwrap();
+        let long: Vec<String> = (0..8)
+            .map(|i| format!("PART {i} OF A LONG REPLY THAT KEEPS THE KEYER BUSY"))
+            .collect();
+        let segments: Vec<&str> = long.iter().map(String::as_str).collect();
+        let setter = {
+            let hold = hold.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                hold.set(Some("alert: Severe Thunderstorm Warning".into()));
+                Instant::now()
+            })
+        };
+        assert_eq!(
+            st.transmit(&tx(&segments)),
+            Err(TxError::Storm("alert: Severe Thunderstorm Warning".into()))
+        );
+        let stopped = Instant::now();
+        let set_at = setter.join().unwrap();
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        // Stopped part-way, within a few polls, and back on receive.
+        let took = stopped.saturating_duration_since(set_at);
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(!r.sent.is_empty() && r.sent.len() < 16, "{:?}", r.sent);
+        assert!(!r.keyer_busy() && !r.is_transmitting().unwrap());
+        assert!(!st.tx_inhibited());
     }
 }
