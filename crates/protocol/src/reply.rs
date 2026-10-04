@@ -34,8 +34,11 @@ pub enum Reply {
 impl Reply {
     /// The text to key, ending with the node's identification and `K`.
     ///
-    /// Every transmission carries `DE <callsign>`, which satisfies the
-    /// identification rule (47 CFR 97.119) without the node tracking ID timing.
+    /// Every transmission ends with `DE <callsign>`, the identification at the end
+    /// of each communication (47 CFR 97.119(a)). The 10-minute rule inside a long
+    /// transmission, and the identification of the tune at the start of each
+    /// listening window, are kept by `hfnode::station` (`ID_INTERVAL`), which keys
+    /// `DE <callsign>` on its own between chunks and after a tune that matched.
     pub fn render(&self, node_call: &str) -> String {
         let body = match self {
             Self::ReadBackTx { seq, dest, text } => {
@@ -67,7 +70,7 @@ impl Reply {
 }
 
 /// One piece of a long transmission. The operator can ask for it again with
-/// `AGN <letter>` instead of the whole batch.
+/// `AGN <line> <code> <letter>` instead of the whole batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub letter: char,

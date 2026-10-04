@@ -1,15 +1,21 @@
 # Operating guide (field operator)
 
 How to use the node from the field: what to carry, what to send, and what the node
-sends back. Examples use field callsign `W5XXX` and node callsign `N0CALL`; the node
-always ends with `DE <its callsign> K`.
+sends back. Examples use field callsign `W5XXX` and node callsign `N0CALL`; every
+reply ends with `DE N0CALL K`. The node also sends `DE N0CALL` on its own after its
+tuning carrier when it starts listening (at start-up, or at the start of a
+listening window), between two chunks of a long readout, and before a reply that
+would otherwise end more than 8 minutes after its last `DE N0CALL` (the read-back
+of a long `TX`, say): that is its station identification, not part of the text.
 
 ## Before you leave
 
 - **Frequency.** Know the node's frequency. By default the node listens **all the
   time**. If it has been set to listen only in windows (`[schedule] always = false`
   in the node's config, for example the first 10 minutes of every hour, UTC), know
-  them too: outside a window it does not decode or transmit at all.
+  them too: outside a window it does not decode or transmit at all, except while it
+  is still finishing a transaction you started in one, when it answers whatever it
+  would in a window (see [Timing](#timing)). Start new requests inside a window.
 - **Contacts.** Know the contact names configured at home (for example `MOM`,
   `BOB`). You can only send to those names.
 - **Where you will be, for weather.** `WX` gives the forecast for the place you
@@ -35,7 +41,8 @@ down each column):
 
 ```
 N0CALL code table, sequence 43-142
-Use each line once, in order; skipping lines is fine. Two lines per message.
+Use each line once, in order; skipping lines is fine.
+Two lines per message (open, OK), and one more for each NO or AGN.
 
    43  WBNF HJGC         77  ....              111  ....
    44  ....              78  ....              112  ....
@@ -45,15 +52,29 @@ Rules:
 
 - **Every transaction uses two lines**: one to open it, a later one to commit it.
   Normally these are the next two unused lines.
-- **Use lines in order and cross each one off as you use it.** Never go back to a
-  lower number: the node only accepts a sequence number higher than the last one it
-  acted on, so lower lines are dead.
+- **`NO` and `AGN` use a line each too**, the next unused one, like an `OK`. An
+  `OK` sent after them goes on a line above theirs. A `NO` or `AGN` without a line,
+  or on a line already used, gets silence.
+- **Use lines in order and cross each one off as you use it**, whether or not the
+  node answered. Never go back to a lower number: the node only accepts a sequence
+  number higher than the last one used, so lower lines are dead.
 - **Skipping lines is fine.** If you are unsure whether a line was used, skip to the
   next one.
 - **The table is a password.** Anyone holding it can send messages as you until the
-  codes are used. Keep it on you. If it is lost, at home: stop the node, move
-  `/etc/hfnode/node.key` aside, create a new key with `hfnode keygen`, restart, and
-  print a new table. All old codes stop working.
+  codes are used. Keep it on you. If it is lost, at home: stop the node, move the
+  key aside, create a new one for the `hfnode` user, start the node, and print a
+  new table. All old codes stop working.
+
+  ```sh
+  sudo systemctl stop hfnode
+  sudo mv /etc/hfnode/node.key /etc/hfnode/node.key.lost
+  sudo hfnode keygen --out /etc/hfnode/node.key
+  sudo chown hfnode:hfnode /etc/hfnode/node.key
+  sudo systemctl start hfnode
+  sudo -u hfnode hfnode codes --config /etc/hfnode/hfnode.toml --count 100
+  ```
+
+  Back the new key up offline, as when you first made it.
 
 When sending a code you can send the eight letters together (`WBNFHJGC`) or in the
 two printed groups (`WBNF HJGC`). Sequence numbers and codes must be copied exactly
@@ -64,12 +85,17 @@ by the node; there is no error correction on them.
 1. You **open**: callsign, sequence number, code, and a request (`TX`, `RX` or `WX`).
 2. The node **reads back** what it understood, ending with `?`.
 3. If the read-back is right, you **commit** with `OK` and the next line's number and
-   code. If it is wrong, send `NO`.
+   code. If it is wrong, send `NO` with the next line's number and code.
 4. The node acts and replies.
 
 Nothing is sent, read out or looked up until the commit. End every transmission
-with `K`. The node treats your transmission as finished after about 3 seconds of
-silence, so do not pause longer than that in the middle of one.
+with `K` or `KN` (`KN` keyed as one character works too, and so does `AR K`). Only
+the last over counts: a message whose last word is `K`, `KN`, `AR` or `SK` needs the
+over after it (`TX MOM BRING VITAMIN K K` sends `BRING VITAMIN K`), and one `AR`
+just before the over is taken as the end-of-message sign, so to end on the word `AR`
+send `AR AR K`. The read-back shows what the node kept. The node treats your
+transmission as finished after about 3 seconds of silence, so do not pause longer
+than that in the middle of one.
 
 ## Formats
 
@@ -81,16 +107,18 @@ silence, so do not pause longer than that in the middle of one.
 | `W5XXX 46 <code> WX 1 K` | Open: forecast for preset 1 | `R 46 WX 1 DL89IG ? DE N0CALL K` |
 | `W5XXX 46 <code> WX K` | Open: forecast for the last place you confirmed (at first the node's default) | `R 46 WX DL89IG ? DE N0CALL K` |
 | `OK 43 WBNFHJGC K` | Commit the pending transaction | depends on the request, see below |
-| `NO K` | Abort the pending transaction | `R NO DE N0CALL K` |
-| `AGN K` | Repeat the node's last transmission | the last transmission again |
-| `AGN B K` | Repeat chunk B of the last transmission | `<chunk B text> = B DE N0CALL K` |
+| `NO 43 <code> K` | Abort the pending transaction | `R NO DE N0CALL K` |
+| `AGN 44 <code> K` | Repeat the node's last transmission | the last transmission again |
+| `AGN 44 <code> B K` | Repeat chunk B of the last transmission | `<chunk B text> = B DE N0CALL K` |
+| `AGN 44 <code> K K` | Repeat chunk K (the second `K` is the over) | `<chunk K text> = K DE N0CALL K` |
 
-The commit's sequence number must be higher than the open's (normally the next
-line).
+The commit's sequence number must be higher than the open's and than any line used
+since (normally the next line). `NO` and `AGN` take the next unused line, as `OK`
+does.
 
 Your callsign, the words `TX`, `RX`, `WX`, and contact names are matched loosely,
 so a slightly garbled one still works; the read-back shows what the node made of it.
-Sequence numbers and codes are not.
+`OK`, `NO`, `AGN`, sequence numbers and codes are not.
 
 ### TX: send a text or email
 
@@ -107,7 +135,8 @@ the subject `From W5XXX`.
 
 **Check the read-back word by word.** Words the node could not decode are left out,
 and only characters that exist in Morse are sent on. If anything is wrong, send
-`NO K` and start again with the next two lines.
+`NO` on the next line (`NO 43 <code 43> K`) and start again on the two lines after
+it.
 
 If the node replies `FAIL 43 GATEWAY DE N0CALL K`, the codes were accepted and are
 used up, but the message could not be sent (mail server problem). Try again later
@@ -128,12 +157,26 @@ Node:  NR 1 FM MOM DRIVE SAFE CALL WHEN YOU CAN NR 2 FM BOB THE = A
   with `=` (BT) and its letter: `= A`, `= B`, and so on. The node pauses about 2
   seconds between chunks. The last chunk ends `DE N0CALL K`.
 - If no messages are waiting, the reply after `OK` is `R 45 NIL DE N0CALL K`. If the
-  read-back already says `0 MSGS`, you can send `NO K` instead of committing.
-- At most **5 messages** are read per `RX`. If more are waiting, the text ends
-  `<n> MORE`; do another `RX` with the next two lines.
+  read-back already says `0 MSGS`, there is no need to commit: let it lapse (it is
+  forgotten after 10 minutes and costs no more lines), or send `NO` on the next
+  line.
+- At most **5 messages** are read per `RX`, fewer if they would not fit in 26
+  chunks (`A` to `Z`). If more are waiting, the readout ends `<n> MORE`; do
+  another `RX` with the next two lines. The read-back counts every message waiting,
+  so it can say more than 5.
 - Messages are marked as read once they are sent. A second `RX` will not send them
   again; use `AGN` (below) if you missed part of them.
-- A very long readout is cut off after 26 chunks (`A` to `Z`) and ends with `MORE`.
+- A single message too long for 26 chunks on its own is cut off and ends
+  `TRUNCATED`. It counts as read: the rest of it cannot be had over the air.
+- A readout longer than about 7½ minutes has `DE N0CALL` on its own between two
+  chunks (with the usual pause on both sides, no letter, no `K`). It is the node's
+  station identification, not part of the text: copy around it. Chunk letters are
+  unaffected, and `AGN` for the whole readout may place it between different
+  chunks.
+- The 10 minutes in which `AGN` or a repeated `OK` gets the readout again count from
+  when the node heard your `OK`, not from the end of the readout. Ask for anything
+  you missed as soon as it ends: a readout that takes more than 10 minutes to send
+  cannot be repeated at all.
 
 ### WX: weather
 
@@ -164,7 +207,7 @@ Name the place you want the forecast for after `WX`:
 
 **Check the read-back.** It always names the grid square the forecast will be for,
 after the preset number if you sent one. If it is not the place you meant, send
-`NO K`. The forecast starts with the same grid square.
+`NO` on the next line. The forecast starts with the same grid square.
 
 The forecast comes from the US National Weather Service, so it covers the US only
 (the states and territories). It starts with any active alerts (`ALERT` and the
@@ -182,21 +225,50 @@ preset number the node does not have, gets silence.
 
 ### NO: abort
 
-Send `NO K` after a wrong read-back. The node replies `R NO DE N0CALL K` and forgets
-the request. Cross off the open line and start over with the next two lines.
+After a wrong read-back, send `NO` with the next unused line's number and code:
+
+```
+You:   W5XXX 42 KRTPQMLD TX MOM RUNNING LATE HOME SUN K
+Node:  R 42 TX MOM RUNNING LATE HOME ? DE N0CALL K
+You:   NO 43 WBNFHJGC K
+Node:  R NO DE N0CALL K
+```
+
+The node forgets the request. Cross off both lines and start over on the next two.
+
+- A `NO` without a line and its code (`NO K`) is ignored, so nobody who heard your
+  exchange can cancel it.
+- If you miss the `R NO`, send exactly the same `NO` again: it is answered again,
+  free, up to 3 times within 10 minutes, until you use a later line. If the node
+  uses listening windows, this works only inside the window: past its end the node
+  stops listening once it has sent `R NO`, so a repeat gets silence. If no `R NO`
+  comes back, nothing is sent anyway: a request is only acted on after your `OK`.
+- A `NO` when nothing is pending (it timed out, or your `OK` already went through)
+  gets silence and still uses its line. If you sent `OK` and missed the result,
+  repeat the `OK` instead.
 
 A pending request is also forgotten if you open a new one on fresh lines (the node
 reads back the new request), or if you do not commit within **10 minutes** of the
-read-back. A late `OK` then gets silence; start over with new lines.
+first read-back (repeating the open does not restart the 10 minutes). A late `OK`
+then gets silence; start over with new lines.
 
 ### AGN: repeat
 
-- `AGN K` repeats the node's whole last transmission (a read-back, a `SENT`, or a
-  full readout).
-- `AGN B K` repeats only chunk `B` of the last readout.
-- `AGN` works for about **10 minutes** after the node's last transmission. After
-  that, or if there is no such chunk, the node stays silent.
-- `AGN` uses no codes.
+- `AGN 44 <code 44> K` repeats the node's whole last transmission (a read-back, a
+  `SENT`, or a full readout).
+- `AGN 44 <code 44> B K` repeats only chunk `B` of the last readout. For chunk `K`
+  send `AGN 44 <code 44> K K`: the second `K` is the over.
+- Like `NO`, `AGN` takes the next unused line and its code, and uses that line even
+  when there is nothing to repeat. A bare `AGN K` is ignored.
+- After an `AGN` that repeated a read-back, the `OK` goes on the line after the
+  `AGN`'s (open 42, `AGN 43`, `OK 44`). Repeating the open instead costs no line.
+- If you miss the repeat, send exactly the same `AGN` again (same line, same
+  letter): it is answered again, free, up to 3 times within 10 minutes, until you
+  use a later line.
+- `AGN` works for **10 minutes** after the node's last reply (a repeat sent for an
+  `AGN` does not count), counted from when it heard what it was replying to. After
+  that, or if there is no such chunk, the node stays silent and the line is used
+  all the same.
 
 ## Silence
 
@@ -204,14 +276,21 @@ The node never answers anything it cannot decode or authenticate. There is no
 "error" reply. Silence means one of:
 
 - the node did not copy you well enough (most likely);
-- a sequence number or code was wrong, or the line was already used;
+- a sequence number or code was wrong, or the line was already used (also a `NO`
+  or `AGN` sent without one);
 - a contact name, weather preset number or grid square the node does not know or
   that is not valid (check it against your table);
 - you are not close enough to the node's frequency, or outside a listening window
-  if the node uses them;
-- the node measured a high SWR, or its tuner could not match the antenna, and it
-  has stopped transmitting until it next tunes: within an hour by default
-  (`schedule.retune_minutes`), or at the next window;
+  if the node uses them (past a window's end it listens on only while it is still
+  finishing a transaction, see [Timing](#timing));
+- the node measured a high SWR, or no output, or its tuner could not match the
+  antenna, and it has stopped transmitting until it next tunes: within an hour by
+  default (`schedule.retune_minutes`), or at the next window. If you heard its
+  tuning carrier at start-up or at a window's start but no `DE N0CALL` after it, the
+  tune failed;
+- the node has stopped transmitting after a radio fault: it then stays silent until
+  it is cleared at home (the owner is emailed when this happens, if an alert
+  address is set);
 - a thunderstorm is forecast or warned at the node, or the node could not get a
   forecast (storm stand-down: it keeps listening but will not transmit; see below);
 - the node or its radio is down.
@@ -221,12 +300,19 @@ it costs no new codes:
 
 - Repeating an open the node already has makes it repeat the same read-back.
 - Repeating an `OK` the node already acted on makes it repeat the same reply
-  (`SENT 43` again). The message is not sent twice.
+  (`SENT 43` again, or the whole readout), up to 3 times and for 10 minutes after
+  the node acted on it, also after a listening window has ended. The message is
+  not sent twice and the forecast is not fetched again. Once you open a new
+  transaction, the old `OK` gets silence.
+- Repeating a `NO` or `AGN` exactly (same line, code and letter) gets the same
+  answer, also free.
 
-So if you sent `OK` and heard nothing, repeat the `OK`, not the open. If repeated
-tries get no answer, try again in an hour (or at the next window, if the node uses
-them). If you are not sure what the node did, skipping to fresh lines is always
-safe.
+So if you sent `OK` and heard nothing, repeat the `OK`, not the open, within 10
+minutes (with windows, the node keeps listening for it past the end of the
+window). If repeated tries get no answer, try again in an hour (or at the next
+window, if the node uses them). If you are not sure what the node did, skipping to
+fresh lines is always safe for your codes, but if the node did act on your `OK`,
+the message is sent a second time.
 
 ### Storm stand-down
 
@@ -245,13 +331,22 @@ forecast for the node before a trip in storm season.
 ## Timing
 
 - By default the node listens all the time, so you can call whenever you like.
+  When it starts up it runs its antenna tuner, a carrier of a few seconds, and then
+  sends `DE N0CALL`.
 - When the node last tuned more than an hour ago (`schedule.retune_minutes`), it
   runs its antenna tuner before its reply: you hear a few seconds of carrier, then
-  the read-back. Otherwise it tunes only when it starts up.
+  the read-back, which identifies it. Otherwise it tunes only when it starts up.
 - If the node is set to listen in windows, it tunes at the start of each window,
-  which transmits a carrier for a few seconds: wait until that is done before
-  calling. A transaction that is open when a window ends stays open: the node keeps
-  listening until you commit, abort, or the 10 minutes run out.
+  which transmits a carrier for a few seconds, and then sends `DE N0CALL`: wait for
+  that before calling. If you hear the carrier but no `DE N0CALL`, the tune failed
+  and the node may stay silent until its next tune.
+- Past the end of a window the node keeps listening while it is finishing a
+  transaction you started in it: while it is pending (until you commit, abort, or
+  the 10 minutes run out), and then for up to 10 minutes after the result, so that
+  a repeated `OK` or an `AGN` still gets it (not if it cannot transmit). Meanwhile
+  it answers anything it would in a window, a new request included, which keeps it
+  listening longer. Once nothing holds it, or after `R NO`, it is silent until the
+  next window. Start new requests inside a window.
 - Wait for the node's reply before sending again. The reply starts a few seconds
   after you stop (it waits for about 3 seconds of silence first, and a tune adds a
   few more).

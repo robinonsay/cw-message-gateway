@@ -34,15 +34,17 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Precomputed HOTP-style codes, 8 letters A-Z | `crates/auth` (`CodeBook`). HMAC-SHA256 over the 8-byte sequence number, encoded as letters. |
 | Accept only `seq > last_seq`, `last_seq` on disk | `crates/auth` (`Verifier`, `SeqStore`). `last_seq` is written before the node acts. |
 | Two codes per transaction (open, then commit) | `crates/hfnode/src/session.rs` |
-| Grammar `CALL seq code TX/RX/WX`, `OK`, `NO`, `AGN` | `crates/protocol` (`parse`). Callsigns, keywords and contact names are snapped to the nearest legal token. Sequence numbers and codes must decode exactly. |
+| Grammar `CALL seq code TX/RX/WX`, `OK seq code`, `NO seq code`, `AGN seq code [letter]`, over `K` or `KN` | `crates/protocol` (`parse`). Callsigns, `TX`/`RX`/`WX` and contact names are snapped to the nearest legal token. `OK`, `NO` and `AGN`, sequence numbers and codes must decode exactly. |
 | Read-backs, `SENT`, chunk letters for `AGN` | `crates/protocol/src/reply.rs` |
-| Stop-and-wait ARQ, silence as NACK, idempotent retries | `crates/hfnode/src/session.rs` |
+| Stop-and-wait ARQ, silence as NACK, idempotent retries (a repeated `OK` recovers a lost result, also after the window has ended) | `crates/hfnode/src/session.rs`; listening on past a window's end in `crates/hfnode/src/node.rs` |
 | CW decoder | `crates/cw` (decoder plus a synthesizer used for tests) |
 | Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API, or a local model through Ollama) |
 | Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
 | Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
+| Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks (or before the first, after a long over from the field) so that no more than 8 minutes pass from one ID of the node's to its next (the rule allows 10; an ID 10 minutes old no longer counts, and the time runs from the start of the next transmission); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
+| Owner alert when the node stops transmitting (transmit inhibit) | `crates/hfnode/src/alert.rs` (email to `[email] alert_to`; the latch is in `station.rs`) |
 | Storm stand-down: no tune or transmit while thunder is forecast or warned at the station, fails closed | `[storm]` in the config, `crates/hfnode/src/storm.rs` |
 | Listening all the time (default) or in scheduled windows; radio set up again while idle | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
@@ -90,7 +92,7 @@ cargo build --release -p hfnode # binary at target/release/hfnode
 ```
 
 The mock-radio scenarios (`tests/mock_radio_e2e.rs`) run 100 times faster than
-real time and take about 30 s. On a slow or busy machine (a Pi, or a Mac doing
+real time and take about 40 s. On a slow or busy machine (a Pi, or a Mac doing
 other work), run them slower: `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`,
 and `hfnode selftest --scale 20`.
 
@@ -160,9 +162,13 @@ OK 2 YAAWUURC K
 ```
 
 Use the codes from your own table. Inside `sim`, `/code N` shows the code for line
-N, `/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
-`/quit` exits. Without `--offline`, `sim` really sends email and calls the weather
-service, so it needs the `[email]` settings and `HFNODE_EMAIL_PASSWORD`.
+N: `NO` and `AGN` take the next line and its code too (`NO 3 <code 3> K`).
+`/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
+`/quit` exits. `sim` runs the session alone, with no radio and no schedule: it shows
+the replies, but not the station ID the node keys after its tune and inside a long
+readout, and it has no listening windows to end. Without `--offline`, `sim` really
+sends email and calls the weather service, so it needs the `[email]` settings and
+`HFNODE_EMAIL_PASSWORD`.
 
 `sim` writes `last_seq` into `state_dir` like the real node, so codes you use in
 `sim` are used up. Use a scratch `state_dir` and a scratch key, not the node's.
@@ -194,34 +200,43 @@ hfnode selftest --sweep --csv sweep.csv  # speed x SNR x keying matrices, where 
 ```
 
 The operator keys CW audio (`cw::Keyer` plus noise) into the node's audio queue,
-listens to what the mock radio actually keyed, and reacts: it opens, checks the
-read-back, answers `OK`, `NO` or `AGN`, and repeats an open or an `OK` that got no
-answer. While the mock radio is on transmit the node hears nothing of the operator.
+listens to what the mock radio actually keyed, and reacts: it waits out the
+node's first tune and station ID, opens, checks the read-back, answers `OK`, `NO` or
+`AGN` (each on its own line), and repeats an open or an `OK` that got no answer.
+While the mock radio is on transmit the node hears nothing of the operator.
 Scenarios cover the grammar (TX, RX up to the five-message cap and truncation, WX
 with 4- and 6-character grids, a grid sent as two words, known and unknown presets,
-WX alone reusing the last place, `FAIL` replies including `WX NO COVERAGE`, NO, AGN,
-codes in two groups, an open on fresh lines replacing a pending one, the 10-minute
-pending and `AGN` windows), lost read-backs and results, replayed and wrong codes,
-garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB
-echo off, CI-V Transceive frames from someone at the radio, a load the tuner matches
-and one beyond its range (the window stays silent), listening windows (a high-SWR
-lockout cleared by the next window's tune), listening all the time (a re-tune before
-a reply once the last tune is old, a high-SWR lockout cleared by it, split or ∂TX
-switched on at the radio, the dial and mode changed while the node is idle, band
-noise and other stations calling, and a call after a long quiet spell answered the
-first time), and radio faults (SWR rising after the
-tune, fold-back, stuck transmit or key, also on the last over, a transmitter that
-will not unkey, one that only the watchdog gets off transmit, refused status
-commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner
-that never finishes). Each one checks the exact text keyed, what the gateway did
-(messages sent, inbox marked read only once keyed), `last_seq`, that the node sent
-nothing the manual does not allow (any unknown, malformed or disallowed CI-V frame,
-`17` while the keyer is busy, not on the air or out of band, `1C 00 01`), the
-radio's settings as the node left them (frequency, CW, power, keyer speed, break-in
-and its delay), that the node forced receive after a fault and never otherwise, and
-safety bounds: key-down and transmit lengths, no transmit past the break-in delay
-plus the 3 s stuck margin, duty cycle, the radio on receive when the node stops, and
-the tuner cycles expected.
+WX alone reusing the last place, `FAIL` replies including `WX NO COVERAGE`, `NO` and
+`AGN` on their own lines and their free repeats (a bare one is ignored), `AGN` after
+a read-back, `AGN <n> <code> K K` for chunk K, `KN` keyed run together as the over,
+a message whose last word is `K`, codes in two groups, an open on fresh lines
+replacing a pending one, the 10-minute pending and `AGN` windows), lost read-backs
+and results (a result also after the window has ended, and listening ending once
+it can no longer be repeated), a readout longer than the 8-minute ID interval,
+identified between two chunks, replayed and wrong codes, garbled callsigns, 10 to
+30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V
+Transceive frames from someone at the radio, a load the tuner matches and one
+beyond its range (the window stays silent), listening windows (a high-SWR lockout
+cleared by the next window's tune), listening all the time (a re-tune before a reply
+once the last tune is old, a high-SWR lockout cleared by it, split or ∂TX switched
+on at the radio, the dial and mode changed while the node is idle, band noise and
+other stations calling, and a call after a long quiet spell answered the first
+time), and radio faults (SWR rising after the tune,
+fold-back, stuck transmit or key, also on the last over, a transmitter that will
+not unkey, one that only the watchdog gets off transmit, refused status commands,
+NG and lost or late CI-V replies, a readout the radio refuses, a tuner that never
+finishes, a node started with transmitting already inhibited). Each one checks the
+exact text keyed, what the gateway did (messages sent, inbox marked read only once
+keyed), `last_seq`, that the node sent nothing the manual does not allow (any
+unknown, malformed or disallowed CI-V frame, `17` while the keyer is busy, not on
+the air or out of band, `1C 00 01`), the radio's settings as the node left them
+(frequency, CW, power, keyer speed, break-in and its delay), that the node forced
+receive after a fault and never otherwise, the station ID (`DE N0DE` after every
+tune that matched, and no stretch of a transmission longer than 8 minutes without
+one), that the owner is told once of a transmit inhibit (when it latches, or at
+start-up) and never otherwise, and safety bounds: key-down and transmit lengths, no
+transmit past the break-in delay plus the 3 s stuck margin, duty cycle, the radio on
+receive when the node stops, and the tuner cycles expected.
 
 The mock answers every command the driver uses with the bytes Section 19 of the
 manual gives, keys `17` text at the set key speed (time-scaled), models semi
@@ -245,8 +260,7 @@ white, so real band conditions and real fists are tested only on the air. In a
 time-scaled run the CI-V reply timeout, the watchdog tick and the forced-receive
 retry pause stay in real time, so they take `scale` times longer in radio time;
 `hfnode selftest --scale 1` runs everything at its real speed, real-time margins
-included (about 23 minutes with one job per scenario,
-`--jobs 64`).
+included (about 23 minutes with one job per scenario, `--jobs 100`).
 
 **Sweep: where it stops working.** The scenarios check one point each and all
 pass, so they cannot show where the node breaks. `hfnode selftest --sweep` runs a
@@ -257,17 +271,18 @@ and keying (machine: 2% jitter; hand: 12% jitter, gaps stretched 1.4 times, 25 H
 off pitch), 3 trials per cell with their own noise and jitter (`--trials`,
 `--wpm`, `--snr`, `--keying` choose the grid; `--jobs`, `--scale` as above). The
 operator repeats a transmission that gets no answer up to 3 times, and answers a
-read-back that is not exactly the message `NO` and starts over once on fresh
-lines; it never commits a wrong read-back. A run succeeds only if the exact message
-reached the gateway, once, and `SENT` was keyed. It prints, per keying, a matrix of
-successes/trials (with the extra transmissions a success needed, `w` for a garbled
-read-back that still parsed, `W!` for a wrong message delivered, `S!` for a safety
-violation), how much of what the operator keyed the node decoded exactly, and the
-edges; `--csv PATH` writes one row per run. Wrong messages delivered and safety
-violations (any failed safety, CI-V, settings, forced-receive or self-decode check)
-are hard failures at any SNR. It exits non-zero on a hard failure or on any failed
-trial in the should-pass region: machine-keyed 10-30 wpm at 6 dB and above,
-hand-keyed 10-25 wpm at 10 dB and above, set well inside the edges measured below.
+read-back that is not exactly the message with `NO` (on the line the `OK` would
+have used) and starts over once on fresh lines; it never commits a wrong read-back.
+A run succeeds only if the exact message reached the gateway, once, and `SENT` was
+keyed. It prints, per keying, a matrix of successes/trials (with the extra
+transmissions a success needed, `w` for a garbled read-back that still parsed, `W!`
+for a wrong message delivered, `S!` for a safety violation), how much of what the
+operator keyed the node decoded exactly, and the edges; `--csv PATH` writes one row
+per run. Wrong messages delivered and safety violations (any failed safety, CI-V,
+settings, forced-receive, self-decode or station ID check) are hard failures at any
+SNR. It exits non-zero on a hard failure or on any failed trial in the should-pass
+region: machine-keyed 10-30 wpm at 6 dB and above, hand-keyed 10-25 wpm at 10 dB
+and above, set well inside the edges measured below.
 The default grid is 480 runs, about 3.5 minutes on a 4-core laptop (the run is paced
 by the time scale, not the CPU); `tests/sweep_e2e.rs` runs a few cells of it in a
 few seconds.
@@ -289,7 +304,10 @@ region stays clear of the edges for this reason.
 
 Measured on 2026-10-04 (default grid, 3 trials per cell, 100x real time, 4 at once;
 the success counts below came out the same in five sweeps, except the one trial
-named above):
+named above). One more sweep the same day, after the station ID, `NO` and `AGN` on
+lines and listening past the window were added, gave the same counts but for
+machine-keyed 5 wpm at 20 dB, 1 of 3 instead of 2 of 3, an edge cell within its one
+trial:
 
 - **Machine-keyed:** 8 to 35 wpm pass every trial from clean down to -3 dB. At -6
   dB almost nothing gets through (1 success in 30 runs in each sweep, at 8 wpm). 5
@@ -333,11 +351,11 @@ the air.
 | `hfnode filter --config C screen TEXT [--from NAME]` | no | Show what one reply would be keyed as. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
 | `hfnode record --config C --out F [--seconds N]` | no | Record the radio's audio as the node hears it; print the peak level. |
-| `hfnode radio --config C check` | no | Read-only preflight: identify the radio, check every setting that could make it transmit. Writes nothing. |
+| `hfnode radio --config C check` | no | Read-only preflight: identify the radio and read every setting that could make it transmit, one PASS, WARN or FAIL line each. Writes nothing. |
 | `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |
 | `hfnode radio --config C rx` | no | Stop the keyer and force the radio to receive. |
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
-| `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. |
+| `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. Not identified: `run` identifies its tunes, here you do. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
 | `hfnode handheld --config C check` | no | A handheld running the CW firmware ([docs/handheld.md](docs/handheld.md)): its `HELLO`, transmit state and frequency. |
 | `hfnode handheld --config C setup` | no | Set the handheld's frequency (simplex), CW and power, and read them back. |
@@ -345,20 +363,31 @@ the air.
 | `hfnode handheld --config C key TEXT` | **yes** | Set up, then key TEXT on the handheld. |
 | `hfnode handheld --config C linktest` | **yes** | Bring-up: check that the firmware stops on its own when the node goes silent. |
 | `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
-| `hfnode run --config C` | **yes** | Run the node. |
+| `hfnode run --config C` | **yes** | Run the node (and email `[email] alert_to` if transmitting is inhibited). |
 
-Logging goes to stderr; set `RUST_LOG=debug` for more detail. Ctrl-C (or
-Ctrl-Break on Windows), or a stop from systemd or launchd, makes a command that has
-started writing to the radio stop its keyer and confirm receive before it exits. On
-Windows, closing the window, logging off or a restart ends it without that; check
-receive afterwards (`hfnode radio --config C rx`).
+Logging goes to stderr (the journal, under systemd) at level `info`; `RUST_LOG`
+replaces that level. `hfnode` itself logs only one start-up line at debug level, so
+`RUST_LOG=debug` mostly adds the libraries' messages (SMTP, IMAP, HTTP). To see
+every CI-V frame and how long each reply took, use `RUST_LOG=info,civ=trace`:
+`RUST_LOG=civ=trace` alone shows the frames but hides everything else the node
+logs. For the service, `sudo systemctl edit hfnode` and add
+`Environment=RUST_LOG=info,civ=trace` under `[Service]`; take it out again
+afterwards, as it logs frames every tenth of a second while keying.
+
+Ctrl-C (or Ctrl-Break on Windows), or a stop from systemd or launchd, makes a
+command that has started writing to the radio stop its keyer and confirm receive
+before it exits. On Windows, closing the window, logging off or a restart ends it
+without that; check receive afterwards (`hfnode radio --config C rx`).
 
 A running node owns the radio: stop it before using the radio yourself. Listening
 all the time, it puts its frequency, mode, power and keyer settings back every
 `schedule.check_minutes` (10) while idle, and before every transmission.
 
-The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
-decoded transmission) and `health.csv` (every tune and SWR reading).
+The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `wx_last.json`
+(the last weather place each field callsign confirmed), `rx.log` (every decoded
+transmission), `health.csv` (every tune and SWR reading, including the one from the
+station ID after the tune when the node starts listening, and any `tx-status` or
+`check` fault) and, if it has stopped transmitting, `tx-inhibited`.
 
 ## Documentation
 

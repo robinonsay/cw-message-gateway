@@ -1,7 +1,7 @@
 use super::mock::{MockFirmware, Off};
 use super::*;
 use crate::session::Transmission;
-use crate::station::{Station, StationConfig, TxError};
+use crate::station::{Station, StationConfig, TxError, ID_INTERVAL};
 use crate::storm::StormHold;
 
 /// Morse goes this many times faster than real time, in the firmware and the rig.
@@ -332,6 +332,8 @@ fn station_cfg() -> StationConfig {
         stuck_margin: Duration::from_secs(3).div_f32(SCALE),
         tune_timeout: Duration::from_secs(1),
         poll: Duration::from_millis(2),
+        station_id: "DE N0DE".into(),
+        id_interval: ID_INTERVAL.div_f32(SCALE),
     }
 }
 
@@ -359,8 +361,9 @@ fn the_station_keys_a_handheld_without_tuning_or_reading_meters() {
     assert_eq!(fw.frequencies(), (FREQ, FREQ));
     assert!(fw.mode_cw());
     assert_eq!(fw.power(), "LOW");
-    // A window start tunes nothing and keys nothing.
+    // A window start tunes nothing and keys nothing, not even an ID.
     st.start_window().unwrap();
+    st.open_window().unwrap();
     assert!(fw.runs().is_empty());
     st.transmit(&tx(&["R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K"]))
         .unwrap();
@@ -500,6 +503,46 @@ fn the_duty_cycle_paces_a_long_transmission_on_receive() {
             used <= budget,
             "{used:?} in the window ending at a run's end"
         );
+    }
+}
+
+#[test]
+fn ids_stay_on_time_while_the_duty_cycle_holds_a_long_transmission() {
+    let mut set = settings();
+    // 0.5 s on the air (real) in any 1 s, and an ID due every 1.5 s.
+    set.duty = 0.5;
+    set.duty_window = Duration::from_secs(1);
+    let mut cfg = station_cfg();
+    cfg.id_interval = Duration::from_millis(1500);
+    let interval = cfg.id_interval;
+    let (mut st, fw) = station_cfg_with(set, cfg);
+    let mut segments: Vec<String> = (0..12)
+        .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
+        .collect();
+    segments.last_mut().unwrap().push_str(" DE N0DE K");
+    let start = Instant::now();
+    st.transmit(&Transmission {
+        segments,
+        read_ids: Vec::new(),
+    })
+    .unwrap();
+    let runs = fw.runs();
+    let ids = runs.iter().filter(|r| r.text == "DE N0DE").count();
+    assert!(ids >= 2, "{ids} IDs in {:?}", start.elapsed());
+    // From the start, and from each ID, the next ID (or the end) is keyed within
+    // the interval, rests on receive included.
+    let mut since = start;
+    for (i, r) in runs.iter().enumerate() {
+        if r.text == "DE N0DE" || i + 1 == runs.len() {
+            let end = r.off.unwrap().0;
+            assert!(
+                end <= since + interval + Duration::from_millis(100),
+                "run {i} {:?} ends {:?} after the last ID",
+                r.text,
+                end - since
+            );
+            since = r.on;
+        }
     }
 }
 

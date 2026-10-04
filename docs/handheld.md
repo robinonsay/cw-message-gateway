@@ -105,8 +105,10 @@ From memory, not checked against the eCFR:
 - CW is allowed anywhere in the US amateur bands (47 CFR 97.305(a)); the ARRL band
   plan puts it at the bottom of 2 m (144.05-144.10 MHz for general CW).
 - The station ID rule is the same as on HF (97.119(a)): your call at the end of each
-  exchange and at least every 10 minutes. The node sends `DE <call>` on every
-  transmission.
+  exchange and at least every 10 minutes. The node identifies as on the IC-7300
+  ([operating.md](operating.md)): every reply ends with `DE <call> K`, and a long one
+  has `DE <call>` inside it, with any wait for the duty cycle counted. Nothing is
+  tuned at start-up, so no `DE <call>` is sent then.
 - With you at the computer and the radio, the node is under local control. Leaving it
   to answer while you are away is automatic control, which Part 97 allows only for
   some kinds of station (97.109(d)); that question is open for the HF node too. Until
