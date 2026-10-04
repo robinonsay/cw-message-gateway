@@ -55,19 +55,43 @@ so it does not compete with the node's CW decoder, and an 8-20B model answers in
 seconds. On a Raspberry Pi only small models fit, they are slow (expect tens of
 seconds to minutes per reply), and they use the CPU the CW decoder needs while it
 listens. Set `threads` to leave cores free, or point `base_url` at a faster machine
-on your network. To serve other machines, Ollama on that machine must listen on the
-network (environment variable `OLLAMA_HOST=0.0.0.0`). Its API has no password, so
-keep it on a network you trust.
+on your network that stays on.
+
+**Serving another machine.** Out of the box Ollama only answers on its own
+computer. To let the node reach it, set `OLLAMA_HOST=0.0.0.0` on the machine that
+runs Ollama, then restart Ollama:
+
+- macOS (the Ollama app): `launchctl setenv OLLAMA_HOST "0.0.0.0"`, then quit
+  Ollama from the menu bar and open it again. Run the `launchctl` line again after
+  each restart of the Mac.
+- Linux (installed as a service): `sudo systemctl edit ollama.service`, add
+  ```
+  [Service]
+  Environment="OLLAMA_HOST=0.0.0.0"
+  ```
+  then `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+- Windows: quit Ollama from the taskbar, add a user environment variable
+  `OLLAMA_HOST` = `0.0.0.0` (Settings, search "environment variables"), then
+  start Ollama again.
+
+From the node's computer, `curl http://<that machine's address>:11434/api/version`
+should print a version number. Ollama's API has no password, so only do this on a
+network you trust.
 
 **Which model.** Bigger is better at this. A model under about 4B parameters
 tends to miss things or flag ordinary messages. `gpt-oss-safeguard:20b` (built to
 classify text against a written policy, needs about 16 GB of memory) and
-general-purpose 8-12B models are worth comparing on a Mac. Run `hfnode filter test`
-on each candidate and keep the one that gets every sample right.
+general-purpose 8-12B models are worth comparing on a Mac. Models that reason
+before answering (gpt-oss among them) take longer per reply. Use a model with a
+context window of at least 8K tokens; nearly all current ones qualify. Run
+`hfnode filter test` on each candidate and keep the one that gets every sample
+right.
 
-Local models get the same policy as Claude plus worked examples, the instruction to
-treat the message as data rather than instructions, and a tie-break: when unsure,
-drop. Answers are constrained to the verdict's JSON schema, at temperature 0.
+Local models get the same rules as Claude, plus worked examples, the instruction to
+treat the message as data rather than instructions, and a different tie-break:
+Claude is told to act only when a message clearly crosses a line, a local model to
+drop it when unsure. Answers are constrained to the verdict's JSON schema, at
+temperature 0.
 
 ## Trying it without the radio
 
@@ -83,15 +107,32 @@ non-zero unless all ten come out as expected. With Claude each sample is one pai
 API call (about a cent each). `screen` shows what one message would be keyed as.
 Neither transmits or stores anything.
 
+On a Pi set up as a service, run it as the service user with the real config.
+With Ollama:
+
+```sh
+sudo -u hfnode hfnode filter --config /etc/hfnode/hfnode.toml test
+```
+
+With Claude, which needs the API key from `/etc/hfnode/env`:
+
+```sh
+sudo systemd-run --pty --quiet --uid=hfnode --gid=hfnode \
+  -p EnvironmentFile=/etc/hfnode/env \
+  /usr/local/bin/hfnode filter --config /etc/hfnode/hfnode.toml test
+```
+
 ## When something goes wrong
 
 The filter fails closed: nothing unscreened is ever keyed.
 
 | What happens | Result |
 |---|---|
-| The service cannot be reached (Ollama not running, network down, API key missing or expired, model not downloaded) | The reply is **held**: not counted in `RX`, never keyed, tried again at the next mail check. The node logs a warning. |
+| The service cannot be reached or reports an error (Ollama not running, network down, model not downloaded, API key expired, out of credit) | The reply is **held**: not counted in `RX`, never keyed, tried again at the next mail check. The node logs what the service said. |
+| The API key's environment variable is not set when the node starts | The node logs an error and **holds** every reply until the variable is set and the node is restarted. |
+| The model does not answer within `timeout_secs` | **Held** and tried again; after the third timeout on the same reply it is **withheld**. |
 | Claude declines to screen it | **Withheld** (`MSG WITHHELD BY FILTER`) |
 | The model's answer is not a complete verdict (malformed, cut off, unknown action) | **Withheld** |
-| The model names words to redact that are not in the message, or none at all | **Withheld** |
-| With Ollama, the reply is longer than 6000 characters | **Withheld**: it would not fit the model's context window with the policy |
+| The model names words to redact that are not in the message, or none at all, or says keep but names words | **Withheld** |
+| With Ollama, the reply does not fit the model's context window with the policy (about 3,000 characters, less with a long `extra_policy`; one `RX` keys at most about 1,560) | **Withheld** |
 | `enabled = false` | Replies are keyed **unscreened**. The design advises against this. |

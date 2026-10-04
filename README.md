@@ -307,6 +307,8 @@ the air.
 | `hfnode selftest [--scenario NAME] [--scale N] [--list] [-v]` | no | Run the scenarios against the mock IC-7300 (no hardware). |
 | `hfnode selftest --sweep [--wpm ..] [--snr ..] [--keying ..] [--trials N] [--rx] [--csv F]` | no | Sweep speed x SNR x keying with complete exchanges; print where it breaks. |
 | `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
+| `hfnode filter --config C test` | no | Screen ten sample replies with the configured filter model and check the verdicts. With Claude, each is a paid API call. |
+| `hfnode filter --config C screen TEXT [--from NAME]` | no | Show what one reply would be keyed as. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
 | `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |
 | `hfnode radio --config C rx` | no | Stop the keyer and force the radio to receive. |

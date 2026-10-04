@@ -223,9 +223,9 @@ pub struct Filter {
     /// Raspberry Pi, leave cores free for the CW decoder.
     #[serde(default)]
     pub threads: Option<u32>,
-    /// How long one screening may take before the filter counts as unavailable
-    /// (the message is held and tried again). Defaults to 120 s for Claude and
-    /// 600 s for Ollama, which may first have to load the model.
+    /// How long one screening may take. A message is held and tried again after a
+    /// timeout, and withheld after the third. Defaults to 120 s for Claude and 600 s
+    /// for Ollama, which may first have to load the model.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Extra policy text appended to the built-in instructions.
@@ -287,23 +287,27 @@ impl Filter {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let model = self.model.as_deref().map(str::trim);
-        if model == Some("") {
-            bail!("filter.model is empty");
+        if let Some(m) = &self.model {
+            if m.trim().is_empty() {
+                bail!("filter.model is empty");
+            }
+            if m.trim() != m {
+                bail!("filter.model {m:?} has spaces around it");
+            }
         }
-        if self.provider == Provider::Ollama && model.is_none() {
-            bail!(
+        match (self.provider, self.model.as_deref()) {
+            (Provider::Ollama, None) => bail!(
                 "filter.model is required with provider = \"ollama\": the name of a model \
                  you have pulled, as `ollama list` shows it"
-            );
+            ),
+            (Provider::Ollama, Some(m)) if m.starts_with("claude-") => bail!(
+                "filter.model {m:?} is a Claude model, but provider = \"ollama\": set it to \
+                 a model you have pulled, as `ollama list` shows it"
+            ),
+            _ => {}
         }
         if let Some(url) = &self.base_url {
-            let rest = url
-                .strip_prefix("http://")
-                .or_else(|| url.strip_prefix("https://"));
-            if rest.is_none_or(|r| r.trim_end_matches('/').is_empty()) {
-                bail!("filter.base_url {url:?} must start with http:// or https://");
-            }
+            check_base_url(url, self.provider)?;
         }
         if let Some(t) = self.threads {
             if self.provider != Provider::Ollama {
@@ -316,8 +320,53 @@ impl Filter {
         if self.timeout_secs.is_some_and(|t| !(1..=3600).contains(&t)) {
             bail!("filter.timeout_secs must be 1-3600");
         }
+        if self.provider == Provider::Ollama {
+            let room = crate::gateway::filter::local_room(&self.extra_policy);
+            let min = crate::gateway::filter::LOCAL_MIN_ROOM;
+            if room < min {
+                bail!(
+                    "filter.extra_policy is too long for a local model: shorten it by at \
+                     least {} characters so a whole RX still fits its context window",
+                    min - room
+                );
+            }
+        }
         Ok(())
     }
+}
+
+/// A service address is a scheme, a host and an optional port, and nothing more.
+/// The API key goes to Claude's, so it must be encrypted unless it stays on this
+/// machine.
+fn check_base_url(url: &str, provider: Provider) -> Result<()> {
+    let (https, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        _ => bail!("filter.base_url {url:?} must start with http:// or https://"),
+    };
+    let host = rest.strip_suffix('/').unwrap_or(rest);
+    if host.is_empty() || host.contains(['/', '?', '#', '@', ' ']) {
+        bail!(
+            "filter.base_url {url:?} must be only the server's address, \
+             like http://192.168.1.20:11434"
+        );
+    }
+    if provider == Provider::Claude && !https && !is_loopback(host) {
+        bail!("filter.base_url {url:?} would send the API key unencrypted: use https://");
+    }
+    Ok(())
+}
+
+/// Whether `host[:port]` names this machine.
+fn is_loopback(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn yes() -> bool {
@@ -725,9 +774,48 @@ mod tests {
             "[filter]\nthreads = 2\n",
             "[filter]\ntimeout_secs = 0\n",
             "[filter]\nmodel = \"\"\n",
+            "[filter]\nmodel = \" claude-opus-5-5\"\n",
+            // A Claude model left in place when switching to Ollama.
+            "[filter]\nprovider = \"ollama\"\nmodel = \"claude-opus-5-5\"\n",
+            // Only the server's address.
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"http://mac.local:11434/api\"\n",
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"http://mac.local:11434?x=1\"\n",
+            // The API key is never sent unencrypted off this machine.
+            "[filter]\nbase_url = \"http://api.anthropic.com\"\n",
+            "[filter]\nbase_url = \"http://192.168.1.20:8080\"\n",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:9/",
+            "http://[::1]:9",
+            "https://proxy.example.com",
+        ] {
+            let f = parse(&format!("[filter]\nbase_url = \"{url}\"\n"))
+                .unwrap()
+                .filter;
+            assert_eq!(f.base_url(), url.trim_end_matches('/'));
+        }
+        // Switching the example to Ollama names what is missing.
+        let example = include_str!("../../../hfnode.example.toml");
+        let switched = example.replace("provider = \"claude\"", "provider = \"ollama\"");
+        assert_ne!(switched, example);
+        let e = toml::from_str::<Config>(&switched)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(e.to_string().contains("ollama list"), "{e}");
+        // Extra policy must leave a local model room for a whole RX.
+        let room = crate::gateway::filter::local_room("");
+        let min = crate::gateway::filter::LOCAL_MIN_ROOM;
+        let policy = |n: usize| format!("extra_policy = \"{}\"\n", "X".repeat(n));
+        let ollama = "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\n";
+        let fits = room - min - "\n\nAdditional station policy:\n".len();
+        assert!(parse(&format!("{ollama}{}", policy(fits))).is_ok());
+        let e = parse(&format!("{ollama}{}", policy(fits + 1))).unwrap_err();
+        assert!(e.to_string().contains("by at least 1 characters"), "{e}");
+        assert!(parse(&format!("[filter]\n{}", policy(fits + 1))).is_ok());
     }
 
     #[test]
