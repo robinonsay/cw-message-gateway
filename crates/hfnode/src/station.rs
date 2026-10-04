@@ -409,12 +409,25 @@ impl<R: Rig + 'static> Station<R> {
     /// Start a tuner cycle and wait for it to end, for at most `tune_timeout`.
     fn tune(&self, t0: Instant) -> civ::Result<()> {
         self.with_rig(|r| r.start_tune())?;
-        while self.with_rig(|r| r.tuner_busy())? {
+        // The manual does not say how soon 1C 01 reads 02 ("tuning") after the
+        // command: allow a moment for it, so that a tune is not taken as finished
+        // before it has begun.
+        let start_wait = self.cfg.tune_timeout / 20;
+        let mut started = false;
+        loop {
+            let busy = self.with_rig(|r| r.tuner_busy())?;
+            started |= busy;
+            if !busy && (started || t0.elapsed() > start_wait) {
+                break;
+            }
             if t0.elapsed() > self.cfg.tune_timeout {
                 self.health("tune", "timeout");
                 return Err(civ::RigError::Timeout);
             }
             thread::sleep(self.cfg.poll);
+        }
+        if !started {
+            log::warn!("the tuner never read 02 (tuning) after 1C 01 02");
         }
         Ok(())
     }

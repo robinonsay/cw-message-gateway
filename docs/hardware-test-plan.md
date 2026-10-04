@@ -110,7 +110,10 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 
 **How to stop.** Fastest first:
 
-1. Turn the radio off with its POWER switch, or remove its DC supply.
+1. Turn the radio off: hold POWER for 2 seconds until "POWER OFF..." shows (line
+   1271), or remove its DC supply. (If the radio shows its overheat protection, it
+   has already stopped transmitting: leave it on so the fan can cool it, line
+   7333.)
 2. `Ctrl-C` an `hfnode` command, then run `hfnode radio --config $C rx`. Ctrl-C does
    **not** send the stop command: the radio's keyer finishes the text it was already
    given (up to 30 characters) before returning to receive. At 6 wpm that can be
@@ -157,7 +160,8 @@ OFF, and Time-Out Timer (CI-V) 3 min. Photograph each screen. Also:
 **Hardware.** A 50-ohm dummy load rated well above the test power, connected
 directly to the ANT connector, for step 1 (the first time the USB cable goes in)
 and every step from 4 on. Steps 2 and 3 only receive and need the antenna. Nothing
-plugged into the KEY jack, nothing on the ACC socket, and no external amplifier,
+plugged into the KEY jack, no microphone (its PTT transmits) and VOX off, nothing
+on the ACC socket or the REMOTE jack, and no external amplifier,
 antenna switch or relay in the line (the manual warns that slower external
 equipment can reflect power back into the IC-7300: TX Delay item, p. 12-5, line
 6272). If you have one, an external wattmeter/SWR meter between the radio and the
@@ -309,7 +313,7 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.30 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
 | 0.31 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
 | 0.32 | Serial link | DTR and RTS low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
-| 0.33 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` test match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
+| 0.33 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` and `transmit_control_and_read_frames_on_the_wire` tests match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
@@ -465,7 +469,10 @@ hfnode radio --config $C status
 shows the tuner working, then `tuned`. A line `health: tune NNNms` in the log, and
 a `<time>,tune,NNNms` line in `<state_dir>/health.csv`. `status` reports
 `transmitting: false`. Note the Po reading while it tunes (whether the tuner uses
-the set power or its own) and how long TUNE blinks.
+the set power or its own) and how long TUNE blinks. Run it once with
+`RUST_LOG=civ=trace` and note what `1C 01` reads during and after the tune (`02`
+while tuning, then `01`, is what the node expects; a warning that the tuner never
+read `02` means it does not report tuning that way).
 
 **Pass:** the tune finishes in a few seconds, Po stays at or below about 10%, the
 radio is back on receive, and `health.csv` has the tune line. **Then** set
@@ -533,6 +540,11 @@ receive.
 **Fail:** the radio keeps sending the zeros. Turn it off (or wait out the 44 seconds
 into the dummy load) and investigate `17 FF` and `1C 00 00` (steps 0.14 and 0.16).
 Do not continue.
+
+Run it once more with `RUST_LOG=civ=trace` in front of the command, and check that
+the radio answered `FB` (OK) to both `17 FF` and `1C 00 00`. The node sends the two
+together, so the trace is what shows whether each one works on its own: an `FA`
+(NG) to either means only the other stopped the keyer. Write down which.
 
 Restore `key_speed_wpm = 18` and `max_key_seconds = 45`.
 
@@ -692,8 +704,9 @@ transmission, and send your callsign (the node's transmissions all end
 `DE <node_call> K`).
 
 ```sh
+hfnode listen --config $C                    # first listen; Ctrl-C when sure it is clear
+hfnode radio --config $C cw "QRL? DE N0CALL" # then listen again; continue only if clear
 hfnode radio --config $C tune
-hfnode radio --config $C cw "QRL?"          # then listen; continue only if clear
 hfnode radio --config $C cw "VVV DE N0CALL"
 ```
 

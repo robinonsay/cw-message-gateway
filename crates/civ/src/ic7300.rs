@@ -783,6 +783,49 @@ mod tests {
     }
 
     #[test]
+    fn transmit_control_and_read_frames_on_the_wire() {
+        let mut r = radio(
+            &[
+                OK,
+                OK,
+                &[0x1C, 0x00, 0x00],
+                &[0x1C, 0x01, 0x02],
+                &[0x03, 0x00, 0x00, 0x03, 0x07, 0x00],
+                &[0x1C, 0x03, 0x00, 0x00, 0x03, 0x07, 0x00],
+                &[0x15, 0x11, 0x01, 0x43],
+                &[0x15, 0x12, 0x00, 0x48],
+                &[0x19, 0x00, 0x94],
+            ],
+            false,
+        );
+        r.set_transmit(false).unwrap();
+        r.start_tune().unwrap();
+        assert!(!r.is_transmitting().unwrap());
+        assert!(r.tuner_busy().unwrap());
+        assert_eq!(r.frequency().unwrap(), 7_030_000);
+        assert_eq!(r.transmit_frequency().unwrap(), 7_030_000);
+        assert!((r.read_po().unwrap() - 50.0).abs() < 1e-3);
+        assert!((r.read_swr().unwrap() - 1.5).abs() < 1e-6);
+        assert_eq!(r.transceiver_id().unwrap(), 0x94);
+        let mut buf = r.port.written.clone();
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| take_frame(&mut buf))
+            .map(|f| f.body)
+            .collect();
+        let expected: [&[u8]; 9] = [
+            &[0x1C, 0x00, 0x00], // receive; 1C 00 01 is never sent
+            &[0x1C, 0x01, 0x02], // one tuner cycle
+            &[0x1C, 0x00],
+            &[0x1C, 0x01],
+            &[0x03],
+            &[0x1C, 0x03],
+            &[0x15, 0x11],
+            &[0x15, 0x12],
+            &[0x19, 0x00],
+        ];
+        assert_eq!(frames, expected);
+    }
+
+    #[test]
     fn dot_length_follows_the_radio_speed() {
         // Unknown speed: read 14 0C. 02 55 = 48 wpm.
         let mut r = radio(&[&[0x14, 0x0C, 0x02, 0x55], OK], false);
