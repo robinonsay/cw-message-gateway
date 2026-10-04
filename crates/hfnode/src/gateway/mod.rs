@@ -129,7 +129,20 @@ impl LiveServices {
         let gv = GvStore::read(&self.cfg.state_dir);
         let im = imessage_state(&self.cfg, self.imessage.as_ref().map(|s| &*s.shared));
         let a = avail(&self.cfg, self.mailer.is_some(), &im);
-        route::plan_only(c, a, &gv, only).map_err(SendError::NoRoute)
+        // Just after start-up Messages has not been checked yet: a contact reached
+        // only by iMessage is a GATEWAY failure then (try again shortly), not NO ROUTE.
+        let checking = !c.imessage.is_empty()
+            && self
+                .imessage
+                .as_ref()
+                .is_some_and(|s| s.shared.readiness() == imessage::Readiness::Unknown);
+        route::plan_only(c, a, &gv, only).map_err(|why| {
+            if checking {
+                SendError::Gateway(format!("Messages is still being checked: {why}"))
+            } else {
+                SendError::NoRoute(why)
+            }
+        })
     }
 
     /// Send `text` to `dest` as from `from_call`, by the routes TX would use (only

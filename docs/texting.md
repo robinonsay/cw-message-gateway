@@ -220,8 +220,9 @@ Messages' database for up to 30 s for it to go out:
 - Messages shows an error, or refused it (signed out, Automation permission
   refused): nothing went out, so the node tries Google Voice or email next, and
   keys `FAIL GATEWAY` only if there is neither.
-- Messages shows nothing in that time, or it is still queued: `FAIL GATEWAY`, and no
-  other route is tried, because the iMessage may still go out later.
+- Messages shows nothing in that time, it is still queued, or the script failed in
+  a way that does not show whether Messages took it: `FAIL GATEWAY`, and no other
+  route is tried, because the iMessage may still go out later.
 
 Being signed out or refused permission also turns iMessage off until the node next
 checks (every 10 minutes); TX goes by Google Voice or email meanwhile.

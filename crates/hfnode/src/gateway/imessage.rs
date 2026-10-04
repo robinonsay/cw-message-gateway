@@ -178,12 +178,25 @@ impl OsaRunner {
     }
 
     pub fn run(&self, args: &[OsString]) -> std::io::Result<OsaResult> {
-        let mut child = Command::new(&self.program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut tries = 0;
+        let mut child = loop {
+            match Command::new(&self.program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                // ETXTBSY: a program file just written (the tests' stand-in for
+                // osascript) can be busy for a moment while another thread starts a
+                // process. Nothing ran, so trying again is safe.
+                Err(e) if cfg!(unix) && e.raw_os_error() == Some(26) && tries < 5 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                r => break r?,
+            }
+        };
         let start = Instant::now();
         let exit = loop {
             if let Some(status) = child.try_wait()? {
@@ -480,11 +493,26 @@ pub fn classify(exit: OsaExit, err: Option<&OsaResult>, row: Option<&OutRow>) ->
             ImOutcome::Uncertain("Messages took the command but no sent message appeared".into())
         }
         (OsaExit::TimedOut, _) | (_, Some(-1712)) => ImOutcome::Uncertain(TIMEOUT_ADVICE.into()),
-        (OsaExit::Code(c), _) => ImOutcome::Definite(match err {
+        (OsaExit::Code(_), n) if before_sending(n) => {
+            ImOutcome::Definite(err.map_or_else(|| "osascript failed".into(), advice))
+        }
+        // Any other failure could have come after Messages took the message.
+        (OsaExit::Code(c), _) => ImOutcome::Uncertain(match err {
             Some(e) => advice(e),
             None => format!("osascript failed (exit {c})"),
         }),
     }
+}
+
+/// Error numbers that stop the script before it reaches `send`: no permission to
+/// control Messages (-1743), no such account or participant (-1728, -1719), the
+/// script's own checks (1001, 1002), or a script that did not compile (-2740,
+/// -2741).
+fn before_sending(err: Option<i32>) -> bool {
+    matches!(
+        err,
+        Some(-1743 | -1728 | -1719 | 1001 | 1002 | -2740 | -2741)
+    )
 }
 
 /// The result of one iMessage send.
@@ -549,21 +577,50 @@ impl ImSender {
             }
         };
         let sent_at = super::unix_now();
+        // The reply window opens before the send: a quick reply can come back while
+        // the send is still being confirmed. It is taken back if nothing went out.
+        let opened = open_window(
+            &self.state_dir,
+            &contact.name,
+            sent_at.saturating_sub(1),
+            sent_at,
+            self.reply_hours,
+        )
+        .map_err(|e| {
+            log::error!(
+                "could not open the iMessage reply window for {}: {e:#}",
+                contact.name
+            )
+        })
+        .ok();
+        let take_back = || {
+            if let Some(o) = &opened {
+                if let Err(e) = take_back_window(&self.state_dir, &contact.name, o) {
+                    log::error!(
+                        "could not close the iMessage reply window for {}: {e:#}",
+                        contact.name
+                    );
+                }
+            }
+        };
         let result = match self.runner.run(&osa_send_args(handle, text)) {
             Ok(r) => r,
             // Not started (for one, a NUL in the text): nothing was sent.
             Err(e) => {
+                take_back();
                 return report(
                     ImOutcome::Definite(format!("could not run osascript: {e}")),
                     None,
-                )
+                );
             }
         };
         if disables_sending(result.err_num) {
             self.shared.set(Readiness::NotReady(advice(&result)));
         }
-        let failed = !matches!(result.exit, OsaExit::Code(0) | OsaExit::TimedOut)
-            && result.err_num != Some(-1712);
+        let failed = matches!(
+            classify(result.exit, Some(&result), None),
+            ImOutcome::Definite(_)
+        );
         let deadline = if failed {
             Instant::now() + Duration::from_secs(2)
         } else {
@@ -591,7 +648,9 @@ impl ImSender {
             std::thread::sleep(self.poll_every);
         }
         let outcome = classify(result.exit, Some(&result), row.as_ref());
-        if !matches!(outcome, ImOutcome::Definite(_)) {
+        if matches!(outcome, ImOutcome::Definite(_)) {
+            take_back();
+        } else {
             let record = SentRecord {
                 unix: sent_at,
                 contact: contact.name.clone(),
@@ -601,18 +660,8 @@ impl ImSender {
                     _ => "uncertain".into(),
                 },
             };
-            if let Err(e) = open_window(
-                &self.state_dir,
-                &contact.name,
-                sent_at.saturating_sub(1),
-                super::unix_now(),
-                self.reply_hours,
-                record,
-            ) {
-                log::error!(
-                    "could not open the iMessage reply window for {}: {e:#}",
-                    contact.name
-                );
+            if let Err(e) = record_send(&self.state_dir, record) {
+                log::error!("could not record the iMessage to {}: {e:#}", contact.name);
             }
         }
         report(outcome, row)
@@ -763,38 +812,70 @@ impl Windows {
     }
 }
 
-/// Open, or extend, `contact`'s reply window after an iMessage sent at
-/// `sent_unix`, and record the send. Locked: `hfnode messages send` may write too.
+/// A contact's reply window before and after [`open_window`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Opened {
+    before: Option<Window>,
+    after: Window,
+}
+
+/// Change the reply windows under their lock: the node and `hfnode messages send`
+/// may both write them.
+fn update_windows<T>(state_dir: &Path, f: impl FnOnce(&mut Windows) -> T) -> Result<T> {
+    std::fs::create_dir_all(state_dir)?;
+    let _lock = super::google_voice::lock(&state_dir.join("imessage_windows.lock"))?;
+    let mut w = Windows::read(state_dir);
+    w.version = 1;
+    let out = f(&mut w);
+    super::google_voice::write_json(&state_dir.join(WINDOWS_FILE), &w)?;
+    Ok(out)
+}
+
+/// Open, or extend, `contact`'s reply window for an iMessage sent at `sent_unix`.
 pub fn open_window(
     state_dir: &Path,
     contact: &str,
     sent_unix: u64,
     now: u64,
     reply_hours: u64,
-    record: SentRecord,
-) -> Result<()> {
-    std::fs::create_dir_all(state_dir)?;
-    let _lock = super::google_voice::lock(&state_dir.join("imessage_windows.lock"))?;
-    let mut w = Windows::read(state_dir);
-    w.version = 1;
-    let until = now + reply_hours * 3600;
-    let opened = match w.windows.get(contact) {
-        Some(old) if old.until_unix >= sent_unix => old.opened_unix,
-        _ => sent_unix,
-    };
-    w.windows.insert(
-        contact.to_string(),
-        Window {
+) -> Result<Opened> {
+    update_windows(state_dir, |w| {
+        let before = w.windows.get(contact).copied();
+        let opened = match before {
+            Some(old) if old.until_unix >= sent_unix => old.opened_unix,
+            _ => sent_unix,
+        };
+        let after = Window {
             opened_unix: opened,
-            until_unix: until,
-        },
-    );
-    w.windows
-        .retain(|_, win| win.until_unix.saturating_add(KEEP_CLOSED) >= now);
-    w.sent.push(record);
-    let excess = w.sent.len().saturating_sub(KEEP_SENT);
-    w.sent.drain(..excess);
-    super::google_voice::write_json(&state_dir.join(WINDOWS_FILE), &w)
+            until_unix: now + reply_hours * 3600,
+        };
+        w.windows.insert(contact.to_string(), after);
+        w.windows
+            .retain(|_, win| win.until_unix.saturating_add(KEEP_CLOSED) >= now);
+        Opened { before, after }
+    })
+}
+
+/// Undo [`open_window`] after a send that certainly did not go out, unless the
+/// window has changed since.
+pub fn take_back_window(state_dir: &Path, contact: &str, opened: &Opened) -> Result<()> {
+    update_windows(state_dir, |w| {
+        if w.windows.get(contact) == Some(&opened.after) {
+            match opened.before {
+                Some(b) => w.windows.insert(contact.to_string(), b),
+                None => w.windows.remove(contact),
+            };
+        }
+    })
+}
+
+/// Keep a note of a send that went out, or may have.
+pub fn record_send(state_dir: &Path, record: SentRecord) -> Result<()> {
+    update_windows(state_dir, |w| {
+        w.sent.push(record);
+        let excess = w.sent.len().saturating_sub(KEEP_SENT);
+        w.sent.drain(..excess);
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +958,10 @@ pub enum Decision {
 /// unsend it for two minutes.
 const HOLD_SECS: u64 = 150;
 
+/// Older replies are never taken, even inside a long-extended window: the inbox
+/// forgets read messages after 30 days, and a rescan must not bring them back.
+const MAX_REPLY_AGE: u64 = 28 * 86_400;
+
 /// Messages' own link previews: the text is there as usual.
 const LINK_PREVIEW: &str = "com.apple.messages.URLBalloonProvider";
 
@@ -886,6 +971,9 @@ pub fn decide(row: &Row, window: Option<&Window>, when: Option<u64>, now: u64) -
     let Some(when) = when.filter(|&t| window.is_some_and(|w| w.contains(t))) else {
         return Decision::Skip("outside reply window".into());
     };
+    if now.saturating_sub(when) > MAX_REPLY_AGE {
+        return Decision::Skip("older than 28 days".into());
+    }
     if row.service.as_deref() != Some("iMessage") {
         return Decision::Skip("not iMessage (SMS/RCS)".into());
     }
@@ -1017,7 +1105,13 @@ struct Snapshot {
 
 /// Everything the poll reads, in one short read transaction; none is held across
 /// polls, which would keep Messages from checkpointing its log.
-fn snapshot(db: &Db, contacts: &[Contact], st: &Cursor, windows: &Windows) -> Result<Snapshot> {
+fn snapshot(
+    db: &Db,
+    contacts: &[Contact],
+    st: &Cursor,
+    windows: &Windows,
+    now: u64,
+) -> Result<Snapshot> {
     let tx = db.conn.unchecked_transaction()?;
     let snap = max_rowid(&tx)?;
     let anchor = guid_at(&tx, st.cursor)?;
@@ -1026,6 +1120,7 @@ fn snapshot(db: &Db, contacts: &[Contact], st: &Cursor, windows: &Windows) -> Re
     let handles = contact_handles(&tx, contacts)?;
     let rows = match windows.floor() {
         Some(floor) if !handles.is_empty() => {
+            let floor = floor.max(now.saturating_sub(MAX_REPLY_AGE));
             reply_rows(&tx, db.cols, &handles, cursor, snap, floor)?
         }
         _ => Vec::new(),
@@ -1067,7 +1162,7 @@ pub fn poll(
         return Ok(0);
     };
     let windows = Windows::read(state_dir);
-    let found = snapshot(&db, contacts, &st, &windows)?;
+    let found = snapshot(&db, contacts, &st, &windows, now)?;
     if found.rescan {
         log::warn!(
             "Messages' database changed under the iMessage cursor (replaced, moved to another \
@@ -1438,6 +1533,7 @@ mod tests {
             self.dir.path().join("state")
         }
 
+        #[cfg(unix)]
         fn writer(&self) -> Connection {
             Connection::open(&self.cfg.db).unwrap()
         }
@@ -1645,6 +1741,28 @@ mod tests {
     }
 
     #[test]
+    fn replies_older_than_28_days_are_never_taken() {
+        let f = fixture(true);
+        f.set_cursor(0, None);
+        // A window kept open by a TX every day for 40 days reaches back past both
+        // row 1 (10 days old) and row 12 (30 days old).
+        update_windows(&f.state(), |w| {
+            w.windows.insert(
+                "MOM".into(),
+                Window {
+                    opened_unix: T - 40 * 86_400,
+                    until_unix: NOW + 3600,
+                },
+            )
+        })
+        .unwrap();
+        f.poll(NOW + 200).unwrap();
+        let texts: Vec<String> = f.texts().into_iter().map(|(_, t)| t).collect();
+        assert!(texts.contains(&"old".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"resynced".to_string()), "{texts:?}");
+    }
+
+    #[test]
     fn no_window_no_rows() {
         let f = fixture(true);
         f.set_cursor(0, None);
@@ -1774,6 +1892,16 @@ mod tests {
             Definite(e) => assert!(e.contains("signed in with iMessage"), "{e}"),
             other => panic!("{other:?}"),
         }
+        // An error the script does not raise before sending, or osascript killed:
+        // Messages may have it already.
+        assert!(matches!(
+            c(OsaExit::Code(1), &osa(1, Some(-10000)), None),
+            Uncertain(_)
+        ));
+        assert!(matches!(
+            c(OsaExit::Code(-1), &osa(-1, None), None),
+            Uncertain(_)
+        ));
     }
 
     #[test]
@@ -1923,7 +2051,7 @@ mod tests {
                 "echo 'execution error: x (-1743)' >&2; exit 1",
             ),
         );
-        let before = std::fs::read(f.state().join(WINDOWS_FILE)).ok();
+        let before = Windows::read(&f.state());
         let report = s.send(&mom(), &mom().imessage[0], "HI");
         assert!(
             matches!(report.outcome, ImOutcome::Definite(_)),
@@ -1931,7 +2059,9 @@ mod tests {
         );
         assert!(s.shared.send_ready().is_err());
         // Nothing went out, so the reply windows are as they were.
-        assert_eq!(std::fs::read(f.state().join(WINDOWS_FILE)).ok(), before);
+        let after = Windows::read(&f.state());
+        assert_eq!(after.windows, before.windows);
+        assert_eq!(after.sent, before.sent);
         // osascript not there at all: nothing was sent either.
         let mut s = s;
         s.runner.program = f.dir.path().join("missing");
@@ -1939,6 +2069,36 @@ mod tests {
             s.send(&mom(), &mom().imessage[0], "HI").outcome,
             ImOutcome::Definite(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_window_is_open_while_sending() {
+        let f = fixture(true);
+        std::fs::remove_file(f.state().join(WINDOWS_FILE)).unwrap();
+        // osascript keeps a copy of the windows as they are while it runs, then
+        // fails before sending.
+        let seen = f.dir.path().join("seen.json");
+        let s = sender(
+            &f,
+            fake_osascript(
+                f.dir.path(),
+                &format!(
+                    "cp '{}' '{}'; echo 'execution error: x (-1743)' >&2; exit 1",
+                    f.state().join(WINDOWS_FILE).display(),
+                    seen.display()
+                ),
+            ),
+        );
+        let report = s.send(&mom(), &mom().imessage[0], "HI");
+        assert!(
+            matches!(report.outcome, ImOutcome::Definite(_)),
+            "{report:?}"
+        );
+        let during: Windows = serde_json::from_slice(&std::fs::read(&seen).unwrap()).unwrap();
+        assert!(during.windows.contains_key("MOM"));
+        // Nothing was sent, so it is gone again.
+        assert!(Windows::read(&f.state()).windows.is_empty());
     }
 
     #[test]
@@ -1951,18 +2111,42 @@ mod tests {
             guid: None,
             outcome: "confirmed".into(),
         };
-        open_window(d, "MOM", 1000, 1001, 48, rec(1000)).unwrap();
+        open_window(d, "MOM", 1000, 1001, 48).unwrap();
         // Still open: keeps its start, ends later.
-        open_window(d, "MOM", 5000, 5001, 48, rec(5000)).unwrap();
+        open_window(d, "MOM", 5000, 5001, 48).unwrap();
         let w = Windows::read(d).windows["MOM"];
         assert_eq!((w.opened_unix, w.until_unix), (1000, 5001 + 48 * 3600));
         // Closed long ago: a new one; others closed for over 14 days are dropped.
-        open_window(d, "DAD", 10, 11, 1, rec(10)).unwrap();
+        open_window(d, "DAD", 10, 11, 1).unwrap();
         let later = 1001 + 48 * 3600 + 20 * 86_400;
-        open_window(d, "MOM", later, later, 48, rec(later)).unwrap();
+        open_window(d, "MOM", later, later, 48).unwrap();
         let all = Windows::read(d);
         assert_eq!(all.windows["MOM"].opened_unix, later);
         assert!(!all.windows.contains_key("DAD"));
-        assert_eq!(all.sent.len(), 4);
+        for t in [1000, 5000, 10, later] {
+            record_send(d, rec(t)).unwrap();
+        }
+        assert_eq!(Windows::read(d).sent.len(), 4);
+    }
+
+    #[test]
+    fn a_window_is_taken_back_when_nothing_was_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // A new window goes away again.
+        let o = open_window(d, "MOM", 1000, 1001, 48).unwrap();
+        take_back_window(d, "MOM", &o).unwrap();
+        assert!(!Windows::read(d).windows.contains_key("MOM"));
+        // An extended one goes back to how it was.
+        open_window(d, "MOM", 1000, 1001, 48).unwrap();
+        let first = Windows::read(d).windows["MOM"];
+        let o = open_window(d, "MOM", 5000, 5001, 48).unwrap();
+        take_back_window(d, "MOM", &o).unwrap();
+        assert_eq!(Windows::read(d).windows["MOM"], first);
+        // Changed since (another send): left alone.
+        let o = open_window(d, "MOM", 5000, 5001, 48).unwrap();
+        open_window(d, "MOM", 6000, 6001, 48).unwrap();
+        take_back_window(d, "MOM", &o).unwrap();
+        assert_eq!(Windows::read(d).windows["MOM"].until_unix, 6001 + 48 * 3600);
     }
 }
