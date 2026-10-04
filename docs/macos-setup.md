@@ -151,6 +151,14 @@ Then edit `hfnode.toml` as in [section 7](raspberry-pi-setup.md#7-configuration)
 there, with the serial port, audio device and folder paths from above. Keep
 `station.commissioned = "none"` until the hardware test plan sets it.
 
+Fill in `[storm]` with your home's latitude and longitude (`run` refuses to start
+without it), then check the node can read the forecast. It prints `clear:` or
+`storm:`; an error means the node would never transmit:
+
+```sh
+hfnode storm --config "$D/hfnode.toml"
+```
+
 ## 6. Secrets
 
 Passwords and API keys never go in the TOML file. Put them in `env` in the node's
