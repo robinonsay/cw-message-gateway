@@ -209,8 +209,9 @@ longest transmit, no transmit past the break-in delay plus the stuck margin, dut
 cycle, receive when the node stops, the tuner cycles expected).
 
 The scenarios cover the field grammar end to end: TX, RX with one to many messages,
-the five-message cap and truncation, WX with 4- and 6-character grids, `FAIL`
-replies, NO, AGN and AGN with a chunk letter, codes sent in two groups, a repeated
+the five-message cap and truncation, WX with 4- and 6-character grids, a grid sent
+as two words, known and unknown presets, `FAIL` replies (`WX NO COVERAGE` among
+them), NO, AGN and AGN with a chunk letter, codes sent in two groups, a repeated
 `OK` after a lost result, an open on fresh lines replacing a pending one, and the
 10-minute pending-commit and `AGN` windows. Also lost read-backs, replayed and wrong
 codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm, SNR
@@ -793,7 +794,11 @@ The second station plays the field operator, inside a listening window, using
 2. Reply to that message from the contact's address or phone. After `email.poll_secs`
    (and screening), `RX`: expect `R n 1 MSG ?`, then the message after `OK`.
 3. `AGN` and `AGN A`: expect the whole transmission, then chunk A, repeated.
-4. `WX`: expect a read-back and a forecast.
+4. `WX` with the field station's 6-character grid square, then with a preset: expect
+   a read-back naming the grid square (and the preset number), then a forecast that
+   starts with it. Then `WX IO91` (southern England): expect
+   `FAIL n WX NO COVERAGE`, which shows the node tells a place the NWS does not
+   cover apart from an outage.
 5. Open a transaction, then `NO`: expect `R NO`, and nothing sent.
 6. Resend the open of an already-completed transaction: expect silence.
 7. Send a code from the wrong line: expect silence.

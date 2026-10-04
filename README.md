@@ -7,7 +7,8 @@ from a printed table, and then:
 
 - **TX**: sends a text or email to a named contact,
 - **RX**: reads back replies that have arrived (after a compliance filter has screened them),
-- **WX**: reads back a short National Weather Service forecast.
+- **WX**: reads back a short National Weather Service forecast for the field
+  operator's grid square or a numbered preset place (US only).
 
 Every request is read back and does nothing until the field operator confirms it
 with a second code. Message content travels in the clear. The codes only prove who
@@ -180,7 +181,8 @@ listens to what the mock radio actually keyed, and reacts: it opens, checks the
 read-back, answers `OK`, `NO` or `AGN`, and repeats an open or an `OK` that got no
 answer. While the mock radio is on transmit the node hears nothing of the operator.
 Scenarios cover the grammar (TX, RX up to the five-message cap and truncation, WX
-with 4- and 6-character grids, `FAIL` replies, NO, AGN, codes in two groups, an
+with 4- and 6-character grids, a grid sent as two words, known and unknown presets,
+`FAIL` replies including `WX NO COVERAGE`, NO, AGN, codes in two groups, an
 open on fresh lines replacing a pending one, the 10-minute pending and `AGN`
 windows), lost read-backs and results, replayed and wrong codes, garbled callsigns,
 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V

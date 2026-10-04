@@ -26,7 +26,8 @@
 use crate::inbox::Message;
 use auth::{SeqStore, Verifier};
 use protocol::{
-    chunk, chunk_count, parse, sanitize, Chunk, Command, FieldMsg, Reply, Vocabulary, MAX_CHUNKS,
+    chunk, chunk_count, parse, sanitize, Chunk, Command, FieldMsg, Place, Reply, Vocabulary,
+    MAX_CHUNKS,
 };
 use std::time::{Duration, Instant};
 
@@ -38,8 +39,28 @@ pub trait Services {
     fn ready_messages(&mut self) -> Vec<Message>;
     /// Called by the node once a transmission carrying these messages was keyed.
     fn mark_read(&mut self, ids: &[u64]);
-    /// A short forecast for `grid`, or the default location.
-    fn weather(&mut self, grid: Option<&str>) -> Result<String, String>;
+    /// A short forecast for the 4- or 6-character grid square `grid`.
+    fn weather(&mut self, grid: &str) -> Result<String, WxError>;
+}
+
+/// Why there is no forecast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WxError {
+    /// The weather service has nothing for that place (outside NWS coverage), so
+    /// asking again will not help. Keyed as `FAIL <seq> WX NO COVERAGE`.
+    NoCoverage,
+    /// Anything else: not configured, network down, a bad response. Keyed as
+    /// `FAIL <seq> WX`.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for WxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCoverage => write!(f, "no forecast for that place"),
+            Self::Unavailable(e) => write!(f, "{e}"),
+        }
+    }
 }
 
 /// One transmission, as keying runs with a pause between each.
@@ -81,6 +102,10 @@ pub struct SessionConfig {
     /// `AGN` is honoured only this long after the last transmission, and a repeated
     /// commit only this long after the commit.
     pub again_window: Duration,
+    /// Grid square for `WX` sent without a place; `None` without `[weather]`.
+    pub wx_default_grid: Option<String>,
+    /// `WX <n>` presets, as (number, grid square).
+    pub wx_presets: Vec<(u32, String)>,
 }
 
 /// How many times a repeated commit is answered before it is ignored.
@@ -94,6 +119,8 @@ struct Pending {
     open_seq: u64,
     open_code: String,
     cmd: Command,
+    /// For `WX`: the grid square the read-back named, which the commit fetches.
+    wx_grid: Option<String>,
     opened_at: Instant,
     read_back: Transmission,
 }
@@ -228,6 +255,7 @@ impl Session {
         self.verifier.commit(seq);
         // A newer transaction ends the repeat of the previous commit.
         self.last_commit = None;
+        let mut wx_grid = None;
         let reply = match &cmd {
             Command::Tx { dest, text } => Reply::ReadBackTx {
                 seq,
@@ -238,10 +266,11 @@ impl Session {
                 seq,
                 count: svc.ready_messages().len(),
             },
-            Command::Wx { grid } => Reply::ReadBackWx {
-                seq,
-                grid: grid.clone(),
-            },
+            Command::Wx { place } => {
+                let (preset, grid) = self.wx_place(place.as_ref());
+                wx_grid = grid.clone();
+                Reply::ReadBackWx { seq, preset, grid }
+            }
         };
         let read_back = Transmission::single(reply.render(&self.cfg.node_call));
         log::info!("opened transaction {seq} from {call}: {cmd:?}");
@@ -249,6 +278,7 @@ impl Session {
             open_seq: seq,
             open_code: code.to_string(),
             cmd,
+            wx_grid,
             opened_at: now,
             read_back: read_back.clone(),
         });
@@ -323,22 +353,32 @@ impl Session {
                     (t, chunks)
                 }
             }
-            Command::Wx { grid } => match svc.weather(grid.as_deref()) {
-                Ok(text) => self.chunked(&format!("WX {text}"), &call),
-                Err(e) => {
-                    log::warn!("weather failed: {e}");
-                    (
-                        Transmission::single(
-                            Reply::Failed {
-                                seq,
-                                reason: "WX".into(),
-                            }
-                            .render(&call),
-                        ),
-                        Vec::new(),
-                    )
+            Command::Wx { .. } => {
+                let result = match &p.wx_grid {
+                    Some(grid) => svc.weather(grid),
+                    None => Err(WxError::Unavailable("no grid square to forecast".into())),
+                };
+                match result {
+                    Ok(text) => self.chunked(&format!("WX {text}"), &call),
+                    Err(e) => {
+                        log::warn!("weather for {:?} failed: {e}", p.wx_grid);
+                        let reason = match e {
+                            WxError::NoCoverage => "WX NO COVERAGE",
+                            WxError::Unavailable(_) => "WX",
+                        };
+                        (
+                            Transmission::single(
+                                Reply::Failed {
+                                    seq,
+                                    reason: reason.into(),
+                                }
+                                .render(&call),
+                            ),
+                            Vec::new(),
+                        )
+                    }
                 }
-            },
+            }
         };
         self.last_commit = Some(LastCommit {
             seq,
@@ -348,6 +388,23 @@ impl Session {
             chunks: chunks.clone(),
         });
         Outcome::Transmit(transmission)
+    }
+
+    /// The preset number (if one was sent) and the grid square a `WX` is for. The
+    /// read-back names both, so the operator hears which place the forecast is for.
+    fn wx_place(&self, place: Option<&Place>) -> (Option<u32>, Option<String>) {
+        match place {
+            Some(Place::Grid(g)) => (None, Some(g.clone())),
+            Some(Place::Preset(n)) => (
+                Some(*n),
+                self.cfg
+                    .wx_presets
+                    .iter()
+                    .find(|(p, _)| p == n)
+                    .map(|(_, g)| g.clone()),
+            ),
+            None => (None, self.cfg.wx_default_grid.clone()),
+        }
     }
 
     /// The text of one `RX` result and the ids of the messages it carries in full.
@@ -466,6 +523,8 @@ mod tests {
         sent: Vec<(String, String)>,
         inbox: Vec<Message>,
         fail_send: bool,
+        weather_calls: Vec<String>,
+        weather_error: Option<WxError>,
     }
 
     impl Services for Fake {
@@ -488,11 +547,12 @@ mod tests {
                 m.state = State::Read;
             }
         }
-        fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-            Ok(format!(
-                "{} TODAY SUNNY HI 95 TONIGHT CLEAR LO 60",
-                grid.unwrap_or("HOME")
-            ))
+        fn weather(&mut self, grid: &str) -> Result<String, WxError> {
+            self.weather_calls.push(grid.to_string());
+            match &self.weather_error {
+                Some(e) => Err(e.clone()),
+                None => Ok(format!("{grid} TODAY SUNNY HI 95 TONIGHT CLEAR LO 60")),
+            }
         }
     }
 
@@ -529,10 +589,13 @@ mod tests {
                     chunk_chars: 40,
                     max_rx_messages: 5,
                     again_window: Duration::from_secs(900),
+                    wx_default_grid: Some("EM10".into()),
+                    wx_presets: vec![(1, "DL89IG".into()), (2, "DL89ME".into())],
                 },
                 Vocabulary {
                     field_calls: vec!["W5XXX".into()],
                     contacts: vec!["MOM".into(), "BOB".into()],
+                    presets: vec![1, 2],
                 },
                 Verifier::new(book.clone(), store.load().unwrap()),
                 store,
@@ -718,8 +781,80 @@ mod tests {
             tx(&r.send(0, "W5XXX 42 {42} WX DL89 K")),
             "R 42 WX DL89 ? DE N0DE K"
         );
+        assert!(
+            r.svc.weather_calls.is_empty(),
+            "nothing is fetched before OK"
+        );
         let text = tx(&r.send(10, "OK 43 {43} K"));
         assert!(text.starts_with("WX DL89 TODAY SUNNY"), "{text}");
+        assert_eq!(r.svc.weather_calls, ["DL89"]);
+    }
+
+    #[test]
+    fn weather_read_back_names_the_grid_it_will_use() {
+        let mut r = Rig::new();
+        // WX alone: the configured grid, named in the read-back.
+        assert_eq!(
+            tx(&r.send(0, "W5XXX 42 {42} WX K")),
+            "R 42 WX EM10 ? DE N0DE K"
+        );
+        tx(&r.send(10, "OK 43 {43} K"));
+        // A preset: its number and its grid.
+        assert_eq!(
+            tx(&r.send(20, "W5XXX 44 {44} WX 2 K")),
+            "R 44 WX 2 DL89ME ? DE N0DE K"
+        );
+        // The exact retry repeats the same read-back.
+        assert_eq!(
+            tx(&r.send(30, "W5XXX 44 {44} WX 2 K")),
+            "R 44 WX 2 DL89ME ? DE N0DE K"
+        );
+        let text = tx(&r.send(40, "OK 45 {45} K"));
+        assert!(text.starts_with("WX DL89ME TODAY"), "{text}");
+        // A grid split by a long gap is rejoined.
+        assert_eq!(
+            tx(&r.send(50, "W5XXX 46 {46} WX DL89 IG K")),
+            "R 46 WX DL89IG ? DE N0DE K"
+        );
+        tx(&r.send(60, "OK 47 {47} K"));
+        assert_eq!(r.svc.weather_calls, ["EM10", "DL89ME", "DL89IG"]);
+    }
+
+    #[test]
+    fn unknown_presets_and_bad_grids_get_silence() {
+        let mut r = Rig::new();
+        assert!(silent(&r.send(0, "W5XXX 42 {42} WX 3 K")));
+        assert!(silent(&r.send(0, "W5XXX 42 {42} WX ZZ99 K")));
+        assert_eq!(r.stored_seq(), 41, "no code is burned");
+        // The same line still works once sent right.
+        assert_eq!(
+            tx(&r.send(10, "W5XXX 42 {42} WX 1 K")),
+            "R 42 WX 1 DL89IG ? DE N0DE K"
+        );
+    }
+
+    #[test]
+    fn weather_failures_say_whether_to_try_again() {
+        let mut r = Rig::new();
+        r.svc.weather_error = Some(WxError::NoCoverage);
+        tx(&r.send(0, "W5XXX 42 {42} WX IO91 K"));
+        assert_eq!(
+            tx(&r.send(10, "OK 43 {43} K")),
+            "FAIL 43 WX NO COVERAGE DE N0DE K"
+        );
+        r.svc.weather_error = Some(WxError::Unavailable("timed out".into()));
+        tx(&r.send(20, "W5XXX 44 {44} WX DL89 K"));
+        assert_eq!(tx(&r.send(30, "OK 45 {45} K")), "FAIL 45 WX DE N0DE K");
+        assert_eq!(r.stored_seq(), 45, "the codes are used either way");
+    }
+
+    #[test]
+    fn weather_without_any_grid_fails_without_fetching() {
+        let mut r = Rig::new();
+        r.session.cfg.wx_default_grid = None;
+        assert_eq!(tx(&r.send(0, "W5XXX 42 {42} WX K")), "R 42 WX ? DE N0DE K");
+        assert_eq!(tx(&r.send(10, "OK 43 {43} K")), "FAIL 43 WX DE N0DE K");
+        assert!(r.svc.weather_calls.is_empty());
     }
 
     #[test]

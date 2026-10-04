@@ -243,7 +243,8 @@ sudo nano /etc/hfnode/hfnode.toml
 
 At minimum set `station.node_call`, `station.field_calls`, `station.frequency_hz`,
 `station.serial_port`, `audio.device`, the `[[contacts]]`, `[email]` and
-`[weather]`. The file is checked on load; unknown keys are errors, and
+`[weather]`, with a `[[weather.presets]]` entry for each place you often key from
+(`WX 1`, `WX 2`, ...). The file is checked on load; unknown keys are errors, and
 `power_watts` (1-100), `max_key_seconds` (1-120) and `swr_limit` (1.1-3.0) are range
 checked.
 

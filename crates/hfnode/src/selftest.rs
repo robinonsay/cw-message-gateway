@@ -35,7 +35,7 @@ use crate::audio::{self, Block, BlockSender};
 use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
-use crate::session::Services;
+use crate::session::{Services, WxError};
 use crate::station::{Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
@@ -59,6 +59,8 @@ pub const NODE_CALL: &str = "N0DE";
 pub const FIELD_CALL: &str = "W5XXX";
 /// `last_seq` when a scenario starts: its first open uses line 42.
 pub const START_SEQ: u64 = 41;
+/// The `[weather] default_grid` of the scenarios' node.
+pub const WX_DEFAULT_GRID: &str = "DL89";
 /// Default time scale.
 pub const DEFAULT_SCALE: f32 = 100.0;
 /// Highest time scale. The driver's 500 ms CI-V reply timeout and its read-until-
@@ -146,7 +148,8 @@ pub struct NodeSetup {
     pub key_wpm: u32,
     pub chunk_chars: usize,
     pub fail_send: bool,
-    pub fail_weather: bool,
+    /// What every weather request gets instead of a forecast.
+    pub weather_error: Option<WxError>,
     /// Inbound messages ready to read, as (contact, text).
     pub inbox: Vec<(String, String)>,
     /// Listening windows as (`every_minutes`, `window_minutes`), from the top of
@@ -160,7 +163,7 @@ impl Default for NodeSetup {
             key_wpm: 18,
             chunk_chars: 60,
             fail_send: false,
-            fail_weather: false,
+            weather_error: None,
             inbox: Vec::new(),
             schedule: None,
         }
@@ -270,8 +273,8 @@ pub struct Expect {
     pub sent: Vec<(String, String)>,
     /// Inbound message ids marked read.
     pub read: Vec<u64>,
-    /// Weather requests, by grid.
-    pub weather: Vec<Option<String>>,
+    /// Weather requests, by grid square.
+    pub weather: Vec<String>,
     pub last_seq: u64,
     /// Tuner cycles: one per listening window, none after an inhibit.
     pub tunes: u32,
@@ -398,18 +401,15 @@ pub struct FakeServices {
     pub inbox: Vec<Message>,
     /// Ids marked read, each once, in the order first marked.
     pub read: Vec<u64>,
-    pub weather_calls: Vec<Option<String>>,
+    pub weather_calls: Vec<String>,
     pub fail_send: bool,
-    pub fail_weather: bool,
+    pub weather_error: Option<WxError>,
 }
 
 impl FakeServices {
-    /// The forecast served for `grid` (the default location is DL89).
-    pub fn forecast(grid: Option<&str>) -> String {
-        format!(
-            "{} TDA SUNNY HI 75 TNGT CLEAR LO 50",
-            grid.unwrap_or("DL89")
-        )
+    /// The forecast served for `grid`.
+    pub fn forecast(grid: &str) -> String {
+        format!("{grid} TDA SUNNY HI 75 TNGT CLEAR LO 50")
     }
 }
 
@@ -444,12 +444,12 @@ impl Services for FakeServices {
         }
     }
 
-    fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-        self.weather_calls.push(grid.map(str::to_string));
-        if self.fail_weather {
-            return Err("no forecast".into());
+    fn weather(&mut self, grid: &str) -> Result<String, WxError> {
+        self.weather_calls.push(grid.to_string());
+        match &self.weather_error {
+            Some(e) => Err(e.clone()),
+            None => Ok(Self::forecast(grid)),
         }
-        Ok(Self::forecast(grid))
     }
 }
 
@@ -1046,6 +1046,15 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [[contacts]]
         name = "BOB"
         address = "bob@example.com"
+        [weather]
+        default_grid = "{WX_DEFAULT_GRID}"
+        user_agent = "hfnode selftest"
+        [[weather.presets]]
+        number = 1
+        grid = "DL89IG"
+        [[weather.presets]]
+        number = 2
+        grid = "DL89ME"
         "#,
         state = dir.join("state").display(),
         key = key.display(),
@@ -1236,7 +1245,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     let svc = FakeServices {
         inbox: inbox(&s.node),
         fail_send: s.node.fail_send,
-        fail_weather: s.node.fail_weather,
+        weather_error: s.node.weather_error.clone(),
         ..FakeServices::default()
     };
 
@@ -1352,7 +1361,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
 
     out.facts.sent = svc.sent.clone();
     out.facts.read = svc.read.clone();
-    let weather: Vec<Option<String>> = e.weather.clone();
+    let weather: Vec<String> = e.weather.clone();
     let gateway_ok = svc.sent == e.sent && svc.read == e.read && svc.weather_calls == weather;
     out.checks.push(check(
         "gateway",
@@ -1812,19 +1821,15 @@ pub fn scenarios() -> Vec<Scenario> {
         s
     });
 
-    let wx = |name: &str, about: &str, grid: Option<&str>| {
-        let rb = match grid {
-            Some(g) => de(&format!("R 42 WX {g} ?")),
-            None => de("R 42 WX ?"),
-        };
+    // `place` is what the operator keys after WX, `named` what the read-back says
+    // after WX, and `grid` the square the forecast is fetched for.
+    let wx = |name: &str, about: &str, place: &str, named: &str, grid: &str| {
+        let rb = de(&format!("R 42 WX {named} ?"));
         let result = de(&format!("WX {} = A", FakeServices::forecast(grid)));
         let mut s = base(name, about);
         s.script = vec![
             Step::Open {
-                text: format!(
-                    "{FIELD_CALL} 42 {{42}} WX {}K",
-                    grid.map(|g| format!("{g} ")).unwrap_or_default()
-                ),
+                text: format!("{FIELD_CALL} 42 {{42}} WX {place} K").replace("  ", " "),
                 read_back: rb.clone(),
             },
             Step::Say {
@@ -1833,25 +1838,98 @@ pub fn scenarios() -> Vec<Scenario> {
             },
         ];
         s.expect.keyed = full(&[&rb, &result]);
-        s.expect.weather = vec![grid.map(str::to_string)];
+        s.expect.weather = vec![grid.to_string()];
         s.expect.last_seq = 43;
         s
     };
-    v.push(wx("wx-home", "WX for the default location", None));
-    v.push(wx("wx-grid", "WX for a grid square", Some("DL88")));
+    v.push(wx(
+        "wx-home",
+        "WX with no place: the configured grid, named in the read-back",
+        "",
+        WX_DEFAULT_GRID,
+        WX_DEFAULT_GRID,
+    ));
+    v.push(wx(
+        "wx-grid",
+        "WX for a grid square",
+        "DL88",
+        "DL88",
+        "DL88",
+    ));
     v.push(wx(
         "wx-grid6",
         "WX for a 6-character grid square",
-        Some("DL88AF"),
+        "DL88AF",
+        "DL88AF",
+        "DL88AF",
     ));
+    v.push(wx(
+        "wx-grid-split",
+        "WX for a grid square keyed in two words: rejoined",
+        "DL88 AF",
+        "DL88AF",
+        "DL88AF",
+    ));
+    v.push(wx(
+        "wx-preset",
+        "WX for preset 2: the read-back names its number and grid",
+        "2",
+        "2 DL89ME",
+        "DL89ME",
+    ));
+    v.push({
+        let mut s = base(
+            "wx-unknown-preset",
+            "WX for a preset the node does not have: silence, then the same line works",
+        );
+        let rb = de("R 42 WX 1 DL89IG ?");
+        let result = de(&format!("WX {} = A", FakeServices::forecast("DL89IG")));
+        s.script = vec![
+            Step::Say {
+                text: format!("{FIELD_CALL} 42 {{42}} WX 7 K"),
+                expect: None,
+            },
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} WX 1 K"),
+                read_back: rb.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(result.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &result]);
+        s.expect.weather = vec!["DL89IG".into()];
+        s.expect.last_seq = 43;
+        s
+    });
     v.push({
         let mut s = wx(
             "wx-fail",
             "WX whose forecast cannot be fetched: FAIL 43 WX",
-            None,
+            "",
+            WX_DEFAULT_GRID,
+            WX_DEFAULT_GRID,
         );
-        s.node.fail_weather = true;
+        s.node.weather_error = Some(WxError::Unavailable("network down".into()));
         let fail = de("FAIL 43 WX");
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: Some(fail.clone()),
+        };
+        s.expect.keyed[1] = Over::Full(fail);
+        s
+    });
+    v.push({
+        let mut s = wx(
+            "wx-no-coverage",
+            "WX for a grid outside NWS coverage: FAIL 43 WX NO COVERAGE",
+            "IO91",
+            "IO91",
+            "IO91",
+        );
+        s.node.weather_error = Some(WxError::NoCoverage);
+        let fail = de("FAIL 43 WX NO COVERAGE");
         s.script[1] = Step::Say {
             text: "OK 43 {43} K".into(),
             expect: Some(fail.clone()),
@@ -3291,12 +3369,17 @@ pub fn vectors() -> Vec<Vector> {
             "AGN A K",
             "chunk A again (silence if there was none)",
         ),
-        v("open-wx", "W5XXX 46 {46} WX K", "R 46 WX ? DE N0DE K"),
+        v("open-wx", "W5XXX 46 {46} WX K", "R 46 WX DL89 ? DE N0DE K"),
         v("commit-wx", "OK 47 {47} K", "the forecast"),
         v(
             "open-wx-grid",
             "W5XXX 48 {48} WX DL88 K",
             "R 48 WX DL88 ? DE N0DE K",
+        ),
+        v(
+            "open-wx-preset",
+            "W5XXX 48 {48} WX 2 K",
+            "R 48 WX 2 DL89ME ? DE N0DE K",
         ),
         v("abort", "NO K", "R NO DE N0DE K"),
         v(
@@ -3336,6 +3419,7 @@ fn parsed(text: &str) -> Option<protocol::FieldMsg> {
     let vocab = Vocabulary {
         field_calls: vec![FIELD_CALL.into()],
         contacts: vec!["MOM".into(), "BOB".into()],
+        presets: vec![1, 2],
     };
     parse(text, &vocab).ok()
 }
@@ -3369,7 +3453,8 @@ pub fn write_vectors(
          #   code; a noise character it cannot strip), `reply` says so instead of\n\
          #   giving one: expect silence or a different reply from that file.\n\
          # Against a bench node: use a scratch config with node_call = \"{NODE_CALL}\",\n\
-         #   field_calls = [\"{FIELD_CALL}\"], contacts MOM and BOB, auth.key_file =\n\
+         #   field_calls = [\"{FIELD_CALL}\"], contacts MOM and BOB, weather.default_grid\n\
+         #   = \"{WX_DEFAULT_GRID}\" with presets 1 = DL89IG and 2 = DL89ME, auth.key_file =\n\
          #   test-only.key, and a scratch state_dir whose last_seq is {START_SEQ} (or no\n\
          #   last_seq file at all). Play the files of one speed and noise level in\n\
          #   order, waiting for each reply; `reply` is what the node should key.\n\

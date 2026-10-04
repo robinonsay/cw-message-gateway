@@ -6,7 +6,7 @@
 //! |---------------------------------|--------------------------------------------|
 //! | `CALL seq code TX dest text`    | Open: send `text` to contact `dest`        |
 //! | `CALL seq code RX`              | Open: read new inbound messages            |
-//! | `CALL seq code WX [grid]`       | Open: weather forecast (home or grid)      |
+//! | `CALL seq code WX [grid\|n]`     | Open: forecast for a grid, preset or last  |
 //! | `OK seq code`                   | Commit the pending transaction             |
 //! | `NO`                            | Abort the pending transaction              |
 //! | `AGN [letter]`                  | Repeat the last transmission, or a chunk   |
@@ -28,9 +28,24 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Tx { dest: String, text: String },
+    Tx {
+        dest: String,
+        text: String,
+    },
     Rx,
-    Wx { grid: Option<String> },
+    /// `None` when `WX` was sent alone; the node decides which place that means.
+    Wx {
+        place: Option<Place>,
+    },
+}
+
+/// Where a `WX` forecast is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// A 4- or 6-character Maidenhead locator, uppercased.
+    Grid(String),
+    /// One of the node's numbered presets (`WX 3`).
+    Preset(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +78,7 @@ pub enum ParseError {
     UnknownContact(String),
     EmptyMessage,
     BadGrid(String),
+    UnknownPreset(String),
     TrailingGarbage(String),
 }
 
@@ -77,6 +93,7 @@ impl fmt::Display for ParseError {
             Self::UnknownContact(t) => write!(f, "unknown contact {t:?}"),
             Self::EmptyMessage => write!(f, "TX without message text"),
             Self::BadGrid(t) => write!(f, "{t:?} is not a Maidenhead grid square"),
+            Self::UnknownPreset(t) => write!(f, "no weather preset {t}"),
             Self::TrailingGarbage(t) => write!(f, "unexpected {t:?} after command"),
         }
     }
@@ -98,6 +115,8 @@ pub struct Vocabulary {
     pub field_calls: Vec<String>,
     /// Contact names usable as `TX` destinations.
     pub contacts: Vec<String>,
+    /// Weather preset numbers usable as `WX <n>`.
+    pub presets: Vec<u32>,
 }
 
 /// Characters of one or two elements, which is what isolated noise bursts decode as.
@@ -214,15 +233,9 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
             expect_end(args)?;
             Command::Rx
         }
-        Some("WX") => {
-            let grid = match args {
-                [] => None,
-                [g] if is_grid(g) => Some(g.clone()),
-                [g] => return Err(ParseError::BadGrid(g.clone())),
-                rest => return Err(ParseError::TrailingGarbage(rest.join(" "))),
-            };
-            Command::Wx { grid }
-        }
+        Some("WX") => Command::Wx {
+            place: wx_place(args, &vocab.presets)?,
+        },
         _ => return Err(ParseError::BadCommand(kw.clone())),
     };
     Ok(FieldMsg::Open {
@@ -231,6 +244,29 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         code,
         cmd,
     })
+}
+
+/// The place after `WX`: nothing, a grid square or a preset number.
+///
+/// Neither is snapped to anything: the read-back shows the grid (and the preset
+/// number) so the operator can catch a miscopy. A grid split in two by a stretched
+/// gap (`DL89 IG`) is rejoined, as codes are. A preset must match one the node has
+/// exactly; anything else gets silence, like an unknown contact.
+fn wx_place(args: &[String], presets: &[u32]) -> Result<Option<Place>, ParseError> {
+    match args {
+        [] => Ok(None),
+        [g] if is_grid(g) => Ok(Some(Place::Grid(g.clone()))),
+        [n] if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => n
+            .parse::<u32>()
+            .ok()
+            // No leading zeros: "03" is not preset 3.
+            .filter(|p| presets.contains(p) && p.to_string() == *n)
+            .map(|p| Some(Place::Preset(p)))
+            .ok_or_else(|| ParseError::UnknownPreset(n.clone())),
+        [g] => Err(ParseError::BadGrid(g.clone())),
+        [a, b] if is_grid(&format!("{a}{b}")) => Ok(Some(Place::Grid(format!("{a}{b}")))),
+        rest => Err(ParseError::TrailingGarbage(rest.join(" "))),
+    }
 }
 
 /// A token that a noise burst could have produced: one or two short characters, or
@@ -297,6 +333,7 @@ mod tests {
         Vocabulary {
             field_calls: vec!["W5XXX".into()],
             contacts: vec!["MOM".into(), "DAD".into(), "BOB".into()],
+            presets: vec![1, 2, 12],
         }
     }
 
@@ -344,16 +381,86 @@ mod tests {
             Ok(FieldMsg::Open { cmd, .. }) => cmd,
             other => panic!("{other:?}"),
         };
-        assert_eq!(open("W5XXX 46 ABCDEFGH WX K"), Command::Wx { grid: None });
-        assert_eq!(
-            open("W5XXX 46 ABCDEFGH WX DL88 K"),
-            Command::Wx {
-                grid: Some("DL88".into())
-            }
-        );
+        let grid = |g: &str| Command::Wx {
+            place: Some(Place::Grid(g.into())),
+        };
+        assert_eq!(open("W5XXX 46 ABCDEFGH WX K"), Command::Wx { place: None });
+        assert_eq!(open("W5XXX 46 ABCDEFGH WX DL88 K"), grid("DL88"));
+        assert_eq!(open("W5XXX 46 ABCDEFGH WX dl88af K"), grid("DL88AF"));
         assert_eq!(
             parse("W5XXX 46 ABCDEFGH WX ZZ99 K", &vocab()),
             Err(ParseError::BadGrid("ZZ99".into()))
+        );
+        assert_eq!(
+            parse("W5XXX 46 ABCDEFGH WX DL88 ZZ K", &vocab()),
+            Err(ParseError::TrailingGarbage("DL88 ZZ".into()))
+        );
+    }
+
+    #[test]
+    fn weather_grid_split_by_a_long_gap_is_rejoined() {
+        let open = |s| match parse(s, &vocab()) {
+            Ok(FieldMsg::Open { cmd, .. }) => cmd,
+            other => panic!("{other:?}"),
+        };
+        for text in [
+            "W5XXX 46 ABCDEFGH WX DL88 AF K",
+            "W5XXX 46 ABCDEFGH WX DL 88AF K",
+            "W5XXX 46 ABCDEFGH WX DL8 8AF K",
+        ] {
+            assert_eq!(
+                open(text),
+                Command::Wx {
+                    place: Some(Place::Grid("DL88AF".into()))
+                },
+                "{text}"
+            );
+        }
+        assert_eq!(
+            open("W5XXX 46 ABCDEFGH WX DL 88 K"),
+            Command::Wx {
+                place: Some(Place::Grid("DL88".into()))
+            }
+        );
+        // Three pieces are too many to guess at.
+        assert!(parse("W5XXX 46 ABCDEFGH WX DL 88 AF K", &vocab()).is_err());
+    }
+
+    #[test]
+    fn weather_presets_must_match_exactly() {
+        let open = |s| match parse(s, &vocab()) {
+            Ok(FieldMsg::Open { cmd, .. }) => cmd,
+            other => panic!("{other:?}"),
+        };
+        let preset = |n| Command::Wx {
+            place: Some(Place::Preset(n)),
+        };
+        assert_eq!(open("W5XXX 46 ABCDEFGH WX 2 K"), preset(2));
+        assert_eq!(open("W5XXX 46 ABCDEFGH WX 12 K"), preset(12));
+        for (text, token) in [
+            ("W5XXX 46 ABCDEFGH WX 3 K", "3"),
+            ("W5XXX 46 ABCDEFGH WX 02 K", "02"),
+            (
+                "W5XXX 46 ABCDEFGH WX 99999999999999999999 K",
+                "99999999999999999999",
+            ),
+        ] {
+            assert_eq!(
+                parse(text, &vocab()),
+                Err(ParseError::UnknownPreset(token.into())),
+                "{text}"
+            );
+        }
+        // A preset split by a gap is not rejoined: "1 2" could be 1 or 12.
+        assert!(parse("W5XXX 46 ABCDEFGH WX 1 2 K", &vocab()).is_err());
+        // With no presets configured every number is unknown.
+        let none = Vocabulary {
+            presets: Vec::new(),
+            ..vocab()
+        };
+        assert_eq!(
+            parse("W5XXX 46 ABCDEFGH WX 1 K", &none),
+            Err(ParseError::UnknownPreset("1".into()))
         );
     }
 

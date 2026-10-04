@@ -12,6 +12,10 @@ always ends with `DE <its callsign> K`.
   transmit at all.
 - **Contacts.** Know the contact names configured at home (for example `MOM`,
   `BOB`). You can only send to those names.
+- **Where you will be, for weather.** `WX` gives the forecast for the place you
+  name: your grid square, or one of the node's numbered presets (printed under the
+  code table). Look up the 6-character grid square of each place you will key from
+  before you go (GPS and ham apps show it), and write it on the table.
 - **The code table.** Print a fresh one (below) and check that its first line is
   above the last code you used.
 - **Tell your contacts** to reply to the node's email (or text) with short, plain
@@ -73,8 +77,9 @@ silence, so do not pause longer than that in the middle of one.
 |---|---|---|
 | `W5XXX 42 KRTPQMLD TX MOM RUNNING LATE HOME SUN K` | Open: send text to a contact | `R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K` |
 | `W5XXX 44 <code> RX K` | Open: read new messages | `R 44 3 MSGS ? DE N0CALL K` (`1 MSG`, `0 MSGS`) |
-| `W5XXX 46 <code> WX K` | Open: forecast for the default location | `R 46 WX ? DE N0CALL K` |
-| `W5XXX 46 <code> WX DL88 K` | Open: forecast for a grid square (4 or 6 characters) | `R 46 WX DL88 ? DE N0CALL K` |
+| `W5XXX 46 <code> WX DL89IG K` | Open: forecast for a grid square (4 or 6 characters) | `R 46 WX DL89IG ? DE N0CALL K` |
+| `W5XXX 46 <code> WX 1 K` | Open: forecast for preset 1 | `R 46 WX 1 DL89IG ? DE N0CALL K` |
+| `W5XXX 46 <code> WX K` | Open: forecast for the node's default grid square | `R 46 WX DL89 ? DE N0CALL K` |
 | `OK 43 WBNFHJGC K` | Commit the pending transaction | depends on the request, see below |
 | `NO K` | Abort the pending transaction | `R NO DE N0CALL K` |
 | `AGN K` | Repeat the node's last transmission | the last transmission again |
@@ -133,17 +138,42 @@ Node:  NR 1 FM MOM DRIVE SAFE CALL WHEN YOU CAN NR 2 FM BOB THE = A
 ### WX: weather
 
 ```
-You:   W5XXX 46 <code 46> WX K
-Node:  R 46 WX ? DE N0CALL K
+You:   W5XXX 46 <code 46> WX DL89IG K
+Node:  R 46 WX DL89IG ? DE N0CALL K
 You:   OK 47 <code 47> K
-Node:  WX DL89 ... = A  ... = B DE N0CALL K
+Node:  WX DL89IG ALERT HEAT ADVISORY TNGT MSTLY CLEAR LO 58 WIND W = A
+       5 MPH SAT SUNNY HI 97 WIND SW 10 TO 15 MPH = B DE N0CALL K
 ```
 
-`WX` alone gives the forecast for the node's default grid square; `WX DL88` (or a
-6-character square such as `DL88AF`) gives it for that square. The forecast comes
-from the US National Weather Service, abbreviated, chunked like an `RX` readout.
-`FAIL 47 WX DE N0CALL K` means the forecast could not be fetched (for example a grid
-outside NWS coverage). Those codes are used up.
+Name the place you want the forecast for after `WX`:
+
+- **Your grid square**, such as `WX DL89IG`. Use the 6-character square. A
+  4-character square (`WX DL89`) is about 110 by 190 km and the forecast is for its
+  centre, which can be far from you and at a very different height. A square sent
+  as two words (`DL89 IG`) is joined back together.
+- **A preset**, such as `WX 1`. Presets are the node's numbered places
+  (`[[weather.presets]]` in its config), printed under the code table. Send the
+  digits in full, not as cut numbers.
+- **Nothing**: `WX` alone gives the forecast for the node's default grid square
+  (`weather.default_grid`).
+
+**Check the read-back.** It always names the grid square the forecast will be for,
+after the preset number if you sent one. If it is not the place you meant, send
+`NO K`. The forecast starts with the same grid square.
+
+The forecast comes from the US National Weather Service, so it covers the US only
+(the states and territories). It starts with any active alerts (`ALERT` and the
+alert's name, or `ALERTS UNAVBL` if they could not be checked), then the next
+periods (`TNGT`, `SAT`, ...) with the sky, the high or low in °F, and the wind. It
+is chunked like an `RX` readout.
+
+- `FAIL 47 WX NO COVERAGE DE N0CALL K`: the NWS has no forecast for that grid
+  square (outside the US, or at sea). Asking again will not help.
+- `FAIL 47 WX DE N0CALL K`: the forecast could not be fetched (for example the
+  node's internet connection is down). Try again later.
+
+Either way those codes are used up. A grid square that is not a valid locator, or a
+preset number the node does not have, gets silence.
 
 ### NO: abort
 
@@ -170,6 +200,8 @@ The node never answers anything it cannot decode or authenticate. There is no
 
 - the node did not copy you well enough (most likely);
 - a sequence number or code was wrong, or the line was already used;
+- a contact name, weather preset number or grid square the node does not know or
+  that is not valid (check it against your table);
 - you are outside a listening window, or not close enough to the node's frequency;
 - the node measured a high SWR earlier in this window and has stopped transmitting
   until the next window;

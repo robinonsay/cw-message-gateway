@@ -305,7 +305,47 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
             .collect();
         println!("{}", line.join("      "));
     }
+    let presets = preset_lines(cfg);
+    if !presets.is_empty() {
+        println!();
+        println!(
+            "Weather presets (WX <number>; WX alone is {}):",
+            default_wx(cfg)
+        );
+        for line in presets {
+            println!("{line}");
+        }
+    }
     Ok(())
+}
+
+/// The `[weather]` presets as printed under the code table, one per line.
+fn preset_lines(cfg: &Config) -> Vec<String> {
+    let Some(w) = &cfg.weather else {
+        return Vec::new();
+    };
+    let mut presets: Vec<_> = w.presets.iter().collect();
+    presets.sort_by_key(|p| p.number);
+    presets
+        .iter()
+        .map(|p| {
+            format!(
+                "{:>5}  {:<6}  {}",
+                p.number,
+                p.grid.to_ascii_uppercase(),
+                p.name
+            )
+            .trim_end()
+            .to_string()
+        })
+        .collect()
+}
+
+fn default_wx(cfg: &Config) -> String {
+    cfg.weather
+        .as_ref()
+        .map(|w| w.default_grid.to_ascii_uppercase())
+        .unwrap_or_default()
 }
 
 fn sim(cfg: &Config, offline: bool) -> Result<()> {
@@ -830,5 +870,18 @@ mod tests {
         sim_add(&mut ib, "mom", "second", 1000).unwrap();
         let ready: Vec<String> = ib.ready().into_iter().map(|m| m.raw).collect();
         assert_eq!(ready, ["first", "second"]);
+    }
+
+    #[test]
+    fn presets_are_printed_in_order_under_the_code_table() {
+        let mut cfg: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        cfg.weather.as_mut().unwrap().presets.reverse();
+        cfg.weather.as_mut().unwrap().presets[0].name.clear();
+        assert_eq!(
+            preset_lines(&cfg),
+            ["    1  DL89IG  Chisos Basin", "    2  DL89ME"]
+        );
+        cfg.weather = None;
+        assert!(preset_lines(&cfg).is_empty());
     }
 }

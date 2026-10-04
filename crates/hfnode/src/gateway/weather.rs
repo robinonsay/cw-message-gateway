@@ -1,10 +1,12 @@
 //! Forecasts from the US National Weather Service API (api.weather.gov).
 //!
-//! US only, which covers Big Bend. The NWS asks every client to identify itself in
-//! the User-Agent; set `weather.user_agent` to something with a contact address.
+//! US only (the states and territories), which covers Big Bend. The NWS asks every
+//! client to identify itself in the User-Agent; set `weather.user_agent` to
+//! something with a contact address.
 
 use crate::config::Weather;
-use anyhow::{bail, Context, Result};
+use crate::session::WxError;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -42,15 +44,27 @@ impl Nws {
         Ok(resp.body_mut().read_json()?)
     }
 
-    /// Active alerts and the next few forecast periods, abbreviated for CW.
-    pub fn forecast(&self, grid: Option<&str>) -> Result<String> {
-        let grid = grid.unwrap_or(&self.cfg.default_grid);
-        let (lat, lon) = grid_center(grid).with_context(|| format!("bad grid {grid}"))?;
-        let point = self.get(&format!("{}/points/{lat:.4},{lon:.4}", self.base))?;
-        let Some(url) = point["properties"]["forecast"].as_str() else {
-            bail!("no forecast for {grid} (outside NWS coverage?)");
+    /// Active alerts and the next few forecast periods for the centre of `grid`,
+    /// abbreviated for CW.
+    pub fn forecast(&self, grid: &str) -> Result<String, WxError> {
+        let unavailable = |e: anyhow::Error| WxError::Unavailable(format!("{e:#}"));
+        let (lat, lon) =
+            grid_center(grid).ok_or_else(|| WxError::Unavailable(format!("bad grid {grid}")))?;
+        // The NWS answers 404 for a point it has no forecast office for: the ocean,
+        // or anywhere outside the US.
+        let point = match self.get(&format!("{}/points/{lat:.4},{lon:.4}", self.base)) {
+            Ok(p) => p,
+            Err(e) if is_not_found(&e) => {
+                log::warn!("NWS has no forecast for {grid} ({lat:.4},{lon:.4}): {e:#}");
+                return Err(WxError::NoCoverage);
+            }
+            Err(e) => return Err(unavailable(e)),
         };
-        let fc = self.get(url)?;
+        let Some(url) = point["properties"]["forecast"].as_str() else {
+            log::warn!("NWS point {grid} ({lat:.4},{lon:.4}) has no forecast link");
+            return Err(WxError::NoCoverage);
+        };
+        let fc = self.get(url).map_err(unavailable)?;
         // A failed alerts fetch must not read as "no alerts": say so on the air.
         let alerts = self
             .get(&format!(
@@ -72,6 +86,14 @@ impl Nws {
             self.cfg.periods,
         ))
     }
+}
+
+/// Whether a request failed with HTTP 404.
+fn is_not_found(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<ureq::Error>(),
+        Some(ureq::Error::StatusCode(404))
+    )
 }
 
 /// Centre of a 4- or 6-character Maidenhead locator, as (latitude, longitude).
@@ -232,6 +254,12 @@ mod tests {
     /// Serve canned NWS responses on localhost. Anything that is not the points or
     /// forecast endpoint (i.e. the alerts request) gets `alerts_status`/`alerts_body`.
     fn fake_nws(alerts_status: u16, alerts_body: &'static str) -> String {
+        fake_nws_with(200, alerts_status, alerts_body)
+    }
+
+    /// [`fake_nws`] whose points endpoint answers `points_status` (with the NWS's
+    /// problem document when that is not 200).
+    fn fake_nws_with(points_status: u16, alerts_status: u16, alerts_body: &'static str) -> String {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -247,7 +275,13 @@ mod tests {
                     line.clear();
                 }
                 let path = request.split_whitespace().nth(1).unwrap_or("");
-                let (status, body) = if path.starts_with("/points/") {
+                let (status, body) = if path.starts_with("/points/") && points_status != 200 {
+                    (
+                        points_status,
+                        r#"{"title":"Data Unavailable For Requested Point","status":404}"#
+                            .to_string(),
+                    )
+                } else if path.starts_with("/points/") {
                     (
                         200,
                         format!(r#"{{"properties":{{"forecast":"{fc_url}"}}}}"#),
@@ -272,6 +306,7 @@ mod tests {
             default_grid: "DL89".into(),
             user_agent: "hfnode test".into(),
             periods: 1,
+            presets: Vec::new(),
         }
     }
 
@@ -279,17 +314,32 @@ mod tests {
     fn failed_alerts_fetch_is_announced_not_hidden() {
         let nws = Nws::with_base(&test_cfg(), &fake_nws(503, "{}"));
         assert_eq!(
-            nws.forecast(None).unwrap(),
+            nws.forecast("DL89").unwrap(),
             "DL89 ALERTS UNAVBL TDA SUNNY HI 97 WIND W 5 MPH"
         );
         // A 200 that is not an alert list is no better.
         let nws = Nws::with_base(&test_cfg(), &fake_nws(200, r#"{"title":"oops"}"#));
-        assert!(nws.forecast(None).unwrap().contains("ALERTS UNAVBL"));
+        assert!(nws.forecast("DL89").unwrap().contains("ALERTS UNAVBL"));
         // An empty list really is "no alerts".
         let nws = Nws::with_base(&test_cfg(), &fake_nws(200, r#"{"features":[]}"#));
         assert_eq!(
-            nws.forecast(None).unwrap(),
-            "DL89 TDA SUNNY HI 97 WIND W 5 MPH"
+            nws.forecast("DL89IG").unwrap(),
+            "DL89IG TDA SUNNY HI 97 WIND W 5 MPH"
         );
+    }
+
+    #[test]
+    fn a_place_the_nws_does_not_cover_is_told_apart_from_an_outage() {
+        let nws = Nws::with_base(&test_cfg(), &fake_nws_with(404, 200, r#"{"features":[]}"#));
+        assert_eq!(nws.forecast("IO91"), Err(WxError::NoCoverage));
+        let nws = Nws::with_base(&test_cfg(), &fake_nws_with(500, 200, r#"{"features":[]}"#));
+        assert!(matches!(nws.forecast("DL89"), Err(WxError::Unavailable(_))));
+        // Nothing listening at all.
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let nws = Nws::with_base(&test_cfg(), &closed);
+        assert!(matches!(nws.forecast("DL89"), Err(WxError::Unavailable(_))));
     }
 }
