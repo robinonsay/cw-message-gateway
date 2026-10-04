@@ -10,6 +10,67 @@ automation hurts a transceiver are a stuck transmitter, transmitting into a high
 SWR, and too much duty cycle at high power. Every transmit step below is designed
 to show that one of those protections works before the node is trusted with it.
 
+Manual references are to ICOM's *IC-7300 Full Manual* (`IC-7300_ENG_FM_12b`): page,
+and line of the text copy in the project files (`reference/IC-7300_ENG_FM_12b.txt`).
+The independent byte-by-byte audit of the driver against that manual is in
+[civ-audit.md](civ-audit.md).
+
+## Bring-up stages
+
+`station.commissioned` in the config records how far this plan has got on this
+radio. **The software refuses any command whose stage has not been reached**, so a
+step cannot be skipped by running the wrong command, and the service cannot start
+early:
+
+| `station.commissioned` | Set after | Allows, in addition | Transmits? |
+|---|---|---|---|
+| `none` (default) | | `radio check`, `radio status`, `radio rx`, `listen` | Never |
+| `link` | step 1 | `radio setup` (writes settings) | Never |
+| `setup` | step 4 | `radio tune` | A 2-3 s tuner carrier |
+| `tune` | step 5 | `radio cw` | CW, at most 10 W |
+| `keying` | steps 6, 7 and 8 | `power_watts` above 10 | CW at the configured power |
+| `done` | steps 9 and 10 | `run` (the node, and the service) | Unattended |
+
+Raise it one stage at a time, only after the step that sets it has passed. Set it
+back to `none` and start again from step 1 if the radio's firmware, the cable or the
+computer changes.
+
+### What the software enforces by itself
+
+These hold whatever the stage or config, and are covered by unit tests:
+
+- **Serial control lines are dropped.** With USB SEND or USB Keying (CW) or (RTTY)
+  set to DTR or RTS, a raised line transmits or holds the key down (p. 12-11, lines
+  6895-6927). Linux and macOS raise both lines when a serial port is opened; the
+  driver lowers them straight after opening and will not use the port if it
+  cannot. The radio's Inhibit Timer at USB Connection only delays such a signal by
+  "a few seconds" (line 6945), so these items must also be OFF, and the preflight
+  checks that they are.
+- **Read-only preflight before any write.** `setup`, `tune`, `cw` and `run` first
+  read, and refuse unless: the radio answers `19 00` as an IC-7300 (94h); it is on
+  receive (`1C 00`); USB SEND, USB Keying (CW) and USB Keying (RTTY) are all OFF
+  (`1A 05 00 78`, `00 79`, `00 80`); SPLIT is off (`0F`); ∂TX is off (`21 02`). `run`
+  also requires the radio's Time-Out Timer (CI-V) to be set (`1A 05 00 29`).
+  `radio check` runs the same reads and prints them.
+- **Read-back after setup.** After setting the radio up, the node reads back the
+  frequency (`03`, and the transmit frequency `1C 03`), mode (must be CW, not CW-R),
+  break-in (must be semi), split, ∂TX, RF power (never above what was sent), key
+  speed and break-in delay, and stops if any differs. An OK only means the radio
+  accepted a command.
+- **Only two frames can transmit:** `17` (CW text, at most 30 characters, which the
+  radio's keyer sends and then stops) and `1C 01 02` (one tuner cycle). The driver
+  refuses to send `1C 00 01` (force transmit), refuses frequencies outside the
+  radio's 30 kHz-74.8 MHz, and treats any reply that is not exactly the documented
+  shape as an error, never as a guess.
+- **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
+  5917); the node then stays silent for that listening window. Any tuner error
+  forces receive. Every SWR sample while keying also reads `1C 00`: output on the
+  Po meter while the radio reads receive stops all transmitting until restart,
+  because none of the node's receive confirmations could then be trusted.
+- **Config limits.** Baud must be one of the radio's CI-V USB rates and the CI-V
+  address within 02h-DFh; frequency inside the transmit coverage table; power
+  1-100 W, and at most 10 W until stage `keying`.
+
 ## Stop immediately if
 
 Stop the test, force the radio to receive, and do not continue until you know why, if:
@@ -17,16 +78,20 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 - The radio is transmitting (TX indicator lit, power output on the meter) when
   nothing should be keying it, or keeps transmitting after an `hfnode` command has
   exited.
-- A command listed as not transmitting (`status`, `rx`, `setup`, `listen`, `run`
-  outside a window) makes the radio transmit.
+- A command listed as not transmitting (`check`, `status`, `rx`, `setup`, `listen`,
+  `run` outside a window) makes the radio transmit.
+- `radio check`, or the preflight in front of any command, prints a FAIL you did not
+  expect, or a value that differs from the radio's own screen.
 - SWR on the radio's own meter is above 2:1, or the SWR the node logs differs from
   the radio's meter by more than about 0.3.
 - Output power on the Po meter (or an external wattmeter) is higher than the
   configured `power_watts`.
 - After `setup`, the frequency, mode or power on the radio's display does not match
-  the config.
+  the config, or the node reports `the radio's settings do not read back as set`.
 - Any CI-V command fails with `radio rejected the command (NG)` or
   `unexpected reply`, in a step that is expected to pass.
+- The node reports `radio not confirmed on receive`, or `health.csv` gets a
+  `tx-status` line.
 - The tuner does not finish (the node reports `no reply from radio` after 15 s of
   tuning).
 - The USB serial port or audio device drops out, the Pi resets, or audio is
@@ -44,7 +109,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 2. `Ctrl-C` an `hfnode` command, then run `hfnode radio --config $C rx`. Ctrl-C does
    **not** send the stop command: the radio's keyer finishes the text it was already
    given (up to 30 characters) before returning to receive. At 6 wpm that can be
-   over a minute, so prefer option 1 if the radio misbehaves.
+   over a minute, so prefer option 1 if the radio misbehaves. A command holds the
+   serial port exclusively while it runs, so `rx` from a second terminal cannot
+   open it until the first command has exited.
 3. For the service: `sudo systemctl stop hfnode`. The unit then runs
    `hfnode radio ... rx` (see `deploy/hfnode.service`).
 
@@ -64,18 +131,31 @@ In `~/bench.toml` set:
   (see [raspberry-pi-setup.md](raspberry-pi-setup.md));
 - `station.frequency_hz` to a frequency inside your license privileges in the CW
   segment;
-- `station.power_watts = 10` (raised only in step 8);
+- `station.power_watts = 10` (raised only in step 9; the software refuses more
+  until stage `keying`);
+- `station.commissioned = "none"` (see [Bring-up stages](#bring-up-stages));
 - `state_dir` to a scratch directory, for example `"/home/pi/bench-state"`, and
   `auth.key_file` to a scratch key made with `hfnode keygen --out ~/bench.key`. Do
   not test with the node's real key and state, because test exchanges use up codes.
 
-**Radio settings.** Set and record the IC-7300 menu settings listed in
+**Radio settings.** Set the IC-7300 menu settings listed in
 [raspberry-pi-setup.md, section 6](raspberry-pi-setup.md#6-ic-7300-settings),
-including CI-V address 94h and CI-V USB baud 115200.
+including CI-V address 94h, CI-V USB baud 115200, USB SEND and both USB Keying items
+OFF, and Time-Out Timer (CI-V) 3 min. Photograph each screen. Also:
 
-**Hardware for transmit steps (4 onward).** A 50-ohm dummy load rated well above the
-test power, connected directly to the ANT connector. Nothing plugged into the KEY
-jack. If you have one, an external wattmeter/SWR meter between the radio and the
+- Record the firmware version (MENU > SET > Others > Information > Version, line
+  7876). The CI-V `1A 05` item numbers the driver uses are those of manual revision
+  12b; step 1 confirms they match this firmware.
+- On the main screen: SPLIT off, XIT (∂TX) off, RIT off, CW mode, and **RF POWER at
+  0%**, so that anything unexpected before step 4 happens at minimum power.
+
+**Hardware.** A 50-ohm dummy load rated well above the test power, connected
+directly to the ANT connector, for step 1 (the first time the USB cable goes in)
+and every step from 4 on. Steps 2 and 3 only receive and need the antenna. Nothing
+plugged into the KEY jack, nothing on the ACC socket, and no external amplifier,
+antenna switch or relay in the line (the manual warns that slower external
+equipment can reflect power back into the IC-7300: TX Delay item, p. 12-5, line
+6272). If you have one, an external wattmeter/SWR meter between the radio and the
 load. Keep a hand near the radio's POWER switch during every transmit step.
 
 **The radio's own meter.** During transmit steps, set the radio's meter to Po or
@@ -156,87 +236,135 @@ the radio's keyer timing, RF getting into USB or audio, the USB serial link or t
 sound card. Its CW is synthetic and its noise is white Gaussian: real band noise,
 QSB, QRM and real fists are only tested from step 2 on. Watchdog and forced-receive
 margins are exercised at the mock's speed only with `--scale 1`, and only against
-the manual's figures; step 9 measures them on the radio. The hardware PTT timer
+the manual's figures; step 7 measures them on the radio. The hardware PTT timer
 (step 10) cannot be tested in software at all.
 
 ## Step 0: check every CI-V command against ICOM's IC-7300 guide
 
 No radio needed. This is a desk check, and it must be finished before any step that
-writes to the radio (step 4 onward).
+writes to the radio (step 4 onward). It has been done once independently, with
+every finding and fix, in [civ-audit.md](civ-audit.md); this step is your own
+check of the same commands.
 
 Each command in `crates/civ/src/ic7300.rs` cites ICOM's *IC-7300 Full Manual*
 (English, revision `IC-7300_ENG_FM_12b`), Section 19 "CONTROL COMMAND", which is
 ICOM's CI-V reference for the IC-7300: data format p. 19-2, command table pp. 19-3 to
 19-8, data content descriptions pp. 19-9 to 19-15. A text copy is in the project
-files at `reference/IC-7300_ENG_FM_12b.txt`. (Earlier versions of the code took
-these values from the IC-7300**MK2** CI-V guide; they have since been re-cited from
-the IC-7300 manual, and this step confirms that independently.)
+files at `reference/IC-7300_ENG_FM_12b.txt`; the line numbers below are in that
+copy. (Earlier versions of the code took these values from the IC-7300**MK2** CI-V
+guide; they have since been re-cited from the IC-7300 manual, and this step confirms
+that independently.)
 
 Open the manual (preferably the PDF from ICOM, not only the text copy) and check
 each row. If you also have ICOM's separate IC-7300 CI-V Reference Guide, check it
 against that too. Tick a row only if the manual says exactly what the code does.
 
 Frames the node sends look like `FE FE 94 E0 <cmd> <sub> <data> FD` and the radio
-answers `FE FE E0 94 ... FD`. All examples use address 94h.
+answers `FE FE E0 94 ... FD`. All examples use address 94h. A read is the command
+sent with no data; the reply repeats the command and adds the data.
+
+**Commands that write or transmit:**
 
 | # | Item | What the code sends or expects | Check in the manual | OK |
 |---|---|---|---|---|
-| 0.1 | Frame format | Preamble `FE FE`, to-address, from-address, command, optional sub-command, data, end `FD` | p. 19-2, data format | ☐ |
-| 0.2 | Addresses | Radio `94`, controller `E0` | p. 19-2 (94h is the IC-7300 default; the MK2's is B6h); CI-V Address item, p. 12-10 | ☐ |
-| 0.3 | OK / NG replies | `FB` = OK, `FA` = NG. Every set command must be answered `FB` or it is treated as failed | p. 19-2 | ☐ |
-| 0.4 | Frequency data | 5 bytes BCD, lowest digits first. 7,030,000 Hz = `00 00 03 07 00` | p. 19-9, frequency data | ☐ |
-| 0.5 | `03` read frequency | Sends `03`; expects `03` + 5 frequency bytes | p. 19-3 | ☐ |
-| 0.6 | `05` set frequency | `05 00 00 03 07 00` for 7.030 MHz | p. 19-3, p. 19-9 | ☐ |
-| 0.7 | `06` set mode | `06 03 01`: mode `03` = CW, filter `01` = FIL1 | p. 19-3; mode and filter codes p. 19-9 (CW is 03, CW-R is 07) | ☐ |
-| 0.8 | Level data | 2 bytes BCD, high digits first: level 102 = `01 02` | the `00 00` to `02 55` ranges on the 14 and 15 rows, p. 19-3 | ☐ |
-| 0.9 | `14 0A` RF power | `14 0A` + level. The code maps watts linearly, `round(watts x 255 / 100)`: 10 W = `00 26`, 25 W = `00 64`, 40 W = `01 02`, 50 W = `01 28` | p. 19-3: "Send/read [RF PWR] position (00 00=max. CCW, 02 55=max. CW)". This is a knob position, not watts, so linearity is an assumption: step 8 measures it | ☐ |
-| 0.10 | `14 0C` key speed | `14 0C` + level, `00 00` = 6 wpm to `02 55` = 48 wpm, linear: 18 wpm = `00 73` | p. 19-3, 14 0C | ☐ |
-| 0.11 | `15 12` SWR meter | Reads `15 12`; reply `15 12` + 2 BCD bytes. Converted with 0000 = 1.0, 0048 = 1.5, 0080 = 2.0, 0120 = 3.0, linear between points, extrapolated above 0120 (`swr_from_meter`) | p. 19-3, 15 12: the same four points | ☐ |
-| 0.12 | `16 47` break-in | `16 47 01` = semi break-in ON. The node never sends `02` (full break-in) | p. 19-3, 16 47 | ☐ |
-| 0.13 | `17` send CW | `17` + up to 30 characters; expects `FB` | p. 19-4 and p. 19-13: "Up to 30 characters"; allowed characters 0-9, A-Z, a-z, / ? . - , : ' ( ) = + " @ and space, which is exactly what `cw::is_sendable` allows (`crates/cw/src/morse.rs`). Footnote *2 (p. 19-8): sent as CW only in CW mode with TRANSMIT, an external TX switch, or break-in ON | ☐ |
-| 0.14 | `17 FF` stop CW | `17 FF` | p. 19-13: "FF" stops sending CW messages | ☐ |
-| 0.15 | `1C 00` TX state, read | Reads `1C 00`; `00` = receive, anything else = transmit | p. 19-7 | ☐ |
-| 0.16 | `1C 00` TX state, set | Only ever sends `1C 00 00` (receive). The node never sends `1C 00 01` | p. 19-7; and `grep -n set_transmit crates/` shows only `false` outside tests and the `Rig` trait | ☐ |
-| 0.17 | `1C 01` tuner, start | `1C 01 02` = tune | p. 19-7: 00 = tuner OFF, 01 = ON, 02 = "Send/read to tuning" | ☐ |
-| 0.18 | `1C 01` tuner, read | Treats a reply of `02` as still tuning, anything else as finished; gives up after 15 s and forces receive | p. 19-7. The manual does not say how long `02` is reported; step 5 confirms it on the radio | ☐ |
-| 0.19 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
-| 0.20 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10; commands 00 and 01, p. 19-3 | ☐ |
-| 0.21 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` test match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
+| 0.1 | Frame format | Preamble `FE FE`, to-address, from-address, command, optional sub-command, data, end `FD` | p. 19-2, data format (line 8551) | ☐ |
+| 0.2 | Addresses | Radio `94`, controller `E0`. The config accepts CI-V addresses 02h to DFh only | p. 19-2 (94h is the IC-7300 default; the MK2's is B6h); CI-V Address item, p. 12-10: "Range: 02h ~ 94h ~ DFh" (line 6825) | ☐ |
+| 0.3 | OK / NG replies | `FB` = OK, `FA` = NG. Every set command must be answered `FB` or it is treated as failed | p. 19-2 (lines 8551-8552) | ☐ |
+| 0.4 | Frequency data | 5 bytes BCD, lowest digits first: 7,030,000 Hz = `00 00 03 07 00`. In a reply the last byte (1000 MHz and 100 MHz digits) must be `00`. Frequencies outside 30 kHz to 74.8 MHz are refused before anything is sent | p. 19-9, frequency data; receiver coverage p. 16-2 (line 8014) | ☐ |
+| 0.5 | `03` read frequency | Sends `03`; expects `03` + exactly 5 frequency bytes | p. 19-3 (line 8579) | ☐ |
+| 0.6 | `05` set frequency | `05 00 00 03 07 00` for 7.030 MHz | p. 19-3 (line 8581), p. 19-9 | ☐ |
+| 0.7 | `06` set mode | `06 03 01`: mode `03` = CW, filter `01` = FIL1 | p. 19-3 (line 8582); mode and filter codes p. 19-9 (CW is 03, CW-R is 07) | ☐ |
+| 0.8 | Level data | 2 bytes BCD, high digits first: level 102 = `01 02`. A reply must be exactly 2 bytes, at most `02 55` | the `00 00` to `02 55` ranges on the 14 and 15 rows, p. 19-3 | ☐ |
+| 0.9 | `14 0A` RF power | `14 0A` + level. The code maps watts linearly, `round(watts x 255 / 100)`: 10 W = `00 26`, 25 W = `00 64`, 40 W = `01 02`, 50 W = `01 28`. The read-back must not be above what was sent | p. 19-3: "Send/read [RF PWR] position (00 00=max. CCW, 02 55=max. CW)" (line 8677). This is a knob position, not watts, so linearity is an assumption: step 9 measures it | ☐ |
+| 0.10 | `14 0C` key speed | `14 0C` + level, `00 00` = 6 wpm to `02 55` = 48 wpm, linear: 18 wpm = `00 73` | p. 19-3, 14 0C (line 8685) | ☐ |
+| 0.11 | `14 0F` break-in delay | `14 0F` + level, `00 00` = 2.0 dots to `02 55` = 13.0 dots, linear: 10.0 dots = `01 85` | p. 19-3, 14 0F (line 8698). Only the end points are given: step 4 compares the display | ☐ |
+| 0.12 | `16 47` break-in | `16 47 01` = semi break-in ON; must read back `01`. The node never sends `02` (full break-in) | p. 19-3, 16 47 (line 8767) | ☐ |
+| 0.13 | `17` send CW | `17` + up to 30 characters; expects `FB` | p. 19-4 (line 8790) and p. 19-13: "Up to 30 characters" (line 9711); allowed characters 0-9, A-Z, a-z, / ? . - , : ' ( ) = + " @ and space, which is exactly what `cw::is_sendable` allows (`crates/cw/src/morse.rs`). Footnote *2 (p. 19-8): sent as CW only in CW mode with TRANSMIT, an external TX switch, or break-in ON | ☐ |
+| 0.14 | `17 FF` stop CW | `17 FF` | p. 19-13: "FF" stops sending CW messages (line 9733) | ☐ |
+| 0.15 | `1C 00` TX state, read | Reads `1C 00`; `00` = receive, `01` = transmit, anything else is an error | p. 19-7 (lines 9319-9323) | ☐ |
+| 0.16 | `1C 00` TX state, set | Only ever sends `1C 00 00` (receive). The driver refuses `1C 00 01` without sending anything (`set_transmit(true)` returns an error; test `never_forces_transmit_on`) | p. 19-7 | ☐ |
+| 0.17 | `1C 01` tuner, start | `1C 01 02` = tune | p. 19-7: 00 = tuner OFF, 01 = ON, 02 = "Send/read to tuning" (line 9327) | ☐ |
+| 0.18 | `1C 01` tuner, read | `02` = still tuning; `01` = tuner ON (matched); `00` = tuner OFF, which after a tune means it could not match and bypassed itself, so the window is locked out. Anything else is an error. Gives up after 15 s; any tuner error forces receive | p. 19-7 (line 9327); p. 11-2: "If the tuner cannot tune, "TUNE" disappears and the tuning circuit is automatically bypassed" (line 5917). The manual does not say how long `02` is reported; step 5 confirms it on the radio | ☐ |
+
+**Reads only:**
+
+| # | Item | What the code sends or expects | Check in the manual | OK |
+|---|---|---|---|---|
+| 0.19 | `15 12` SWR meter | Reads `15 12`; reply `15 12` + 2 BCD bytes. Converted with 0000 = 1.0, 0048 = 1.5, 0080 = 2.0, 0120 = 3.0, linear between points, extrapolated above 0120 (`swr_from_meter`) | p. 19-3, 15 12: the same four points (line 8736) | ☐ |
+| 0.20 | `15 11` Po meter | Reads `15 11` + 2 BCD bytes; 0000 = 0%, 0143 = 50%, 0213 = 100%, linear between (`po_from_meter`). SWR readings count only while it shows output | p. 19-3, 15 11 (line 8732) | ☐ |
+| 0.21 | `19 00` transceiver ID | Must answer `94` before anything is written | p. 19-4 (line 8793) | ☐ |
+| 0.22 | `04` read mode | Mode then filter, coded as for `06`; must read `03` (CW) after setup | p. 19-3 (line 8580) | ☐ |
+| 0.23 | `0F` split | `00` = OFF, required | p. 19-3 (line 8624) | ☐ |
+| 0.24 | `21 02` ∂TX | `00` = OFF, required | p. 19-7 (line 9348) | ☐ |
+| 0.25 | `1C 03` transmit frequency | 5 frequency bytes as in 0.4; must equal the set frequency | p. 19-7 (line 9332) | ☐ |
+| 0.26 | `1A 05 00 78`, `00 79`, `00 80` | USB SEND, USB Keying (CW), USB Keying (RTTY): `00` = OFF (required), `01` = DTR, `02` = RTS | p. 19-5 (lines 8986, 8991, 8995) | ☐ |
+| 0.27 | `1A 05 00 29` | Time-Out Timer (CI-V): `00` = OFF, `01` = 3 min to `05` = 30 min. `run` refuses OFF | p. 19-4 (line 8861) | ☐ |
+| 0.28 | `1A 05 01 97` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON | p. 19-7 (line 9269) | ☐ |
+| 0.29 | `1A 05 00 71`, `00 75`, `00 84`, `01 61` | Reported only: CI-V Transceive, USB Echo Back (raw value), meter peak hold (warning if ON), keyer dot/dash ratio (warning unless `30`, 1:1:3) | pp. 19-5 and 19-6 (lines 8966, 8978, 9006, 9185) | ☐ |
+| 0.30 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
+| 0.31 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
+| 0.32 | Serial link | DTR and RTS low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
+| 0.33 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` test match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
 that has not been ticked.
 
-Also check `15 11`, the Po meter, which the node reads to count SWR readings only
-while there is output (`po_from_meter`): reply `15 11` + 2 BCD bytes, converted with
-"00 00=0%, 01 43=50%, 02 13=100%" (p. 19-3), linear between those points.
+The `1A 05` item numbers (0.26 to 0.29) are the ones most likely to differ between
+firmware versions; step 1 checks two of them against the radio's screen.
 
-Related manual items that are useful during testing but are not used by the node:
-`14 09` reads the CW pitch ("01 28=600 Hz", p. 19-3), and `1A 05 00 75` sets CI-V
-USB Echo Back ("00=ON, 01=OFF", p. 19-5; OFF by default, p. 12-11).
+A related manual item that is useful during testing but not used by the node:
+`14 09` reads the CW pitch ("01 28=600 Hz", p. 19-3).
 
-## Step 1: serial link, read only
+## Step 1: serial link, read only (sets stage `link`)
 
-Radio on, connected to its normal antenna or a dummy load, KEY jack empty.
+Radio on, **dummy load on ANT**, KEY jack empty, RF POWER at 0%, and
+`commissioned = "none"`. Connect the USB cable, then:
 
 ```sh
+hfnode radio --config $C check
 hfnode radio --config $C status
 ```
 
-**Look for:** `frequency N Hz` matching the radio's display, and
-`transmitting: false`. Change the frequency on the radio's dial and run it again.
+`check` only reads: `19 00`, `1C 00`, `1A 05 00 78`, `00 79`, `00 80`, `0F`, `21 02`,
+`1A 05 00 29`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `03`, `1C 03`, `04`,
+`14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent with no data,
+which reads the item. To see every frame on the wire, with the time each reply
+took, put `RUST_LOG=civ=trace` in front of the command.
 
-**Pass:** both lines printed, frequency matches the display to the hertz, radio
-did not transmit.
+**Look for:** one line per item, each PASS, WARN or info, then `preflight passed;
+nothing was written to the radio`. `status` prints `frequency N Hz` and
+`transmitting: false`.
+
+**Pass:**
+
+1. No FAIL line, and `preflight passed` printed. A WARN is acceptable only if you
+   understand it (for example the Time-Out Timer, which only `run` requires).
+2. Every value matches the radio's own screen: frequency to the hertz, mode, RF
+   power about 0%, break-in, tuner, Time-Out Timer, the USB items.
+3. **The item numbers match this firmware.** On the front panel change Time-Out
+   Timer (CI-V) from 3 to 5 min and CI-V USB Echo Back from OFF to ON; run `check`
+   again and see both values change; put both back. Turn the VFO dial and see the
+   frequency follow in `status`. If a value does not follow, the radio's firmware
+   numbers the `1A 05` items differently from the manual: stop and report it.
+4. Write down the raw Echo Back value read with Echo Back OFF. The command table
+   says `00=ON, 01=OFF` (line 8978) but the menu's default is OFF (line 6879); the
+   driver works either way, and this settles which way round the table is.
+5. The radio did not transmit at any point.
 
 **Fail:**
 
 - `opening radio on /dev/...`: wrong `serial_port`, or your user is not in `dialout`.
 - `no reply from radio`: baud rate or CI-V address mismatch between the radio menu and
   the config, or CI-V USB Port linked to REMOTE at a different speed.
-- `radio rejected the command (NG)` or `unexpected reply`: stop; recheck step 0.4/0.5.
+- `transceiver ID` FAIL: the radio on the port is not an IC-7300 at 94h.
+- Any other FAIL line: change that item on the radio's front panel
+  (raspberry-pi-setup.md, section 6) and run `check` again.
+- `radio rejected the command (NG)` or `unexpected reply`: stop; recheck step 0.
 
-Optional: run it once with CI-V USB Echo Back ON and once with it OFF. Both should work.
+**Then** set `commissioned = "link"`. Steps 2 and 3 only use the radio's audio, so
+they can be done now with the antenna connected; put the dummy load back before
+step 4.
 
 ## Step 2: live audio and decoding, receive only
 
@@ -291,7 +419,7 @@ data for decoder changes.
 **Fail:** the recording decodes much worse than live, or not at all: check the
 sample format and the device.
 
-## Step 4: put the radio in the node's state (no transmit)
+## Step 4: put the radio in the node's state (no transmit, sets stage `setup`)
 
 From here on: **dummy load on ANT**, KEY jack empty, step 0 complete.
 
@@ -299,39 +427,53 @@ From here on: **dummy load on ANT**, KEY jack empty, step 0 complete.
 hfnode radio --config $C setup
 ```
 
-This sends, in order: force receive (`1C 00 00`), frequency (`05`), CW mode FIL1
-(`06 03 01`), RF power (`14 0A`), key speed (`14 0C`), semi break-in (`16 47 01`).
+This first runs the read-only checks of step 1 and stops if any fails. It then
+sends, in order: force receive (`1C 00 00`), frequency (`05`), CW mode FIL1
+(`06 03 01`), RF power (`14 0A 00 26` for 10 W), key speed (`14 0C`), break-in delay
+(`14 0F 01 85` for 10.0 dots), semi break-in (`16 47 01`), and reads every one of
+them back.
 
-**Look for:** `configured: <freq> Hz, CW, 10 W, 18 wpm`. On the radio: the
-frequency, CW mode, FIL1, BK-IN shown on the display, RF power about 10%, keyer
-speed 18 wpm.
+**Look for:** `configured and read back: <freq> Hz, CW, 10 W, 18 wpm`. On the radio:
+the frequency, CW mode, FIL1, BK-IN shown on the display, RF power about 10%, keyer
+speed 18 wpm, break-in delay 10.0d.
 
 **Pass:** the command succeeds, the display matches, the radio did not transmit.
+Write down the key speed and break-in delay the radio displays: the manual gives
+only the end points of those two scales, so these readings confirm the linear
+mapping the driver uses. **Then** set `commissioned = "setup"`.
 
-**Fail:** any error, or any setting on the display differs from the config. A
-setting that is accepted (`FB`) but shows the wrong value means a byte value is
-wrong: go back to step 0.
+**Fail:** any error, or any setting on the display differs from the config.
+`the radio's settings do not read back as set (...)` names a setting the radio
+accepted (`FB`) but holds at a different value: a byte value is wrong, so go back to
+step 0.
 
-## Step 5: tuner into the dummy load (transmits briefly)
+## Step 5: tuner into the dummy load (transmits briefly, sets stage `tune`)
+
+A tuner cycle is 2 to 3 seconds of carrier (p. 11-2, line 5911). Watch the Po meter.
 
 ```sh
 hfnode radio --config $C tune
 hfnode radio --config $C status
 ```
 
-**Look for:** the radio transmits briefly and shows the tuner working, then
-`tuned`. A line `health: tune NNNms` in the log, and a `<time>,tune,NNNms` line in
-`<state_dir>/health.csv`. `status` reports `transmitting: false`.
+**Look for:** the checks and setup of step 4, then the radio transmits briefly and
+shows the tuner working, then `tuned`. A line `health: tune NNNms` in the log, and
+a `<time>,tune,NNNms` line in `<state_dir>/health.csv`. `status` reports
+`transmitting: false`. Note the Po reading while it tunes (whether the tuner uses
+the set power or its own) and how long TUNE blinks.
 
-**Pass:** the tune finishes in a few seconds, the radio is back on receive, and
-`health.csv` has the tune line.
+**Pass:** the tune finishes in a few seconds, Po stays at or below about 10%, the
+radio is back on receive, and `health.csv` has the tune line. **Then** set
+`commissioned = "tune"`.
 
 **Fail:** `no reply from radio` after about 15 s (the node then forces receive; check
-step 0.18), the radio stays on transmit, or the tuner cannot match a dummy load.
+step 0.18), `tuner could not match the load` (a 50-ohm dummy load should always
+match: check the load and its cable), or the radio stays on transmit.
 
 ## Step 6: short CW and the SWR reading (transmits)
 
-Set the radio's meter to SWR. Monitor with the radio's sidetone or a nearby receiver.
+Steps 6, 7 and 8 together make up stage `keying`, all at 10 W into loads. Set the
+radio's meter to SWR. Monitor with the radio's sidetone or a nearby receiver.
 
 ```sh
 hfnode radio --config $C cw "VVV DE N0CALL"
@@ -340,6 +482,9 @@ hfnode radio --config $C status
 
 The node reads SWR (`15 12`) repeatedly during the first second of the first piece
 it keys, counting only readings taken while the Po meter (`15 11`) shows output.
+Each reading also reads the transmit status (`1C 00`), which must say transmit
+while there is output. The manual does not say whether text keyed with `17` shows
+as transmit there; this step is where that is first seen.
 
 **Look for:** the CW sent correctly at 18 wpm, `health: swr 1.0x` in the log, a
 `<time>,swr,1.0x` line in `health.csv`, `sent; see health.csv for the SWR reading`,
@@ -349,63 +494,19 @@ then `transmitting: false`.
 radio's own SWR meter; the radio returns to receive when the text ends.
 
 **Fail:** wrong characters sent, SWR reading far from the radio's meter (check step
-0.11), or the radio does not return to receive.
+0.19), or the radio does not return to receive. If the node stops with
+`radio not confirmed on receive: transmit inhibited until restart` and
+`health.csv` has a `tx-status` line, the radio reported receive while its Po meter
+showed output: stop and report it, because the node's checks that the radio is
+back on receive depend on that status.
 
-## Step 7: high-SWR lockout (transmits briefly into a mismatch)
-
-This needs a deliberately mismatched but safe load: a non-inductive 100-ohm load
-(about 2:1) or 150-ohm load (about 3:1) rated for the test power. **Never** test with
-an open or shorted connector. If you do not have such a load, skip this step for now
-but complete it before unattended operation.
-
-Switch the internal tuner **off** on the front panel (otherwise it may match the
-load). Keep power at 10 W.
-
-```sh
-hfnode radio --config $C cw "VVV"
-hfnode radio --config $C status
-```
-
-**Look for:** an error containing `SWR x.x above limit` (or `no output while
-keying`, if the radio cut its own power into the load), a `swr` line in
-`health.csv`, and `transmitting: false`.
-
-**Pass:** with the 150-ohm load the node stops with the SWR error after well under a
-second of transmission and the radio is on receive. With the 100-ohm load, the
-reading is close to 2.0; whether it trips depends on which side of `swr_limit = 2.0`
-it lands, so compare it with the radio's meter.
-
-**Fail:** the node keeps keying, or its reading is far from the radio's meter.
-
-Switch the tuner back on and reconnect the 50-ohm dummy load.
-
-## Step 8: power calibration (transmits)
-
-The code assumes the `14 0A` scale is linear from 0 to 100 W. Check it at each power
-you might use. For each of 10, 25, 40 and 50 W: set `station.power_watts` in
-`~/bench.toml`, then
-
-```sh
-hfnode radio --config $C setup
-hfnode radio --config $C cw "TEST TEST TEST"
-```
-
-and read the Po meter (and the external wattmeter) while it keys. Let the radio rest
-a minute between runs.
-
-**Pass:** measured power within about 10% (or 2 W) of the configured value at each
-setting, and never above it.
-
-**Fail:** any reading above the configured power, or consistently off: the
-`power_level` mapping in `crates/civ/src/ic7300.rs` needs correcting before going
-above 10 W.
-
-Set `power_watts` back to 10 for the following steps.
-
-## Step 9: software watchdog (transmits)
+## Step 7: software watchdog (transmits)
 
 This checks that the node forces the radio back to receive when one keying run lasts
-too long, and that `17 FF` and `1C 00 00` actually work.
+too long, and that `17 FF` and `1C 00 00` actually work. It comes before the
+high-SWR test because every stop the node makes relies on those two commands, and
+the manual does not say that either one ends a message the keyer is already
+sending.
 
 In `~/bench.toml` set `key_speed_wpm = 6` and `max_key_seconds = 5`. The text below is
 ten zeros, which the keyer takes about 44 seconds to send at 6 wpm.
@@ -429,6 +530,58 @@ Do not continue.
 
 Restore `key_speed_wpm = 18` and `max_key_seconds = 45`.
 
+## Step 8: high-SWR lockout (transmits briefly into a mismatch)
+
+This needs a deliberately mismatched but safe load: a non-inductive 100-ohm load
+(about 2:1) or 150-ohm load (about 3:1) rated for the test power. **Never** test with
+an open or shorted connector. If you do not have such a load, get one before going
+on: stage `keying`, and every step after it, needs this one to have passed.
+
+Switch the internal tuner **off** on the front panel (otherwise it may match the
+load). Keep power at 10 W.
+
+```sh
+hfnode radio --config $C cw "VVV"
+hfnode radio --config $C status
+```
+
+**Look for:** an error containing `SWR x.x above limit` (or `no output while
+keying`, if the radio cut its own power into the load), a `swr` line in
+`health.csv`, and `transmitting: false`.
+
+**Pass:** with the 150-ohm load the node stops with the SWR error after well under a
+second of transmission and the radio is on receive. With the 100-ohm load, the
+reading is close to 2.0; whether it trips depends on which side of `swr_limit = 2.0`
+it lands, so compare it with the radio's meter.
+
+**Fail:** the node keeps keying, or its reading is far from the radio's meter.
+
+Switch the tuner back on and reconnect the 50-ohm dummy load. **Then**, with steps
+6, 7 and 8 passed, set `commissioned = "keying"`.
+
+## Step 9: power calibration (transmits)
+
+The code assumes the `14 0A` scale is linear from 0 to 100 W. Check it at each power
+you might use. Power above 10 W is refused until stage `keying`. For each of 10, 25,
+40 and 50 W: set `station.power_watts` in `~/bench.toml`, then
+
+```sh
+hfnode radio --config $C setup
+hfnode radio --config $C cw "TEST TEST TEST"
+```
+
+and read the Po meter (and the external wattmeter) while it keys. Let the radio rest
+a minute between runs.
+
+**Pass:** measured power within about 10% (or 2 W) of the configured value at each
+setting, and never above it.
+
+**Fail:** any reading above the configured power, or consistently off: the
+`power_level` mapping in `crates/civ/src/ic7300.rs` needs correcting before going
+above 10 W.
+
+Set `power_watts` back to 10 for the following steps.
+
 ## Step 10: hardware PTT timer
 
 The design calls for a hardware timer that ends any transmission after about 60 s
@@ -447,9 +600,14 @@ interrupts (for example the radio's DC supply) is your design decision; write do
 what it senses and what it interrupts.
 
 As an additional backstop inside the radio, set **Time-Out Timer (CI-V)** (MENU >
-SET > Function, p. 12-5) to its shortest setting, 3 minutes. The manual says it
-applies to transmitting "initiated by a CI-V command or pushing TRANSMIT". It is too
-long to replace the hardware timer, and this plan does not test it.
+SET > Function, p. 12-5) to its shortest setting, 3 minutes; `run` refuses to start
+while it is OFF. The manual says it applies to transmitting "initiated by a CI-V
+command or pushing TRANSMIT" (line 6283). It is too long to replace the hardware
+timer. Check that it works: in CW mode with nothing on the KEY jack, push TRANSMIT
+(with the key up the radio sends no carrier; the Po meter should stay at zero) and
+confirm the radio returns to receive by itself after 3 minutes. Whether it also
+covers text keyed with `17` cannot be tested without a three-minute keyer message,
+which the node never sends, so the hardware timer remains the backstop.
 
 Set the timer to a test value, for example 30 s. In `~/bench.toml` set
 `key_speed_wpm = 6` and `max_key_seconds = 120` (the maximum allowed), so the
@@ -473,6 +631,9 @@ Then set the timer to its operating value (about 60 s) and restore
 hardware timer. The node keys at most 30 characters per keyer command, which takes
 about 20 s at 18 wpm, so 45 s leaves margin.
 
+**Then**, with steps 9 and 10 passed, set `commissioned = "done"`. This allows
+`hfnode run`, and with it the service.
+
 ## Step 11: full exchange into dummy loads (optional, recommended)
 
 A complete transaction with no signal on the air: the field rig transmits into its
@@ -486,7 +647,9 @@ with your own email address, and the `[email]` settings. Print a few codes:
 hfnode codes --config $C --count 10
 ```
 
-Run the node in the foreground, with the secrets loaded:
+This is the first `run` (it needs stage `done`, and runs the preflight first,
+including the Time-Out Timer check). Run the node in the foreground, with the
+secrets loaded:
 
 ```sh
 set -a; . /etc/hfnode/env; set +a     # or export HFNODE_EMAIL_PASSWORD=... by hand
@@ -568,16 +731,16 @@ weeks: a slow rise in SWR readings means a connector or the antenna needs attent
 |---|---|---|---|
 | -1 Self-test (mock radio) | | | version: / scale: / passed: |
 | 0 CI-V desk check | | | |
-| 1 Status | | | |
+| 1 Check and status (`link`) | | | firmware: / echo back raw with OFF: / TOT and echo followed: |
 | 2 Listen | | | |
 | 3 WAV decode | | | |
-| 4 Setup | | | |
-| 5 Tune | | | tune ms: |
+| 4 Setup (`setup`) | | | key speed shown: / BKIN delay shown: |
+| 5 Tune (`tune`) | | | tune ms: / Po while tuning: |
 | 6 Short CW, SWR | | | node SWR: / radio SWR: |
-| 7 SWR lockout | | | load: / node SWR: |
-| 8 Power | | | 10 W: / 25 W: / 40 W: / 50 W: |
-| 9 Watchdog | | | stopped after: s |
-| 10 Hardware timer | | | set: s / stopped after: s |
+| 7 Watchdog | | | stopped after: s |
+| 8 SWR lockout (`keying`) | | | load: / node SWR: |
+| 9 Power | | | 10 W: / 25 W: / 40 W: / 50 W: |
+| 10 Hardware timer (`done`) | | | set: s / stopped after: s / TOT returned after: |
 | 11 Dummy-load exchange | | | |
 | 12 On air | | | SWR: / report: |
 | 13 End to end | | | |

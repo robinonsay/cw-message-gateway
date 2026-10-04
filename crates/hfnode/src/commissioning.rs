@@ -1,10 +1,10 @@
 //! Bring-up stages for a real radio, and what each one allows.
 //!
-//! `station.commissioned` in the config names the last stage of
-//! `docs/first-contact.md` that has passed on this radio. Commands that need a later
-//! stage are refused, so a stage cannot be skipped by running the wrong command or
-//! by starting the service early, and the power stays at bench level until keying
-//! has been proven at that level.
+//! `station.commissioned` in the config names the last bring-up stage of
+//! `docs/hardware-test-plan.md` that has passed on this radio. Commands that need a
+//! later stage are refused, so a stage cannot be skipped by running the wrong
+//! command or by starting the service early, and the power stays at bench level
+//! until keying has been proven at that level.
 //!
 //! Every command that writes to the radio also runs the read-only preflight first
 //! ([`civ::preflight`]), whatever the stage.
@@ -87,7 +87,7 @@ pub fn check(stage: Stage, action: Action, power_watts: u32) -> Result<()> {
     if stage < needs {
         bail!(
             "`{}` needs bring-up stage `{needs}` to have passed, but station.commissioned \
-             is `{stage}` (docs/first-contact.md)",
+             is `{stage}` (docs/hardware-test-plan.md, \"Bring-up stages\")",
             action.name()
         );
     }
@@ -95,7 +95,7 @@ pub fn check(stage: Stage, action: Action, power_watts: u32) -> Result<()> {
         bail!(
             "station.power_watts is {power_watts}: above {BENCH_MAX_WATTS} W needs bring-up \
              stage `keying` to have passed, but station.commissioned is `{stage}` \
-             (docs/first-contact.md)"
+             (docs/hardware-test-plan.md, \"Bring-up stages\")"
         );
     }
     Ok(())

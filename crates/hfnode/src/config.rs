@@ -41,8 +41,8 @@ pub struct Station {
     /// The radio's CI-V address.
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
-    /// The last bring-up stage passed on this radio (docs/first-contact.md). Commands
-    /// that need a later stage are refused.
+    /// The last bring-up stage passed on this radio (docs/hardware-test-plan.md,
+    /// "Bring-up stages"). Commands that need a later stage are refused.
     #[serde(default)]
     pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.

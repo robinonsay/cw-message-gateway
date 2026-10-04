@@ -11,8 +11,8 @@ frequency_hz = 7_030_000          # the agreed listening frequency
 serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port
 baud = 115200                     # must match the radio's CI-V USB baud rate setting
 civ_address = 0x94                # IC-7300 default CI-V address
-# Last bring-up stage passed on this radio (docs/first-contact.md): none, link, setup,
-# tune, keying or done. Commands that need a later stage are refused, and power stays
+# Last bring-up stage passed on this radio (docs/hardware-test-plan.md, "Bring-up
+# stages"): none, link, setup, tune, keying or done. Commands that need a later stage are refused, and power stays
 # at 10 W or less until "keying". `hfnode run` needs "done".
 commissioned = "none"
 power_watts = 40                  # 30-50 W per the design

@@ -17,7 +17,7 @@
 //! The 1A 05 item numbers are those of the manual revision the driver cites
 //! (`IC-7300_ENG_FM_12b`). Firmware that numbers them differently would read other
 //! items, so the first time on a radio every value here is compared with the radio's
-//! own menu screens (docs/first-contact.md, stage 1).
+//! own menu screens (docs/hardware-test-plan.md, step 1).
 
 use crate::ic7300::{
     break_in_delay_level, key_speed_level, key_speed_wpm, power_level, Ic7300, Port, UsbLine,
