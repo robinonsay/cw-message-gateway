@@ -3,6 +3,7 @@
 
 use auth::CodeBook;
 use civ::sim::SimRig;
+use civ::Rig;
 use cw::{Keyer, Noise};
 use hfnode::audio::{self, Block};
 use hfnode::config::Config;
@@ -85,17 +86,35 @@ fn field_message_over_the_air_is_sent() {
         Noise::sigma_for_snr(k.amplitude, 3.0, sr, 2500.0),
     );
 
-    // Feed 50 ms blocks 100x faster than real time, matching the simulated radio's
-    // time scale, so audio heard while "transmitting" is discarded as it would be.
-    // Never full: every block is delivered, as in real time.
+    let mut rig = SimRig::new();
+    rig.time_scale = 100.0;
+    let mut sc = StationConfig::from_config(&cfg.station);
+    sc.poll = Duration::from_millis(2);
+    sc.swr_delay = Duration::from_millis(2);
+    let mut station = Station::new(rig, sc, None);
+    station.configure().unwrap();
+
+    // Feed 50 ms blocks as fast as the node takes them. Never full: every block
+    // is delivered, as in real time.
     let (tx, rx) = audio::queue(usize::MAX);
     let blocks: Vec<Vec<f32>> = audio
         .chunks(sr as usize / 20)
         .map(<[f32]>::to_vec)
         .collect();
+    let radio = station.rig();
     std::thread::spawn(move || {
         for b in blocks {
-            std::thread::sleep(Duration::from_micros(500));
+            // Paced by the node, not the wall clock: the next block goes out only
+            // once the node has taken the last, and the operator's audio stands
+            // still while the radio tunes or transmits, as the silence after a
+            // read-back would on the air. A busy test machine then changes how
+            // long the test takes, not which audio the node hears.
+            while tx.queued() > 0 || {
+                let mut r = radio.lock().unwrap();
+                r.is_transmitting().unwrap_or(true) || r.tuner_busy().unwrap_or(true)
+            } {
+                std::thread::sleep(Duration::from_micros(200));
+            }
             let block = Block {
                 at: Instant::now(),
                 samples: b,
@@ -106,13 +125,6 @@ fn field_message_over_the_air_is_sent() {
         }
     });
 
-    let mut rig = SimRig::new();
-    rig.time_scale = 100.0;
-    let mut sc = StationConfig::from_config(&cfg.station);
-    sc.poll = Duration::from_millis(2);
-    sc.swr_delay = Duration::from_millis(2);
-    let mut station = Station::new(rig, sc, None);
-    station.configure().unwrap();
     let mut session = node::build_session(&cfg).unwrap();
     let mut svc = Fake::default();
 

@@ -23,7 +23,8 @@ pub struct SimRig {
     /// Every piece of text keyed, in order.
     pub sent: Vec<String>,
     pub tunes: u32,
-    /// When set, the transmitter never drops back to receive by itself.
+    /// When set, the key sticks down once keying starts: the carrier stays on and
+    /// the transmitter never drops back to receive by itself, until stopped.
     pub stuck_key: bool,
     /// Time from a CW message being accepted to the transmitter switching on and the
     /// keyer starting (simulated time).
@@ -32,6 +33,10 @@ pub struct SimRig {
     pub stop_cw_fails: bool,
     /// Fault: the radio stays on transmit whatever it is told.
     pub tx_jammed: bool,
+    /// Fault: the tuner cannot match the load and bypasses itself.
+    pub tuner_bypassed: bool,
+    /// Someone at the radio switched split on, transmitting on this frequency.
+    pub split_tx_hz: Option<u64>,
     /// Simulated speed-up: keying takes `real time / time_scale`.
     pub time_scale: f32,
     keying: Option<Keying>,
@@ -73,6 +78,8 @@ impl Default for SimRig {
             tx_on_delay: Duration::from_millis(20),
             stop_cw_fails: false,
             tx_jammed: false,
+            tuner_bypassed: false,
+            split_tx_hz: None,
             time_scale: 1.0,
             keying: None,
             forced_tx: false,
@@ -127,6 +134,11 @@ impl SimRig {
             key_down: false,
             tx: last_mark_end.is_some_and(|e| t - e < k.hang),
         }
+    }
+
+    fn key_down(&self, now: Instant) -> bool {
+        let stuck = self.stuck_key && self.keying.as_ref().is_some_and(|k| now >= k.start);
+        stuck || self.phase(now).key_down
     }
 
     /// Whether the keyer still has text to send.
@@ -184,8 +196,20 @@ impl Rig for SimRig {
         Ok(self.tune_until.is_some_and(|t| Instant::now() < t))
     }
 
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(!self.tuner_bypassed)
+    }
+
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        Ok(self.split_tx_hz.unwrap_or(self.frequency_hz))
+    }
+
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(self.split_tx_hz.is_some())
+    }
+
     fn read_swr(&mut self) -> Result<f32> {
-        Ok(if self.phase(Instant::now()).key_down {
+        Ok(if self.key_down(Instant::now()) {
             self.swr
         } else {
             1.0
@@ -193,7 +217,7 @@ impl Rig for SimRig {
     }
 
     fn read_po(&mut self) -> Result<f32> {
-        Ok(if self.phase(Instant::now()).key_down {
+        Ok(if self.key_down(Instant::now()) {
             self.power_watts as f32
         } else {
             0.0

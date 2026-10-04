@@ -31,19 +31,28 @@ pub fn load_codebook(cfg: &Config) -> Result<CodeBook> {
     })
 }
 
+pub fn session_config(cfg: &Config) -> SessionConfig {
+    SessionConfig {
+        node_call: cfg.station.node_call.to_ascii_uppercase(),
+        pending_timeout: Duration::from_secs(cfg.pending_timeout_secs),
+        chunk_chars: cfg.station.chunk_chars,
+        max_rx_messages: 5,
+        again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
+    }
+}
+
 pub fn build_session(cfg: &Config) -> Result<Session> {
+    build_session_with(cfg, session_config(cfg))
+}
+
+/// [`build_session`] with the session's settings given, e.g. time-scaled for tests.
+pub fn build_session_with(cfg: &Config, sc: SessionConfig) -> Result<Session> {
     let book = load_codebook(cfg)?;
     let store = SeqStore::new(cfg.state_dir.join("last_seq"));
     let last = store.load().context("loading last_seq")?;
     log::info!("last_seq is {last}");
     Ok(Session::new(
-        SessionConfig {
-            node_call: cfg.station.node_call.to_ascii_uppercase(),
-            pending_timeout: Duration::from_secs(cfg.pending_timeout_secs),
-            chunk_chars: cfg.station.chunk_chars,
-            max_rx_messages: 5,
-            again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
-        },
+        sc,
         Vocabulary {
             field_calls: cfg
                 .station
@@ -269,6 +278,19 @@ pub fn run<R: Rig + 'static>(
     session: &mut Session,
     svc: &mut dyn Services,
 ) -> Result<()> {
+    run_with_clock(cfg, station, audio, session, svc, &gateway::unix_now)
+}
+
+/// [`run`], with the listening schedule following `clock` (Unix seconds) instead of
+/// the system clock, e.g. a time-scaled one in tests.
+pub fn run_with_clock<R: Rig + 'static>(
+    cfg: &Config,
+    station: &mut Station<R>,
+    audio: &BlockReceiver,
+    session: &mut Session,
+    svc: &mut dyn Services,
+    clock: &dyn Fn() -> u64,
+) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     let rx_log = cfg.state_dir.join("rx.log");
     let sample_rate = u64::from(cfg.audio.sample_rate.max(1));
@@ -297,7 +319,7 @@ pub fn run<R: Rig + 'static>(
         }
         let now = Instant::now();
         let open = listening(
-            cfg.schedule.is_open(gateway::unix_now()),
+            cfg.schedule.is_open(clock()),
             session.has_pending(now),
             was_open,
             &decoder,
@@ -434,8 +456,8 @@ mod tests {
 
     const KEY: &[u8] = b"node unit test key 0123456789";
 
-    /// Run the node on `audio` (8 kHz) with a simulated radio, delivering 50 ms
-    /// blocks 100x faster than real time to match the radio's time scale.
+    /// Run the node on `audio` (8 kHz) with a simulated radio (time scale 100),
+    /// delivering 50 ms blocks as fast as the node takes them.
     fn run_node(audio: Vec<f32>) -> Heard {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("node.key");
@@ -466,11 +488,30 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.audio.sample_rate, 8000);
 
+        let mut rig = SimRig::new();
+        rig.time_scale = 100.0;
+        let mut sc = StationConfig::from_config(&cfg.station);
+        sc.poll = Duration::from_millis(2);
+        sc.swr_delay = Duration::from_millis(2);
+        let mut station = Station::new(rig, sc, None);
+        station.configure().unwrap();
+
         let (tx, rx) = audio::queue(usize::MAX);
         let blocks: Vec<Vec<f32>> = audio.chunks(400).map(<[f32]>::to_vec).collect();
+        let radio = station.rig();
         thread::spawn(move || {
             for samples in blocks {
-                thread::sleep(Duration::from_micros(500));
+                // Paced by the node, not the wall clock: the next block goes out
+                // only once the node has taken the last, and the operator's audio
+                // stands still while the radio tunes or transmits, as the silence
+                // after a read-back would on the air. A busy test machine then
+                // changes how long the test takes, not which audio the node hears.
+                while tx.queued() > 0 || {
+                    let mut r = radio.lock().unwrap();
+                    r.is_transmitting().unwrap_or(true) || r.tuner_busy().unwrap_or(true)
+                } {
+                    thread::sleep(Duration::from_micros(200));
+                }
                 let b = Block {
                     at: Instant::now(),
                     samples,
@@ -480,13 +521,6 @@ mod tests {
                 }
             }
         });
-        let mut rig = SimRig::new();
-        rig.time_scale = 100.0;
-        let mut sc = StationConfig::from_config(&cfg.station);
-        sc.poll = Duration::from_millis(2);
-        sc.swr_delay = Duration::from_millis(2);
-        let mut station = Station::new(rig, sc, None);
-        station.configure().unwrap();
         let mut session = build_session(&cfg).unwrap();
         let mut svc = Fake::default();
         let end = run(&cfg, &mut station, &rx, &mut session, &mut svc).unwrap_err();

@@ -19,8 +19,14 @@ timedatectl
 ```
 
 Listening windows are computed from UTC, so a wrong clock means the node listens at
-the wrong time. The Pi has no battery-backed clock; it needs the network at boot to
-get the time.
+the wrong time, and tunes (a short carrier) at the wrong time too. The Pi has no
+battery-backed clock; it needs the network at boot to get the time. Make the
+service wait until the clock has actually synchronised, not just until the time
+service has started:
+
+```sh
+sudo systemctl enable systemd-time-wait-sync.service
+```
 
 Update and install the audio tools (`hfnode` runs `arecord` for capture):
 
@@ -118,6 +124,13 @@ change if you add another one. Two stable alternatives:
 
 Put whichever path you choose in `station.serial_port`.
 
+Any program that opens a serial port raises its DTR and RTS lines, and the IC-7300
+can be set to transmit on either (section 6). `hfnode` lowers them straight after
+opening, but other programs do not, so keep the radio's port to `hfnode` alone:
+ModemManager probes new serial ports and brltty claims CP210x bridges. Raspberry
+Pi OS Lite installs neither; check with `systemctl status ModemManager brltty` and
+`sudo apt purge modemmanager brltty` if they are there.
+
 ## 5. Find the radio's USB audio device
 
 The IC-7300 also presents a USB sound card. List capture devices:
@@ -145,15 +158,16 @@ Put the device name in `audio.device`.
 Set these on the radio and write down what you set. Unless noted they are under
 **MENU > SET > Connectors** (IC-7300 Full Manual, pp. 12-10 and 12-11). Item names
 can differ slightly between firmware versions; check each against the manual for
-yours. The node does **not** change any of these over CI-V, so verify them on the
-radio's screen.
+yours. The node never changes any of these over CI-V. Before it writes anything to
+the radio it reads the transmit-related ones and refuses to go on if one is wrong;
+`hfnode radio --config <file> check` prints what it reads, without writing.
 
 **CI-V:**
 
 | Item | Set to | Why |
 |---|---|---|
-| CI-V Address | **94h** (default) | Must equal `station.civ_address`. Instructions written for the IC-7300MK2 use B6h; do not copy them. |
-| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack. The two settings below only apply in this mode. |
+| CI-V Address | **94h** (default) | Must equal `station.civ_address` (02h to DFh). Instructions written for the IC-7300MK2 use B6h; do not copy them. |
+| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node warns if it is linked. |
 | CI-V USB Baud Rate | **115200** | Must equal `station.baud`. Set it explicitly rather than Auto. |
 | CI-V USB Echo Back | **OFF** (default) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
 | CI-V Transceive | **OFF** (default is ON) | Stops the radio sending unsolicited status frames whenever a setting changes. The driver ignores frames not addressed to it, so ON also works. |
@@ -163,9 +177,10 @@ radio's screen.
 
 | Item | Set to | Why |
 |---|---|---|
-| USB SEND | **OFF** (default) | When set to DTR or RTS, a serial control line keys the transmitter. The node does not use these lines, and opening a serial port can toggle them. |
-| USB Keying (CW) | **OFF** (default) | Same reason: a DTR or RTS line would key CW. The node keys with CI-V command 17 instead. |
-| Inhibit Timer at USB Connection | **ON** (default) | Extra protection against unintended keying when USB connects. |
+| USB SEND | **OFF** (default) | Set to DTR or RTS, that serial control line puts the radio on transmit (p. 12-11). Opening a serial port raises both lines (section 4). The node does not use them, and refuses to write to the radio unless this is OFF. |
+| USB Keying (CW) | **OFF** (default) | Same: a DTR or RTS line would hold the CW key down. The node keys with CI-V command 17 instead, and refuses to write to the radio unless this is OFF. |
+| USB Keying (RTTY) | **OFF** (default) | Same: a DTR or RTS line would key RTTY (FSK). Checked like the two above. |
+| Inhibit Timer at USB Connection | **ON** (default) | When the USB connection is made, delays a SEND or Keying signal by a few seconds (p. 12-11). It only delays it, so the three items above must still be OFF. |
 
 **USB audio:**
 
@@ -182,15 +197,37 @@ radio's screen.
 | Item | Set to | Why |
 |---|---|---|
 | CW PITCH | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
-| BKIN D (break-in delay) | Default | Holds transmit between characters. |
-| Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on). It never selects full break-in. |
+| BKIN D (break-in delay) | Leave to the node | Holds transmit between characters. The node sets it from `station.break_in_delay_dots` (default 10.0) at start-up and reads it back. |
+| Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on), and reads it back. It never selects full break-in. |
+| Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder. The node warns if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
 
 **Transmit backstop** (MENU > SET > Function, p. 12-5):
 
 | Item | Set to | Why |
 |---|---|---|
-| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends transmissions started over CI-V after this long. It backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. |
+| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `hfnode run` refuses to start while it is OFF. |
+
+**Display** (MENU > SET > Display, p. 12-12):
+
+| Item | Set to | Why |
+|---|---|---|
+| Meter Peak Hold | **OFF** (default is ON) | The node reads the Po and SWR meters over CI-V to check each transmission. The manual does not say whether those readings are the held peak or the present value; OFF removes the doubt. The node warns while it is ON. |
+
+**Tuner emergency mode** (MENU > SET > Others > Emergency, p. 11-4):
+
+| Item | Set to | Why |
+|---|---|---|
+| Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent for that listening window. |
+
+**Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
+With it ON the radio streams waveform data to the port the node uses, which slows
+the node's stop commands. Close any panadapter program before starting the node;
+`radio check` warns while it is ON.
+
+**On the main screen:** SPLIT off and XIT (∂TX) off. With either on, the radio would
+transmit somewhere other than the frequency the node set; the node refuses to
+write to the radio unless both read OFF.
 
 **Power and tuner:** the node sets RF power to `station.power_watts` (30-50 W per
 the design; start bench tests at 10 W) and runs the internal tuner at start-up and
@@ -215,6 +252,12 @@ the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log` and
 `health.csv` in `state_dir`.
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
+
+`station.commissioned` starts at `"none"`: `hfnode run`, and so the service, refuses
+to start until the [hardware test plan](hardware-test-plan.md#bring-up-stages) has
+been worked through on this radio and it is set to `"done"`, and any `power_watts`
+above 10 is refused before `"keying"`. Copy the value from the bench config once the
+plan has passed.
 
 ## 8. Secrets
 
@@ -272,14 +315,16 @@ sudo systemctl enable --now hfnode
 journalctl -u hfnode -f
 ```
 
-On start you should see `last_seq is N`, a `health: tune ...` line, and
+On start you should see `last_seq is N`, `preflight:` lines (the read-only radio
+checks), `read-back:` lines, a `health: tune ...` line, and
 `N0CALL listening on 7030000 Hz`. The unit:
 
 - runs `/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml` as `hfnode`, with
   `dialout` and `audio` as supplementary groups;
 - loads `/etc/hfnode/env`;
-- restarts on failure after 30 s, and gives up after 5 failures in 10 minutes so a
-  broken radio connection does not turn into an endless loop of start-up tunes;
+- restarts on failure after 30 s, and gives up after 3 starts in an hour, so a
+  broken radio connection does not turn into an endless loop of start-up tunes
+  (`sudo systemctl reset-failed hfnode` before starting it again by hand);
 - runs `hfnode radio ... rx` after every stop or crash, to make sure the radio is on
   receive;
 - only allows the process to open USB serial (`ttyUSB`) and ALSA devices, and
@@ -287,6 +332,11 @@ On start you should see `last_seq is N`, a `health: tune ...` line, and
 
 If you use a udev symlink or by-id path, it still resolves to a `ttyUSB` device,
 so the device allow-list covers it.
+
+**If it stops transmitting.** When the node cannot confirm the radio is back on
+receive, it stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the
+time and reason. It keeps running (and keeps logging) but transmits nothing, also
+after a restart, until that file is removed. Check the radio first.
 
 **Stopping the node.** `sudo systemctl stop hfnode`. If the node was keying when it
 was stopped, the radio may finish the text already handed to its keyer (at most 30

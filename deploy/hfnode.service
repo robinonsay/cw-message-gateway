@@ -10,10 +10,12 @@ Description=HF CW message gateway node (IC-7300)
 Documentation=https://github.com/robinonsay/ic-7300-hf-server
 Wants=network-online.target time-sync.target
 After=network-online.target time-sync.target sound.target
-# Give up after 5 failures in 10 minutes rather than restarting (and re-tuning)
-# forever against a radio that is off or disconnected.
-StartLimitIntervalSec=600
-StartLimitBurst=5
+# Give up after 3 starts in an hour rather than restarting (and re-tuning, which
+# transmits) forever against a radio that is off, disconnected or misbehaving.
+# With RestartSec=30 this stops any run of failures that each come within about
+# half an hour of starting; a crash once a day still restarts.
+StartLimitIntervalSec=3600
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -31,7 +33,8 @@ Restart=on-failure
 RestartSec=30
 TimeoutStopSec=20
 
-# State: /var/lib/hfnode (last_seq, inbox.json, rx.log, health.csv).
+# State: /var/lib/hfnode (last_seq, inbox.json, rx.log, health.csv, and
+# tx-inhibited if the node has stopped transmitting: see raspberry-pi-setup.md).
 StateDirectory=hfnode
 StateDirectoryMode=0750
 WorkingDirectory=/var/lib/hfnode
