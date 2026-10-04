@@ -36,7 +36,7 @@ use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
 use crate::session::{Services, WxError};
-use crate::station::{Station, StationConfig};
+use crate::station::{InhibitNotice, Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
 use civ::ic7300::Ic7300;
@@ -160,6 +160,9 @@ pub struct NodeSetup {
     /// Listening windows as (`every_minutes`, `window_minutes`), from the top of
     /// the hour at radio time zero; `None` listens all the time.
     pub schedule: Option<(u32, u32)>,
+    /// The node starts with [`crate::station::INHIBIT_FILE`] already in its state
+    /// directory, left by a fault before a restart.
+    pub inhibited_at_start: bool,
     /// `schedule.check_minutes` and `schedule.retune_minutes`, in radio time.
     pub check_minutes: u32,
     pub retune_minutes: u32,
@@ -174,6 +177,7 @@ impl Default for NodeSetup {
             weather_error: None,
             inbox: Vec::new(),
             schedule: None,
+            inhibited_at_start: false,
             check_minutes: 10,
             retune_minutes: 60,
         }
@@ -186,6 +190,8 @@ pub struct RadioSetup {
     pub echo: bool,
     pub swr: f32,
     pub foldback: Option<Foldback>,
+    /// Faults armed before the node starts, so its first tune and `DE <call>`
+    /// meet them first; to hit an answer, inject them with [`Step::Inject`].
     pub faults: Vec<Fault>,
     /// Mix the radio's own keying into the receive audio, as sidetone.
     pub sidetone: bool,
@@ -214,7 +220,7 @@ impl Default for RadioSetup {
 pub enum Step {
     /// Key an open and wait for the read-back, repeating the open (exactly, as the
     /// operating guide says) if none comes. A read-back other than `read_back` is
-    /// answered `NO K` and fails the scenario.
+    /// answered `NO` on the next unused line and fails the scenario.
     Open {
         text: String,
         read_back: String,
@@ -233,7 +239,8 @@ pub enum Step {
     },
     /// The node's next over is lost in QRM: the operator does not copy it.
     MissNext,
-    /// Radio-side changes.
+    /// Radio-side changes, from here on: after the node's first tune and ID when
+    /// it comes first in the script.
     Inject(Fault),
     SetSwr(f32),
     /// A hardware PTT timer (or a power cycle) ends a stuck transmit.
@@ -276,8 +283,9 @@ pub enum Panel {
 /// key the open, repeating it exactly while no read-back comes; on the expected
 /// read-back answer `OK`, repeating it while no result comes. A read-back other
 /// than the expected one (text garbled into something that still parsed) is
-/// answered `NO`, and the operator starts over on fresh lines, at most `restarts`
-/// times. The operator never commits a read-back that is not exactly right.
+/// answered `NO` on the line the `OK` would have used, and the operator starts
+/// over on fresh lines, at most `restarts` times. The operator never commits a
+/// read-back that is not exactly right.
 #[derive(Debug, Clone)]
 pub struct Exchange {
     /// What follows the code in the open: `TX MOM HOME SUN`, `RX`.
@@ -315,6 +323,12 @@ pub struct Expect {
     pub forced_receive: bool,
     /// The node inhibited transmitting until restart.
     pub inhibited: bool,
+    /// `DE <call>` keyed right after a tune: one per tune that matched when the node
+    /// started listening (at start-up or a window's start; a tune before a reply is
+    /// followed by the reply).
+    pub ids: u32,
+    /// `DE <call>` keyed on its own inside overs, between chunks.
+    pub mid_ids: u32,
     /// Text the node must have decoded and logged in `rx.log`, answered or not.
     pub heard: Vec<String>,
 }
@@ -591,6 +605,15 @@ fn mix(parts: &[u64]) -> u64 {
     z
 }
 
+/// The highest line `n` whose code `{n}` (or `{ng}`) `text` asks for.
+fn highest_line(text: &str) -> Option<u64> {
+    text.split('{')
+        .skip(1)
+        .filter_map(|t| t.split_once('}'))
+        .filter_map(|(n, _)| n.strip_suffix('g').unwrap_or(n).parse().ok())
+        .max()
+}
+
 /// Replace `{n}` with the code for line `n`.
 pub fn with_codes(text: &str, book: &CodeBook) -> String {
     let mut out = String::new();
@@ -659,7 +682,8 @@ struct Air {
     deaf: bool,
     over_end: String,
     log: Vec<String>,
-    /// The next unused line, for [`Step::Exchange`].
+    /// The next unused line: above every line keyed so far, for [`Step::Exchange`]
+    /// and a `NO`.
     line: u64,
     /// Everything keyed, codes filled in.
     sent: Vec<String>,
@@ -668,6 +692,9 @@ struct Air {
     restarts: u32,
     /// Transmissions in exchanges beyond the first open and the first `OK`.
     extra: u32,
+    /// The node tunes when it starts listening (not if it starts with transmitting
+    /// inhibited): the operator waits for that before calling.
+    tune_at_start: bool,
     /// The next open may be keyed only once ([`Step::FirstTry`]).
     first_try: bool,
     /// Tuner cycles noted in the transcript so far.
@@ -797,6 +824,7 @@ impl Air {
 
     /// Wait for a quiet frequency, then key `text` after a short lead-in.
     fn key(&mut self, text: &str) -> Result<(), String> {
+        self.line = self.line.max(highest_line(text).map_or(0, |n| n + 1));
         let text = with_codes(text, &self.book);
         self.wait_quiet()?;
         self.tx_index += 1;
@@ -827,6 +855,38 @@ impl Air {
         Ok(())
     }
 
+    /// Wait for the node to start its next window (after `tunes` tuner cycles):
+    /// its tune and, after a tune that matched, its `DE <call>`. The node takes no
+    /// audio until both are over, so once it has taken a block sent after the tune
+    /// started, it is listening again. Whatever it keyed meanwhile is the window's
+    /// ID, not an answer.
+    fn window_start(&mut self, tunes: u32) -> Result<(), String> {
+        while self.radio.tunes() == tunes {
+            self.tick()?;
+        }
+        self.tick()?;
+        while self.tx.as_ref().is_some_and(|tx| tx.queued() > 0) {
+            if Instant::now() > self.deadline {
+                return Err("scenario took too long".into());
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+        self.wait_quiet()?;
+        let keyed: Vec<String> = self
+            .radio
+            .keyed_from(self.heard)
+            .into_iter()
+            .filter(|k| k.on_air)
+            .map(|k| k.text)
+            .collect();
+        self.heard = self.radio.keyed_from(0).len();
+        match keyed.is_empty() {
+            true => self.note("NODE  (no ID after the tune)"),
+            false => self.note(format!("NODE  {}", keyed.join(" "))),
+        }
+        Ok(())
+    }
+
     /// Wait for the node's next over: until it ends with `DE <call> K` and the
     /// frequency is quiet, or stops short, or none starts in time.
     fn listen(&mut self) -> Result<Heard, String> {
@@ -845,9 +905,14 @@ impl Air {
                 .into_iter()
                 .filter(|k| k.on_air)
                 .collect();
+            // A station ID between chunks is not part of the over: the operator
+            // copies around it.
+            let id = format!("DE {NODE_CALL}");
             let text = pieces
                 .iter()
-                .map(|k| if k.complete { &k.text } else { &k.sent })
+                .enumerate()
+                .filter(|(i, k)| k.text != id || i + 1 == pieces.len())
+                .map(|(_, k)| if k.complete { &k.text } else { &k.sent })
                 .filter(|t| !t.is_empty())
                 .cloned()
                 .collect::<Vec<_>>()
@@ -896,7 +961,8 @@ impl Air {
                         Heard::Over(o) if o == *read_back => return Ok(()),
                         Heard::Over(o) => {
                             self.note("OP    (read-back wrong)");
-                            self.key("NO K")?;
+                            let no = self.line;
+                            self.key(&format!("NO {no} {{{no}}} K"))?;
                             self.listen()?;
                             return Err(format!("read-back {o:?}, expected {read_back:?}"));
                         }
@@ -973,11 +1039,9 @@ impl Air {
             }
             Step::NextWindow => {
                 let tunes = self.radio.tunes();
-                while self.radio.tunes() == tunes {
-                    self.tick()?;
-                }
+                self.window_start(tunes)?;
                 self.note("NODE  (that was the next window)");
-                self.wait_quiet()
+                Ok(())
             }
             Step::Panel(p) => {
                 self.note(format!("RADIO front panel: {p:?}"));
@@ -1044,7 +1108,7 @@ impl Air {
                 let no = de("R NO");
                 for _ in 0..2 {
                     self.extra += 1;
-                    self.key("NO K")?;
+                    self.key(&format!("NO {commit} {{{commit}}} K"))?;
                     if matches!(self.listen()?, Heard::Over(o) if o == no) {
                         break;
                     }
@@ -1073,14 +1137,12 @@ impl Air {
     /// Run the script. The first failed step ends it, as an operator would give up.
     fn operate(&mut self, script: &[Step]) -> Vec<String> {
         let mut failures = Vec::new();
-        // The node tunes at the start of its window; wait it out, as the operating
-        // guide says.
-        let start = (|| {
-            while self.radio.tunes() == 0 {
-                self.tick()?;
-            }
-            self.wait_quiet()
-        })();
+        // The node tunes at the start of its window and identifies; wait it out,
+        // as the operating guide says. A node that starts inhibited does neither.
+        let start = match self.tune_at_start {
+            true => self.window_start(0),
+            false => Ok(()),
+        };
         if let Err(e) = start {
             return vec![e];
         }
@@ -1169,6 +1231,7 @@ fn station_config(cfg: &Config, scale: f32) -> StationConfig {
         &mut sc.stuck_margin,
         &mut sc.tune_timeout,
         &mut sc.poll,
+        &mut sc.id_interval,
     ] {
         *d = d.div_f32(scale);
     }
@@ -1318,11 +1381,20 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         inner: Ic7300::with_port(radio.port(), cfg.station.civ_address),
         scale,
     };
+    if s.node.inhibited_at_start {
+        std::fs::write(
+            cfg.state_dir.join(crate::station::INHIBIT_FILE),
+            format!("{CLOCK_START} radio not confirmed on receive (no reply from radio)\n"),
+        )?;
+    }
     let station = Station::new(
         rig,
         station_config(&cfg, scale),
         Some(cfg.state_dir.join("health.csv")),
     );
+    // As `hfnode run` registers its email alerts.
+    let (alert_tx, alerts) = mpsc::channel();
+    station.notify_inhibit(alert_tx);
     station.configure().context("configuring the mock radio")?;
     let mut sc = node::session_config(&cfg);
     sc.pending_timeout = sc.pending_timeout.div_f32(scale);
@@ -1376,6 +1448,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         wrong_read_backs: 0,
         restarts: 0,
         extra: 0,
+        tune_at_start: !s.node.inhibited_at_start,
         first_try: false,
         tunes_noted: 0,
     };
@@ -1433,11 +1506,14 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         .filter(|(_, body)| body[..] == [0x17, 0xFF])
         .count();
     drop(station);
+    let notices: Vec<_> = alerts.try_iter().collect();
     let r = radio.report();
     out.radio_time = r.now;
 
     let e = &s.expect;
-    let keyed = match_overs(&r.keyed, &e.keyed);
+    let id = format!("DE {NODE_CALL}");
+    let overs: Vec<civ::mock::Keyed> = r.keyed.iter().filter(|k| k.text != id).cloned().collect();
+    let keyed = match_overs(&overs, &e.keyed);
     out.checks.push(check(
         "keyed",
         keyed.is_ok(),
@@ -1446,6 +1522,15 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
             Err(why) => format!("{why}; radio keyed: {}", describe(&r)),
         },
     ));
+
+    let tunes_at: Vec<Duration> = radio
+        .commands()
+        .iter()
+        .filter(|(_, b)| b[..] == [0x1C, 0x01, 0x02])
+        .map(|(t, _)| *t)
+        .collect();
+    out.checks
+        .push(station_id_check(&r.keyed, &tunes_at, e, scale));
 
     out.facts.sent = svc.sent.clone();
     out.facts.read = svc.read.clone();
@@ -1504,6 +1589,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     ));
     out.checks
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
+    out.checks.push(alert_check(e, &s.node, &notices));
 
     let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
     // `<unix time>,<text>`.
@@ -1542,6 +1628,67 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
     Ok(())
+}
+
+/// Whether a keyer piece ends with the node's callsign: an ID, or the end of an over.
+fn ends_with_call(text: &str) -> bool {
+    let w: Vec<&str> = text.split_whitespace().collect();
+    match w[..] {
+        [.., c] if c == NODE_CALL => true,
+        [.., c, o] => c == NODE_CALL && ["K", "KN"].contains(&o),
+        _ => false,
+    }
+}
+
+/// The node's station IDs: `DE <call>` as the first piece after each tune that
+/// matched (`tunes_at`, radio time), the expected number inside overs, and never
+/// longer than the station's ID interval from the start of a transmission (or an
+/// ID) to the end of the next ID. A piece cut short by a fault ends the stretch.
+fn station_id_check(
+    keyed: &[civ::mock::Keyed],
+    tunes_at: &[Duration],
+    e: &Expect,
+    scale: f32,
+) -> Check {
+    let id = format!("DE {NODE_CALL}");
+    let on_air: Vec<&civ::mock::Keyed> = keyed.iter().filter(|k| k.on_air).collect();
+    let after_tune = |i: usize| {
+        let next = tunes_at.get(i + 1).copied().unwrap_or(Duration::MAX);
+        on_air
+            .iter()
+            .find(|k| k.accepted >= tunes_at[i] && k.accepted < next)
+            .is_some_and(|k| k.text == id && k.complete)
+    };
+    let ids = (0..tunes_at.len()).filter(|&i| after_tune(i)).count() as u32;
+    let mid_ids = on_air.iter().filter(|k| k.text == id).count() as u32 - ids;
+    let (mut longest, mut from) = (Duration::ZERO, None);
+    for k in &on_air {
+        if !k.complete {
+            from = None;
+            continue;
+        }
+        let start = *from.get_or_insert(k.start);
+        if ends_with_call(&k.text) {
+            longest = longest.max(k.end.saturating_sub(start));
+            from = None;
+        }
+    }
+    let limit = (crate::station::ID_INTERVAL + Duration::from_secs_f32(1.0 + 0.02 * scale))
+        .min(Duration::from_secs(600));
+    let pass = ids == e.ids && mid_ids == e.mid_ids && longest <= limit;
+    check(
+        "station ID",
+        pass,
+        format!(
+            "{ids} after {} tunes (expected {}), {mid_ids} inside overs (expected {}), \
+             at most {:.0} s without one (limit {:.0} s)",
+            tunes_at.len(),
+            e.ids,
+            e.mid_ids,
+            longest.as_secs_f32(),
+            limit.as_secs_f32()
+        ),
+    )
 }
 
 /// The radio as the node left it: on the configured frequency, in CW with FIL1, semi
@@ -1587,6 +1734,48 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
     } else {
         check("settings", false, format!("{}; {detail}", bad.join("; ")))
     }
+}
+
+/// The owner is told of an inhibit exactly once: when it latches, or at start-up
+/// if the node started inhibited; and never without one.
+fn alert_check(e: &Expect, node: &NodeSetup, notices: &[InhibitNotice]) -> Check {
+    let pass = match notices {
+        [] => !e.inhibited,
+        [n] => e.inhibited && n.from_file == node.inhibited_at_start && !n.reason.is_empty(),
+        _ => false,
+    };
+    let seen: Vec<String> = notices
+        .iter()
+        .map(|n| {
+            format!(
+                "{}: {}",
+                if n.from_file {
+                    "at start-up"
+                } else {
+                    "latched"
+                },
+                n.reason
+            )
+        })
+        .collect();
+    check(
+        "alert",
+        pass,
+        format!(
+            "{} inhibit notice(s){}, expected {}",
+            notices.len(),
+            if seen.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", seen.join("; "))
+            },
+            match (e.inhibited, node.inhibited_at_start) {
+                (false, _) => "none",
+                (true, false) => "one, when it latches",
+                (true, true) => "one, at start-up",
+            }
+        ),
+    )
 }
 
 /// Bounds that hold whatever the scenario: transmit runs, duty, receive at the end
@@ -1715,6 +1904,8 @@ fn base(name: &str, about: &str) -> Scenario {
             tunes: 1,
             forced_receive: false,
             inhibited: false,
+            ids: 1,
+            mid_ids: 0,
             heard: Vec::new(),
         },
     }
@@ -1846,15 +2037,16 @@ pub fn scenarios() -> Vec<Scenario> {
         };
         let b = de("GAME WAS POSTPONED TO NEXT SATURDAY AT NOON NR 3 FM MOM LOVE = B");
         s.script.push(Step::Say {
-            text: "AGN B K".into(),
+            text: "AGN 44 {44} B K".into(),
             expect: Some(b.clone()),
         });
         s.script.push(Step::Say {
-            text: "AGN K".into(),
+            text: "AGN 45 {45} K".into(),
             expect: Some(all.clone()),
         });
         s.expect.keyed.extend(full(&[&b, &all]));
         s.expect.read = vec![1, 2, 3];
+        s.expect.last_seq = 45;
         s
     });
     v.push({
@@ -1888,6 +2080,65 @@ pub fn scenarios() -> Vec<Scenario> {
         s
     });
     v.push({
+        // 13 chunks of at most 20 characters, keyed at 25 wpm to keep it short.
+        let text = "TEST ".repeat(50);
+        let chunks = protocol::chunk(&format!("NR 1 FM MOM {}", text.trim()), 20);
+        let all: Vec<String> = chunks.iter().map(protocol::Chunk::render).collect();
+        let mut s = rx(
+            "agn-chunk-k",
+            "AGN K K asks for chunk K of a 13-chunk readout",
+            &[("MOM", text.trim())],
+            "1 MSG",
+            &all.join(" "),
+        );
+        s.node.chunk_chars = 20;
+        s.node.key_wpm = 25;
+        let k = de(&all[10]);
+        s.script.push(Step::Say {
+            text: "AGN 44 {44} K K".into(),
+            expect: Some(k.clone()),
+        });
+        s.expect.keyed.push(Over::Full(k));
+        s.expect.read = vec![1];
+        s.expect.last_seq = 44;
+        s
+    });
+    v.push({
+        // About 11 minutes of readout at the node's 18 wpm, longer than its 8-minute
+        // ID interval: it identifies once between two chunks.
+        let words = 260;
+        let long = vec!["TEST"; words].join(" ");
+        let mut s = rx(
+            "rx-station-id",
+            "RX readout longer than 8 minutes: DE N0DE on its own between two chunks, \
+             which the operator copies around",
+            &[("MOM", long.as_str())],
+            "1 MSG",
+            "",
+        );
+        let mut chunks = vec![format!("NR 1 FM MOM {}", ["TEST"; 9].join(" "))];
+        let mut left = words - 9;
+        while left > 0 {
+            let n = left.min(12);
+            chunks.push(vec!["TEST"; n].join(" "));
+            left -= n;
+        }
+        let text: Vec<String> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = {}", (b'A' + i as u8) as char))
+            .collect();
+        let result = de(&text.join(" "));
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: Some(result.clone()),
+        };
+        s.expect.keyed[1] = Over::Full(result);
+        s.expect.read = vec![1];
+        s.expect.mid_ids = 1;
+        s
+    });
+    v.push({
         let inbox: Vec<(&str, &str)> = (0..6)
             .map(|i| (if i % 2 == 0 { "MOM" } else { "BOB" }, "HI"))
             .collect();
@@ -1911,16 +2162,20 @@ pub fn scenarios() -> Vec<Scenario> {
             "1 MSG",
             "",
         );
-        s.radio.faults.push(Fault::Reply {
-            cmd: vec![0x17],
-            skip: 1,
-            times: 100,
-            kind: ReplyFault::Ng,
-        });
         s.script[1] = Step::Unanswered {
             text: "OK 43 {43} K".into(),
             tries: 2,
         };
+        // After the first tune and ID: the read-back gets through.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::Reply {
+                cmd: vec![0x17],
+                skip: 1,
+                times: 100,
+                kind: ReplyFault::Ng,
+            }),
+        );
         s.expect.keyed.truncate(1);
         s.expect.forced_receive = true;
         s
@@ -2077,7 +2332,8 @@ pub fn scenarios() -> Vec<Scenario> {
     v.push({
         let mut s = base(
             "no-abort",
-            "NO after the read-back: R NO, and the OK that follows is ignored",
+            "NO on the next line after the read-back: R NO, and an OK after it commits nothing; \
+             a bare NO is ignored",
         );
         let rb = rb_tx(42, "MOM", "WRONG WORDS");
         let no = de("R NO");
@@ -2088,34 +2344,48 @@ pub fn scenarios() -> Vec<Scenario> {
             },
             Step::Say {
                 text: "NO K".into(),
+                expect: None,
+            },
+            Step::Say {
+                text: "NO 43 {43} K".into(),
                 expect: Some(no.clone()),
             },
             Step::Say {
-                text: "OK 43 {43} K".into(),
+                text: "OK 44 {44} K".into(),
                 expect: None,
             },
         ];
         s.expect.keyed = full(&[&rb, &no]);
-        s.expect.last_seq = 42;
+        s.expect.last_seq = 43;
         s
     });
     v.push({
         let mut s = tx(
             "agn",
-            "AGN repeats the last over; AGN for a chunk that does not exist is ignored",
+            "AGN on the next line repeats the last over, and a lost repeat is asked for again \
+             on the same line; a bare AGN and AGN for a chunk that does not exist are ignored",
             "MOM",
             "HOME SUN",
         );
         let done = de("SENT 43");
+        s.script.push(Step::MissNext);
         s.script.push(Step::Say {
-            text: "AGN K".into(),
+            text: "AGN 44 {44} K".into(),
             expect: Some(done.clone()),
         });
         s.script.push(Step::Say {
-            text: "AGN C K".into(),
+            text: "AGN K".into(),
             expect: None,
         });
-        s.expect.keyed.push(Over::Full(done));
+        s.script.push(Step::Say {
+            text: "AGN 45 {45} C K".into(),
+            expect: None,
+        });
+        s.expect.keyed.extend(full(&[&done, &done]));
+        s.expect.last_seq = 45;
+        // A clean signal: the AGNs that get silence are copied for certain, and
+        // the line the last one used shows it.
+        s.fist.snr_db = None;
         s
     });
     // The session's 10-minute windows, in radio time.
@@ -2145,12 +2415,17 @@ pub fn scenarios() -> Vec<Scenario> {
             "HOME SUN",
         );
         s.script.push(Step::Wait(ten_minutes));
-        for text in ["AGN K", "OK 43 {43} K"] {
+        for text in ["AGN 44 {44} K", "OK 43 {43} K"] {
             s.script.push(Step::Say {
                 text: text.into(),
                 expect: None,
             });
         }
+        // A clean signal: in noise the decoder's speed drifts over the ten
+        // minutes and the first transmissions after it are miscopied, which
+        // would also get silence. The AGN's used line shows it was copied.
+        s.fist.snr_db = None;
+        s.expect.last_seq = 44;
         s
     });
     v.push({
@@ -2162,6 +2437,49 @@ pub fn scenarios() -> Vec<Scenario> {
         );
         s.script.insert(1, Step::MissNext);
         s.expect.keyed.push(Over::Full(de("SENT 43")));
+        s
+    });
+    // A one-minute listening window: the read-back ends about 39 s into it (after
+    // the tune, the ID and the open), so an OK keyed 20 s later is heard and acted
+    // on past its end. No noise: noise bursts heard while waiting teach the
+    // decoder a wrong speed (it decodes them as dits), which can garble the next
+    // OK; these scenarios are about when the node listens.
+    let late = |name: &str, about: &str| {
+        let mut s = tx(name, about, "MOM", "HOME SUN");
+        s.node.schedule = Some((60, 1));
+        s.fist.snr_db = None;
+        s.script.insert(1, Step::Wait(20.0));
+        s
+    };
+    v.push({
+        let mut s = late(
+            "lost-result-after-window",
+            "the window ends before the OK and its SENT is lost: the node listens on, the \
+             repeated OK gets SENT again, the message sent once",
+        );
+        s.script.insert(2, Step::MissNext);
+        s.expect.keyed.push(Over::Full(de("SENT 43")));
+        s
+    });
+    v.push({
+        let mut s = late(
+            "listening-ends-after-result",
+            "past the window's end the node listens on while its result can be repeated (a \
+             repeated OK gets SENT again), then stops: an open on fresh lines gets silence",
+        );
+        let done = de("SENT 43");
+        s.script.extend([
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(done.clone()),
+            },
+            Step::Wait(ten_minutes),
+            Step::Say {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM HOME SUN K"),
+                expect: None,
+            },
+        ]);
+        s.expect.keyed.push(Over::Full(done));
         s
     });
     v.push({
@@ -2300,6 +2618,66 @@ pub fn scenarios() -> Vec<Scenario> {
         "MOM",
         "BACK IN SK I AM IN A MINE TOWN",
     ));
+    v.push(tx(
+        "final-word-k",
+        "a message whose last word is K, keyed before the over K: the word is kept",
+        "MOM",
+        "BRING VITAMIN K",
+    ));
+    v.push({
+        let mut s = tx(
+            "kn-over",
+            "every transmission ends in KN keyed run together, with a noise burst after it",
+            "MOM",
+            "HOME SUN",
+        );
+        let done = de("SENT 43");
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN ( ~"),
+                read_back: rb_tx(42, "MOM", "HOME SUN"),
+            },
+            Step::Say {
+                text: "OK 43 {43} ( ~".into(),
+                expect: Some(done.clone()),
+            },
+            Step::Say {
+                text: "AGN 44 {44} ( ~".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed.push(Over::Full(done));
+        s.expect.last_seq = 44;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "agn-read-back",
+            "AGN after the read-back repeats it and uses a line, so the OK comes on the line after",
+            "MOM",
+            "HOME SUN",
+        );
+        let rb = rb_tx(42, "MOM", "HOME SUN");
+        let done = de("SENT 44");
+        s.script = vec![
+            s.script[0].clone(),
+            Step::Say {
+                text: "AGN 43 {43} K".into(),
+                expect: Some(rb.clone()),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: None,
+            },
+            Step::Say {
+                text: "OK 44 {44} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &rb, &done]);
+        s.expect.last_seq = 44;
+        s
+    });
 
     for wpm in [10, 15, 20, 25, 30] {
         v.push(with_fist(
@@ -2434,6 +2812,7 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.sent = sent("MOM", "HOME SUN");
         s.expect.last_seq = 45;
         s.expect.tunes = 2;
+        s.expect.ids = 2;
         s.expect.forced_receive = true;
         s
     });
@@ -2459,15 +2838,20 @@ pub fn scenarios() -> Vec<Scenario> {
             tries: 2,
         }];
         s.expect.last_seq = 42;
+        s.expect.ids = 0;
         s
     });
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
-        s.radio.faults.push(Fault::StickInTx {
-            skip: 0,
-            carrier,
-            recoverable: true,
-        });
+        // After the first tune and ID: the read-back sticks.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::StickInTx {
+                skip: 0,
+                carrier,
+                recoverable: true,
+            }),
+        );
         s.expect.forced_receive = true;
         s
     };
@@ -2507,16 +2891,19 @@ pub fn scenarios() -> Vec<Scenario> {
             "MOM",
             "HI",
         );
-        s.radio.faults.push(Fault::StickInTx {
-            skip: 0,
-            carrier: false,
-            recoverable: false,
-        });
         s.script[1] = Step::Unanswered {
             text: "OK 43 {43} K".into(),
             tries: 2,
         };
         s.script.push(Step::ClearStuck);
+        s.script.insert(
+            0,
+            Step::Inject(Fault::StickInTx {
+                skip: 0,
+                carrier: false,
+                recoverable: false,
+            }),
+        );
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.sent = Vec::new();
         s.expect.last_seq = 42;
@@ -2549,15 +2936,16 @@ pub fn scenarios() -> Vec<Scenario> {
                 kind: ReplyFault::Ng,
             }),
             Step::Say {
-                text: "AGN K".into(),
+                text: "AGN 43 {43} K".into(),
                 expect: None,
             },
             Step::Unanswered {
-                text: "OK 43 {43} K".into(),
+                text: "OK 44 {44} K".into(),
                 tries: 2,
             },
         ];
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.last_seq = 44;
         s.expect.inhibited = true;
         s.expect.forced_receive = true;
         s
@@ -2575,27 +2963,28 @@ pub fn scenarios() -> Vec<Scenario> {
             "MOM",
             "HI",
         );
-        s.radio.faults.extend([
-            Fault::StickInTx {
+        // After the first tune and ID, so the node's set-up 1C 00 00 is past.
+        s.script = vec![
+            Step::Inject(Fault::StickInTx {
                 skip: 0,
                 carrier: false,
                 recoverable: true,
-            },
-            Fault::Reply {
+            }),
+            Step::Inject(Fault::Reply {
                 cmd: vec![0x17, 0xFF],
                 skip: 0,
                 times: refused,
                 kind: ReplyFault::Ng,
-            },
-            // The first 1C 00 00 is the node's set-up.
-            Fault::Reply {
+            }),
+            Step::Inject(Fault::Reply {
                 cmd: vec![0x1C, 0x00, 0x00],
-                skip: 1,
+                skip: 0,
                 times: refused,
                 kind: ReplyFault::Ng,
-            },
-        ]);
-        s.script = vec![s.script[0].clone(), Step::WaitReceive];
+            }),
+            s.script[0].clone(),
+            Step::WaitReceive,
+        ];
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.sent = Vec::new();
         s.expect.last_seq = 42;
@@ -2605,12 +2994,16 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
         let mut s = tx(name, about, "MOM", LONG_TEXT);
-        s.radio.faults.push(Fault::Reply {
-            cmd: cmd.to_vec(),
-            skip: 0,
-            times: 1,
-            kind,
-        });
+        // After the first tune and ID, which read the meters too.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::Reply {
+                cmd: cmd.to_vec(),
+                skip: 0,
+                times: 1,
+                kind,
+            }),
+        );
         if cut {
             s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
         }
@@ -2660,7 +3053,25 @@ pub fn scenarios() -> Vec<Scenario> {
             ),
             |r| r.faults.push(Fault::TuneNeverFinishes),
         );
+        s.expect.ids = 0;
         s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-inhibited-at-start",
+            "the node starts with tx-inhibited left by an earlier fault: it does not tune or key, \
+             and tells the owner once",
+        );
+        s.node.inhibited_at_start = true;
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HI K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s.expect.tunes = 0;
+        s.expect.ids = 0;
+        s.expect.inhibited = true;
         s
     });
 
@@ -2883,8 +3294,9 @@ const SWEEP_INBOX: (&str, &str) = ("BOB", "DRIVE SAFE CALL WHEN YOU CAN");
 const SWEEP_RESTARTS: u32 = 1;
 /// The checks whose failure is a hard failure whatever the conditions: the node
 /// broke a safety bound, sent the radio something the manual does not allow, left
-/// it misconfigured, forced receive with no fault, decoded itself or stopped.
-const HARD_CHECKS: [&str; 7] = [
+/// it misconfigured, forced receive with no fault, decoded itself, stopped, or left
+/// a transmission or a tune unidentified.
+const HARD_CHECKS: [&str; 8] = [
     "setup",
     "ended",
     "ci-v",
@@ -2892,6 +3304,7 @@ const HARD_CHECKS: [&str; 7] = [
     "forced receive",
     "safety",
     "self-decode",
+    "station ID",
 ];
 
 /// How the field operator keys.
@@ -3672,36 +4085,36 @@ pub fn vectors() -> Vec<Vector> {
             "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K",
         ),
         v("commit-tx", "OK 43 {43} K", "SENT 43 DE N0DE K"),
-        v("again", "AGN K", "SENT 43 DE N0DE K"),
+        v("again", "AGN 44 {44} K", "SENT 43 DE N0DE K"),
         v(
             "replayed-open",
             "W5XXX 42 {42} TX MOM RUNNING LATE HOME SUN K",
             "(silence: line 42 is used)",
         ),
-        v("open-rx", "W5XXX 44 {44} RX K", "R 44 <n> MSGS ? DE N0DE K"),
+        v("open-rx", "W5XXX 45 {45} RX K", "R 45 <n> MSGS ? DE N0DE K"),
         v(
             "commit-rx",
-            "OK 45 {45} K",
-            "the messages, or R 45 NIL DE N0DE K",
+            "OK 46 {46} K",
+            "the messages, or R 46 NIL DE N0DE K",
         ),
         v(
             "again-chunk",
-            "AGN A K",
+            "AGN 47 {47} A K",
             "chunk A again (silence if there was none)",
         ),
-        v("open-wx", "W5XXX 46 {46} WX K", "R 46 WX DL89 ? DE N0DE K"),
-        v("commit-wx", "OK 47 {47} K", "the forecast"),
+        v("open-wx", "W5XXX 48 {48} WX K", "R 48 WX DL89 ? DE N0DE K"),
+        v("commit-wx", "OK 49 {49} K", "the forecast"),
         v(
             "open-wx-grid",
-            "W5XXX 48 {48} WX DL88 K",
-            "R 48 WX DL88 ? DE N0DE K",
+            "W5XXX 50 {50} WX DL88 K",
+            "R 50 WX DL88 ? DE N0DE K",
         ),
         v(
             "open-wx-preset",
-            "W5XXX 49 {49} WX 2 K",
-            "R 49 WX 2 DL89ME ? DE N0DE K",
+            "W5XXX 51 {51} WX 2 K",
+            "R 51 WX 2 DL89ME ? DE N0DE K",
         ),
-        v("abort", "NO K", "R NO DE N0DE K"),
+        v("abort", "NO 52 {52} K", "R NO DE N0DE K"),
         v(
             "stale-line",
             "W5XXX 41 {41} RX K",
@@ -3709,20 +4122,26 @@ pub fn vectors() -> Vec<Vector> {
         ),
         v(
             "wrong-code",
-            "W5XXX 50 {51} RX K",
-            "(silence: the code is line 51's)",
+            "W5XXX 53 {54} RX K",
+            "(silence: the code is line 54's)",
         ),
         v(
             "garbled-call",
-            "W5XKX 50 {50} TX MOM HI K",
-            "R 50 TX MOM HI ? DE N0DE K",
+            "W5XKX 53 {53} TX MOM HI K",
+            "R 53 TX MOM HI ? DE N0DE K",
         ),
         v(
             "over-word",
-            "W5XXX 52 {52} TX MOM BACK IN SK I AM IN A MINE TOWN K",
-            "R 52 TX MOM BACK IN SK I AM IN A MINE TOWN ? DE N0DE K",
+            "W5XXX 54 {54} TX MOM BACK IN SK I AM IN A MINE TOWN K",
+            "R 54 TX MOM BACK IN SK I AM IN A MINE TOWN ? DE N0DE K",
         ),
-        v("commit-over-word", "OK 53 {53} K", "SENT 53 DE N0DE K"),
+        v("commit-over-word", "OK 55 {55} K", "SENT 55 DE N0DE K"),
+        v(
+            "open-kn",
+            "W5XXX 56 {56} TX MOM BRING VITAMIN K (",
+            "R 56 TX MOM BRING VITAMIN K ? DE N0DE K",
+        ),
+        v("commit-kn", "OK 57 {57} (", "SENT 57 DE N0DE K"),
     ]
 }
 
@@ -3917,6 +4336,43 @@ mod tests {
         assert!(match_overs(&[cut, b, s], &full).is_err());
     }
 
+    #[test]
+    fn station_ids_are_counted_and_bounded() {
+        let s = |secs: u64| Duration::from_secs(secs);
+        let at = |text: &str, from: u64, to: u64| Keyed {
+            accepted: s(from),
+            start: s(from),
+            end: s(to),
+            ..piece(text, text, true)
+        };
+        let mut e = base("ids", "").expect;
+        // A window ID after the tune at 0 s, an over, and a long over with an ID.
+        let mut keyed = vec![
+            at("DE N0DE", 3, 7),
+            at("R 42 1 MSG ? DE N0DE K", 40, 50),
+            at("NR 1 FM MOM TEST = A", 70, 300),
+            at("DE N0DE", 302, 306),
+            at("TEST = B DE N0DE K", 308, 700),
+        ];
+        let tunes = [s(0)];
+        assert!(
+            !station_id_check(&keyed, &tunes, &e, 100.0).pass,
+            "mid ID not expected"
+        );
+        e.mid_ids = 1;
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // No window ID after a tune that matched.
+        assert!(!station_id_check(&keyed[1..], &tunes, &e, 100.0).pass);
+        // Too long without one: 70 s to 700 s.
+        keyed.remove(3);
+        e.mid_ids = 0;
+        let c = station_id_check(&keyed, &tunes, &e, 100.0);
+        assert!(!c.pass && c.detail.contains("630 s"), "{}", c.detail);
+        // An over cut short by a fault ends the stretch.
+        keyed[2].complete = false;
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+    }
+
     /// An outcome whose checks all pass, as a clean sweep run's would.
     fn sweep_outcome(sent: &[(&str, &str)]) -> Outcome {
         let rb = "W5XXX 42 ZWEXVXGQ TX MOM RUNNING LATE HOME SUN K".to_string();
@@ -4012,6 +4468,21 @@ mod tests {
         let r = classify(&cell, 0, 1, false, &out);
         assert!(!r.success && !r.hard_failure() && !r.delivered);
         assert!(verdict(&[r]).ok());
+    }
+
+    #[test]
+    fn a_missing_station_id_is_a_hard_failure() {
+        // Identifying does not depend on decoding: no noise excuses a missing ID.
+        let mut out = sweep_outcome(&[("MOM", SWEEP_TEXT)]);
+        out.checks
+            .push(check("station ID", false, "0 after 1 tunes (expected 1)"));
+        let cell = Cell {
+            snr_db: Some(-6.0),
+            ..CELL
+        };
+        let r = classify(&cell, 0, 1, false, &out);
+        assert!(!r.success && r.hard_failure());
+        assert!(!verdict(&[r]).ok());
     }
 
     #[test]

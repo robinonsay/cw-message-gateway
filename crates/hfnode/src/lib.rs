@@ -1,5 +1,6 @@
 //! The HF CW message gateway node: everything between the radio and the outside world.
 
+pub mod alert;
 pub mod audio;
 pub mod commissioning;
 pub mod config;

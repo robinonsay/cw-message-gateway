@@ -1,6 +1,6 @@
 //! The over-the-air grammar between the field operator and the node.
 //!
-//! Field to node (each transmission ends with `K`):
+//! Field to node (each transmission ends with an over: `K`, `KN`, `AR K`):
 //!
 //! | Message                         | Meaning                                    |
 //! |---------------------------------|--------------------------------------------|
@@ -8,8 +8,12 @@
 //! | `CALL seq code RX`              | Open: read new inbound messages            |
 //! | `CALL seq code WX [grid\|n]`     | Open: forecast for a grid, preset or last  |
 //! | `OK seq code`                   | Commit the pending transaction             |
-//! | `NO`                            | Abort the pending transaction              |
-//! | `AGN [letter]`                  | Repeat the last transmission, or a chunk   |
+//! | `NO seq code`                   | Abort the pending transaction              |
+//! | `AGN seq code [letter]`         | Repeat the last transmission, or a chunk   |
+//!
+//! Only the final over of a `TX` text is dropped, with one `AR` before it, so a
+//! message can end in the word `K` when the over follows it. After `AGN`, a lone
+//! `K` is the over and `K K` asks for chunk `K`.
 //!
 //! Decoded CW is noisy, so parsing is forgiving where the read-back protects the
 //! operator (keywords, contact names and callsigns are snapped to the nearest legal
@@ -60,8 +64,13 @@ pub enum FieldMsg {
         seq: u64,
         code: String,
     },
-    Abort,
+    Abort {
+        seq: u64,
+        code: String,
+    },
     Again {
+        seq: u64,
+        code: String,
         chunk: Option<char>,
     },
 }
@@ -119,6 +128,15 @@ pub struct Vocabulary {
     pub presets: Vec<u32>,
 }
 
+/// Over prosigns as decoded: `K`, `KN` (run together it decodes as `(`), `AR`
+/// (run together `+`) and `SK`. The node's over detection uses the same set.
+pub const OVERS: [&str; 6] = ["K", "KN", "(", "+", "AR", "SK"];
+
+/// Whether `t` is one of [`OVERS`].
+pub fn is_over(t: &str) -> bool {
+    OVERS.contains(&t)
+}
+
 /// Characters of one or two elements, which is what isolated noise bursts decode as.
 const NOISE_CHARS: &str = "ETIANM";
 
@@ -132,16 +150,16 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         .map(|t| t.to_ascii_uppercase())
         .filter(|t| t.chars().all(|c| c != '*'))
         .collect();
-    // Drop the trailing over/out prosign: K, KN, AR (+), SK.
-    while matches!(
-        tokens.last().map(String::as_str),
-        Some("K" | "KN" | "+" | "AR" | "SK")
-    ) {
-        tokens.pop();
-    }
-    if tokens.is_empty() {
+    // Set aside the trailing run of over prosigns. Which of them really are the
+    // over depends on the command: a final word K in TX text, chunk K after AGN.
+    let body_len = tokens
+        .iter()
+        .rposition(|t| !is_over(t))
+        .map_or(0, |i| i + 1);
+    if body_len == 0 {
         return Err(ParseError::Empty);
     }
+    let tail = tokens.split_off(body_len);
 
     // A noise burst just before the first word often decodes as a stray short
     // character glued onto it ("EOK"). Peel up to two such characters off a token
@@ -187,25 +205,34 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
         snap(t, &vocab.field_calls, KEYWORD_TOLERANCE).is_some()
             || (snap(t, &starts, 0).is_some() && tokens[..i].iter().all(|n| is_noise(n)))
     });
-    let tokens = &tokens[start.ok_or(ParseError::NoStart)?..];
+    let mut tokens = tokens.split_off(start.ok_or(ParseError::NoStart)?);
+    tokens.extend(tail);
+    let tokens = &tokens[..];
     let first = &tokens[0];
 
     if snap(first, &starts, 0) == Some("OK") {
         let (seq, code, rest) = seq_and_code(&tokens[1..])?;
-        expect_end(rest)?;
+        expect_overs(rest)?;
         return Ok(FieldMsg::Commit { seq, code });
     }
     if snap(first, &starts, 0) == Some("NO") {
-        expect_end(&tokens[1..])?;
-        return Ok(FieldMsg::Abort);
+        let (seq, code, rest) = seq_and_code(&tokens[1..])?;
+        expect_overs(rest)?;
+        return Ok(FieldMsg::Abort { seq, code });
     }
     if snap(first, &starts, 0) == Some("AGN") {
-        let chunk = match &tokens[1..] {
-            [] => None,
-            [t] if t.len() == 1 && t.chars().all(|c| c.is_ascii_alphabetic()) => t.chars().next(),
-            rest => return Err(ParseError::TrailingGarbage(rest.join(" "))),
+        let (seq, code, rest) = seq_and_code(&tokens[1..])?;
+        // A letter right after the code is the chunk, unless it is a K with nothing
+        // after it: that K is the over. So AGN K K asks for chunk K.
+        let is_letter = |t: &str| t.len() == 1 && t.chars().all(|c| c.is_ascii_alphabetic());
+        let (chunk, overs) = match rest {
+            [l, overs @ ..] if is_letter(l) && (!overs.is_empty() || !is_over(l)) => {
+                (l.chars().next(), overs)
+            }
+            overs => (None, overs),
         };
-        return Ok(FieldMsg::Again { chunk });
+        expect_overs(overs)?;
+        return Ok(FieldMsg::Again { seq, code, chunk });
     }
 
     let call = snap(first, &vocab.field_calls, KEYWORD_TOLERANCE)
@@ -221,6 +248,7 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
             let dest = snap(dest, &vocab.contacts, KEYWORD_TOLERANCE)
                 .ok_or_else(|| ParseError::UnknownContact(dest.clone()))?
                 .to_string();
+            let words = strip_final_over(words);
             if words.is_empty() {
                 return Err(ParseError::EmptyMessage);
             }
@@ -230,12 +258,15 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
             }
         }
         Some("RX") => {
-            expect_end(args)?;
+            expect_overs(args)?;
             Command::Rx
         }
-        Some("WX") => Command::Wx {
-            place: wx_place(args, &vocab.presets)?,
-        },
+        Some("WX") => {
+            let n = args.iter().rposition(|t| !is_over(t)).map_or(0, |i| i + 1);
+            Command::Wx {
+                place: wx_place(&args[..n], &vocab.presets)?,
+            }
+        }
         _ => return Err(ParseError::BadCommand(kw.clone())),
     };
     Ok(FieldMsg::Open {
@@ -309,12 +340,29 @@ fn seq_and_code(tokens: &[String]) -> Result<(u64, String, &[String]), ParseErro
     Err(ParseError::BadCode)
 }
 
-fn expect_end(rest: &[String]) -> Result<(), ParseError> {
-    if rest.is_empty() {
+/// After a command's last field only over prosigns may follow, any number of them
+/// (`K`, `AR K`, `+ K`, `K K`, `KN`, `(`).
+fn expect_overs(rest: &[String]) -> Result<(), ParseError> {
+    if rest.iter().all(|t| is_over(t)) {
         Ok(())
     } else {
         Err(ParseError::TrailingGarbage(rest.join(" ")))
     }
+}
+
+/// TX text without its over: the last word if it is an over prosign, and an `AR`
+/// (or run-together `+`) just before it, the end-of-message sign. Nothing more, so
+/// a message can end in the word K, AR, KN or SK when the over follows it
+/// (`VITAMIN K K`, `LITTLE ROCK AR AR K`).
+fn strip_final_over(words: &[String]) -> &[String] {
+    let mut n = words.len();
+    if n > 0 && is_over(&words[n - 1]) {
+        n -= 1;
+        if n > 0 && matches!(words[n - 1].as_str(), "AR" | "+") {
+            n -= 1;
+        }
+    }
+    &words[..n]
 }
 
 /// A 4- or 6-character Maidenhead locator such as `DL89` or `DL89IG`.
@@ -372,11 +420,28 @@ mod tests {
                 cmd: Command::Rx
             }
         );
-        assert_eq!(parse("NO K", &vocab()), Ok(FieldMsg::Abort));
-        assert_eq!(parse("AGN", &vocab()), Ok(FieldMsg::Again { chunk: None }));
         assert_eq!(
-            parse("AGN B K", &vocab()),
-            Ok(FieldMsg::Again { chunk: Some('B') })
+            parse("NO 45 ABCDEFGH K", &vocab()),
+            Ok(FieldMsg::Abort {
+                seq: 45,
+                code: "ABCDEFGH".into()
+            })
+        );
+        assert_eq!(
+            parse("AGN 46 ABCDEFGH", &vocab()),
+            Ok(FieldMsg::Again {
+                seq: 46,
+                code: "ABCDEFGH".into(),
+                chunk: None
+            })
+        );
+        assert_eq!(
+            parse("AGN 46 ABCD EFGH B K", &vocab()),
+            Ok(FieldMsg::Again {
+                seq: 46,
+                code: "ABCDEFGH".into(),
+                chunk: Some('B')
+            })
         );
     }
 
@@ -538,16 +603,27 @@ mod tests {
         for text in [
             "W5XX 42 KRTPQMLD TX MOM SAY NO K",
             "W5XX 42 KRTPQMLD TX MOM SAY AGN K",
+            "W5XX 42 KRTPQMLD TX MOM SAY NO 43 WBNFHJGC K",
             "W5XX 42 KRTPQMLD TX MOM OK 43 WBNFHJGC K",
             "CQ NO K",
         ] {
             assert_eq!(parse(text, &v), Err(ParseError::NoStart), "{text}");
         }
         // Leading noise is still skipped.
-        assert_eq!(parse("E T NO K", &v), Ok(FieldMsg::Abort));
         assert_eq!(
-            parse("IE AGN B K", &v),
-            Ok(FieldMsg::Again { chunk: Some('B') })
+            parse("E T NO 45 ABCDEFGH K", &v),
+            Ok(FieldMsg::Abort {
+                seq: 45,
+                code: "ABCDEFGH".into()
+            })
+        );
+        assert_eq!(
+            parse("IE AGN 46 ABCDEFGH B K", &v),
+            Ok(FieldMsg::Again {
+                seq: 46,
+                code: "ABCDEFGH".into(),
+                chunk: Some('B')
+            })
         );
     }
 
@@ -575,10 +651,148 @@ mod tests {
         );
         assert_eq!(
             parse("OK 43 WBNFHJGC EXTRA K", &v),
-            Err(ParseError::TrailingGarbage("EXTRA".into()))
+            Err(ParseError::TrailingGarbage("EXTRA K".into()))
         );
         // Unknown patterns (decoded as '*') are dropped, not guessed.
         assert_eq!(parse("OK 43 WBNF*JGC K", &v), Err(ParseError::BadCode));
+    }
+
+    #[test]
+    fn no_and_agn_need_a_line_and_its_code() {
+        let v = vocab();
+        for (text, err) in [
+            ("NO K", ParseError::BadSeq("K".into())),
+            ("NO", ParseError::BadSeq(String::new())),
+            ("AGN K", ParseError::BadSeq("K".into())),
+            ("AGN B K", ParseError::BadSeq("B".into())),
+            ("NO 45 ABCDEF K", ParseError::BadCode),
+            // A chunk letter glued to the code cannot be told apart from it.
+            ("AGN 46 ABCDEFGHB K", ParseError::BadCode),
+            (
+                "NO 45 ABCDEFGH B K",
+                ParseError::TrailingGarbage("B K".into()),
+            ),
+            (
+                "AGN 46 ABCDEFGH B C K",
+                ParseError::TrailingGarbage("C K".into()),
+            ),
+        ] {
+            assert_eq!(parse(text, &v), Err(err), "{text}");
+        }
+        // The code in any number of pieces, noise glued to the keyword.
+        assert_eq!(
+            parse("ENO 45 ABC DE FGH K", &v),
+            Ok(FieldMsg::Abort {
+                seq: 45,
+                code: "ABCDEFGH".into()
+            })
+        );
+    }
+
+    #[test]
+    fn agn_k_k_asks_for_chunk_k() {
+        let v = vocab();
+        let chunk = |tail: &str| match parse(&format!("AGN 46 ABCDEFGH {tail}"), &v) {
+            Ok(FieldMsg::Again { chunk, .. }) => chunk,
+            other => panic!("{tail}: {other:?}"),
+        };
+        for tail in ["", "K", "KN", "(", "AR K", "+ K", "SK"] {
+            assert_eq!(chunk(tail), None, "{tail}");
+        }
+        for tail in ["K K", "K KN", "K (", "K AR K"] {
+            assert_eq!(chunk(tail), Some('K'), "{tail}");
+        }
+        for tail in ["B", "B K", "B AR K", "B ("] {
+            assert_eq!(chunk(tail), Some('B'), "{tail}");
+        }
+    }
+
+    #[test]
+    fn tx_text_loses_its_over_but_keeps_a_final_word_k() {
+        let v = vocab();
+        let text = |end: &str| match parse(&format!("W5XXX 42 ABCDEFGH TX MOM {end}"), &v) {
+            Ok(FieldMsg::Open {
+                cmd: Command::Tx { text, .. },
+                ..
+            }) => text,
+            other => panic!("{end}: {other:?}"),
+        };
+        for (end, want) in [
+            ("BRING VITAMIN K K", "BRING VITAMIN K"),
+            ("BRING VITAMIN K (", "BRING VITAMIN K"),
+            ("BRING VITAMIN K", "BRING VITAMIN"),
+            ("HOME SUN AR K", "HOME SUN"),
+            ("HOME SUN + K", "HOME SUN"),
+            ("HOME SUN + (", "HOME SUN"),
+            ("HOME SUN (", "HOME SUN"),
+            ("HOME SUN SK", "HOME SUN"),
+            ("HOME SUN", "HOME SUN"),
+            ("LITTLE ROCK AR AR K", "LITTLE ROCK AR"),
+            ("BACK IN SK I AM K", "BACK IN SK I AM"),
+            ("A ( B K", "A ( B"),
+            ("K K", "K"),
+        ] {
+            assert_eq!(text(end), want, "{end}");
+        }
+        assert_eq!(
+            parse("W5XXX 42 ABCDEFGH TX MOM AR K", &v),
+            Err(ParseError::EmptyMessage)
+        );
+    }
+
+    #[test]
+    fn kn_and_doubled_overs_end_every_command() {
+        let v = vocab();
+        for end in ["", "K", "(", "KN", "AR K", "+ K", "K K", "KN K", "SK"] {
+            assert!(
+                matches!(
+                    parse(&format!("OK 43 ABCDEFGH {end}"), &v),
+                    Ok(FieldMsg::Commit { .. })
+                ),
+                "OK {end}"
+            );
+            assert!(
+                matches!(
+                    parse(&format!("NO 45 ABCDEFGH {end}"), &v),
+                    Ok(FieldMsg::Abort { .. })
+                ),
+                "NO {end}"
+            );
+            assert!(
+                matches!(
+                    parse(&format!("W5XXX 44 ABCDEFGH RX {end}"), &v),
+                    Ok(FieldMsg::Open {
+                        cmd: Command::Rx,
+                        ..
+                    })
+                ),
+                "RX {end}"
+            );
+            assert!(
+                matches!(
+                    parse(&format!("W5XXX 44 ABCDEFGH WX DL88 {end}"), &v),
+                    Ok(FieldMsg::Open {
+                        cmd: Command::Wx { place: Some(_) },
+                        ..
+                    })
+                ),
+                "WX {end}"
+            );
+        }
+        // Words after the over are not an over.
+        assert_eq!(
+            parse("OK 43 ABCDEFGH K TU", &v),
+            Err(ParseError::TrailingGarbage("K TU".into()))
+        );
+        // A code whose last letter a long gap split off, then the over.
+        assert_eq!(
+            parse("OK 43 ABCDEFG K K", &v),
+            Ok(FieldMsg::Commit {
+                seq: 43,
+                code: "ABCDEFGK".into()
+            })
+        );
+        assert_eq!(parse("K (", &v), Err(ParseError::Empty));
     }
 
     #[test]

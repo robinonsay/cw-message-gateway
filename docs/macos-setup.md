@@ -261,7 +261,9 @@ every `schedule.check_minutes` (10) and before every transmission.
 receive, it stops transmitting and writes
 `~/Library/Application Support/hfnode/state/tx-inhibited` with the time and reason.
 It keeps running and logging but transmits nothing, also after a restart, until
-that file is removed. Check the radio first.
+that file is removed. Check the radio first. With `[email] alert_to` set, the node
+emails you the reason and the steps to clear it when this happens, and at each
+start while the file is there.
 
 **Updating.** Stop the node, then in `~/rust/ic7300-hf-server`: `git pull`,
 `cargo install --locked --path crates/hfnode`, copy the start-up scripts again
