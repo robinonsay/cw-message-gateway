@@ -43,7 +43,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
 | Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
-| Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks so that no more than 8 minutes pass without it (the rule allows 10); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
+| Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks (or before the first, after a long over from the field) so that no more than 8 minutes pass from one ID of the node's to its next (the rule allows 10; an ID 10 minutes old no longer counts, and the time runs from the start of the next transmission); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
 | Owner alert when the node stops transmitting (transmit inhibit) | `crates/hfnode/src/alert.rs` (email to `[email] alert_to`; the latch is in `station.rs`) |
 | Storm stand-down: no tune or transmit while thunder is forecast or warned at the station, fails closed | `[storm]` in the config, `crates/hfnode/src/storm.rs` |
 | Listening all the time (default) or in scheduled windows; radio set up again while idle | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
@@ -361,12 +361,13 @@ the air.
 | `hfnode run --config C` | **yes** | Run the node (and email `[email] alert_to` if transmitting is inhibited). |
 
 Logging goes to stderr (the journal, under systemd) at level `info`; `RUST_LOG`
-replaces that level. `hfnode` has no debug messages of its own, so `RUST_LOG=debug`
-only adds the libraries' (SMTP, IMAP, HTTP). To see every CI-V frame and how long
-each reply took, use `RUST_LOG=info,civ=trace`: `RUST_LOG=civ=trace` alone shows the
-frames but hides everything else the node logs. For the service, `sudo systemctl
-edit hfnode` and add `Environment=RUST_LOG=info,civ=trace` under `[Service]`; take
-it out again afterwards, as it logs frames every tenth of a second while keying.
+replaces that level. `hfnode` itself logs only one start-up line at debug level, so
+`RUST_LOG=debug` mostly adds the libraries' messages (SMTP, IMAP, HTTP). To see
+every CI-V frame and how long each reply took, use `RUST_LOG=info,civ=trace`:
+`RUST_LOG=civ=trace` alone shows the frames but hides everything else the node
+logs. For the service, `sudo systemctl edit hfnode` and add
+`Environment=RUST_LOG=info,civ=trace` under `[Service]`; take it out again
+afterwards, as it logs frames every tenth of a second while keying.
 
 Ctrl-C (or Ctrl-Break on Windows), or a stop from systemd or launchd, makes a
 command that has started writing to the radio stop its keyer and confirm receive

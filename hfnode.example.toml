@@ -60,8 +60,10 @@ retune_minutes = 60               # tune before a reply if the last tune is olde
 every_minutes = 60
 offset_minutes = 0
 window_minutes = 10
-# Past a window's end the node listens on only to finish a transaction begun in it:
-# while it is pending, and for up to 10 minutes after its result (for a repeated OK).
+# Past a window's end the node listens on while a transaction begun in it is
+# pending, and for up to 10 minutes after its result (for a repeated OK or AGN).
+# Meanwhile it answers anything it would in a window, a new open included, which
+# keeps it listening (and keying) longer.
 
 [email]
 smtp_host = "smtp.example.com"

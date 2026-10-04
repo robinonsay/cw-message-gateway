@@ -75,10 +75,11 @@ These hold whatever the stage or config, and are covered by unit tests:
 - **When it tunes.** At start-up, at the top of each listening window if it uses
   them, and just before a reply once the last tune is older than
   `schedule.retune_minutes` (60). A window's tune happens when the schedule opens
-  it, also if the node is still listening on from the last one. A tune at start-up
-  or at a window's top that matches is followed by `DE <node_call>`; a tune before
-  a reply is identified by the reply. Listening all the time (the default), an idle
-  node transmits nothing after its start-up tune and ID.
+  it, also if the node is still listening on from the last one (or just after, if
+  it was transmitting as the window opened). A tune at start-up or at a window's
+  top that matches is followed by `DE <node_call>`; a tune before a reply is
+  identified by the reply. Listening all the time (the default), an idle node
+  transmits nothing after its start-up tune and ID.
 - **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
   5917); the node then stays silent until its next tune. Any tuner error
   forces receive. SWR is measured at the start of every transmission. Every SWR
@@ -86,11 +87,13 @@ These hold whatever the stage or config, and are covered by unit tests:
   means none of the node's receive confirmations can be trusted.
 - **Station identification** (47 CFR 97.119(a)). In `run`, a tune that matched is
   followed by `DE <node_call>`, keyed with `17` and every transmit check above.
-  Inside a transmission `DE <node_call>` is keyed on its own between chunks, so
-  that no more than 8 minutes pass without it (the rule allows 10). A tune that
-  fails, cannot match or times out is not identified, because the node keys
-  nothing into a fault. `radio tune` and `radio cw` add no ID: there the operator
-  identifies (step 12).
+  Inside a transmission `DE <node_call>` is keyed on its own between chunks, or
+  before the first chunk after a long over from the field, so that no more than 8
+  minutes pass from one ID of the node's to its next (the rule allows 10). An ID 10
+  minutes old no longer counts: then the time runs from the start of the next
+  transmission. A tune that fails, cannot match or times out is not identified,
+  because the node keys nothing into a fault. `radio tune` and `radio cw` add no
+  ID: there the operator identifies (step 12).
 - **Transmit inhibit.** If the radio cannot be confirmed back on receive, or its
   status reads receive while there is output, the node stops transmitting and
   writes `tx-inhibited` in its state directory, with the time and the reason.
@@ -114,8 +117,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 - A command listed as not transmitting (`check`, `status`, `rx`, `setup`, `listen`)
   makes the radio transmit, or `run` transmits anything but its tune (at start-up,
   at a window start, or just before a reply), the `DE <call>` after a tune, and its
-  replies (with windows, also past a window's end while finishing a transaction
-  begun in it: a read-back or result repeated within 10 minutes).
+  replies (with windows, also past a window's end while the node still listens on,
+  logged as `window over: still listening ...`: then it answers whatever it would
+  in a window, a new open included).
 - `radio check`, or the preflight in front of any command, prints a FAIL you did not
   expect, or a value that differs from the radio's own screen.
 - SWR on the radio's own meter is above 2:1, or the SWR the node logs differs from
@@ -183,8 +187,8 @@ C=~/bench.toml
 
 On Windows, in PowerShell: `Copy-Item hfnode.example.toml ~\bench.toml` and
 `$C = "$HOME\bench.toml"`. The `hfnode` commands below then work with `$C`, with
-two changes: where a command starts with `RUST_LOG=civ=trace`, run
-`$env:RUST_LOG = "civ=trace"` first and the command without it (and
+two changes: where a command starts with `RUST_LOG=info,civ=trace`, run
+`$env:RUST_LOG = "info,civ=trace"` first and the command without it (and
 `Remove-Item Env:RUST_LOG` afterwards); and on the command line write `$HOME\...`
 where a path starts with `~/` (`~` works only inside the config file).
 
@@ -841,6 +845,16 @@ an earlier fault had stopped it.
 
 ```sh
 echo "$(date +%s) bench alert test" > ~/bench-state/tx-inhibited
+hfnode run --config $C
+```
+
+On Windows, in PowerShell, write the file this way instead: a plain `>` in Windows
+PowerShell writes UTF-16, which the node cannot read (the email would say
+`Reason: not recorded`).
+
+```powershell
+"$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) bench alert test" |
+    Set-Content -Encoding ascii "$HOME\bench-state\tx-inhibited"
 hfnode run --config $C
 ```
 

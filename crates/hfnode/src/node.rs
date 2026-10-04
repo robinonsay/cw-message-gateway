@@ -12,7 +12,7 @@
 //! words.
 
 use crate::audio::{Block, BlockReceiver};
-use crate::config::Config;
+use crate::config::{Config, Schedule};
 use crate::gateway::{self, filter, LiveServices};
 use crate::inbox::Inbox;
 use crate::places::LastPlaces;
@@ -325,6 +325,24 @@ fn held_for<R: Rig + 'static>(
     }
 }
 
+/// The listening window `unix_secs` falls in, if any, as the Unix minute it opened:
+/// the same all through one window and another in the next, so that a window that
+/// opens while the node is transmitting (when no audio is kept) still starts.
+/// Listening all the time is one window.
+fn window_at(s: &Schedule, unix_secs: u64) -> Option<u64> {
+    if s.always {
+        return Some(0);
+    }
+    if !s.is_open(unix_secs) {
+        return None;
+    }
+    // Minutes into the window, counted as `Schedule::is_open` does.
+    let minute = (unix_secs / 60) % (24 * 60);
+    let period = u64::from(s.every_minutes.max(1));
+    let into = (minute + period * 24 * 60 - u64::from(s.offset_minutes)) % period;
+    Some((unix_secs / 60).saturating_sub(into))
+}
+
 /// Seconds from `since` to `now` on the node's clock. A clock set back (a time
 /// sync after boot) counts as a long time, so that what is due is not put off.
 fn secs_since(since: u64, now: u64) -> u64 {
@@ -374,9 +392,10 @@ pub fn run_with_clock<R: Rig + 'static>(
     let mut max_idle: u64 = 0;
     let mut guard = TxGuard::default();
     let mut was_open = false;
-    // Whether the schedule was open at the last block: a window starts when it
-    // opens, also while the session still holds the last one open.
-    let mut was_scheduled = false;
+    // The window the schedule was in at the last block kept: a window starts when
+    // the schedule opens it, also while the session still holds the last one open,
+    // and also if it opened while the node was transmitting.
+    let mut was_scheduled: Option<u64> = None;
     // What the node listens for past the end of its window, as last logged.
     let mut overtime: Option<&str> = None;
     let check_secs = u64::from(cfg.schedule.check_minutes) * 60;
@@ -401,11 +420,12 @@ pub fn run_with_clock<R: Rig + 'static>(
             continue;
         }
         let now = Instant::now();
-        let scheduled = cfg.schedule.is_open(clock());
+        let window = window_at(&cfg.schedule, clock());
+        let scheduled = window.is_some();
         let hold = held_for(session, station, now);
         let open = listening(scheduled, hold.is_some(), was_open, &decoder, &events);
-        let starting = scheduled && !was_scheduled;
-        was_scheduled = scheduled;
+        let starting = scheduled && window != was_scheduled;
+        was_scheduled = window;
         // Tell the owner why the node still listens, and may key, outside its
         // schedule: once, and again whenever that changes.
         let waiting = if open && !scheduled { hold } else { None };
@@ -619,6 +639,9 @@ mod tests {
         /// The tuner cannot match the antenna: the station is locked out from the
         /// window's start and keys nothing.
         tuner_bypassed: bool,
+        /// The next window starts, straight from the first, once the radio has
+        /// accepted this many keyer pieces: while it transmits.
+        next_window_at_piece: Option<usize>,
     }
 
     /// Unix time at the top of an hour: inside the default window (minutes 0-9).
@@ -655,11 +678,10 @@ mod tests {
             name = "MOM"
             address = "mom@example.com"
             "#,
-            schedule = match opts.window_ends_ms {
-                Some(_) => {
-                    "always = false\n            every_minutes = 60\n            window_minutes = 10"
-                }
-                None => "always = true",
+            schedule = if opts.window_ends_ms.is_some() || opts.next_window_at_piece.is_some() {
+                "always = false\n            every_minutes = 60\n            window_minutes = 10"
+            } else {
+                "always = true"
             },
         ))
         .unwrap();
@@ -703,7 +725,8 @@ mod tests {
                     (Some(b), _) if i >= b => 1,
                     _ => 0,
                 };
-                set_phase.store(p, Ordering::SeqCst);
+                // The schedule only moves on.
+                set_phase.fetch_max(p, Ordering::SeqCst);
                 // Paced by the node, not the wall clock: the next block goes out
                 // only once the node has taken the last, and the operator's audio
                 // stands still while the radio tunes or transmits, as the silence
@@ -724,6 +747,19 @@ mod tests {
                 }
             }
         });
+        if let Some(n) = opts.next_window_at_piece {
+            let (radio, phase) = (Arc::downgrade(&station.rig()), phase.clone());
+            thread::spawn(move || {
+                while let Some(r) = radio.upgrade() {
+                    if r.lock().unwrap().sent.len() >= n {
+                        phase.store(2, Ordering::SeqCst);
+                        break;
+                    }
+                    drop(r);
+                    thread::sleep(Duration::from_micros(200));
+                }
+            });
+        }
         let mut sc = session_config(&cfg);
         if let Some(w) = opts.again_window {
             sc.again_window = w;
@@ -944,6 +980,33 @@ mod tests {
     }
 
     #[test]
+    fn a_window_that_opens_while_the_node_transmits_still_starts() {
+        let k = Keyer::new(8000, 610.0, 18.0);
+        let mut audio = k.render(&format!("W5XXX 42 {} TX MOM HI K", code(42)), 3000.0);
+        audio.extend(ms(cw::duration_ms("R 42 TX MOM HI ? DE N0DE K", 18) + 6000));
+        audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+        audio.extend(ms(cw::duration_ms("SENT 43 DE N0DE K", 18) + 6000));
+        audio.extend(ms(2000));
+        let h = run_node_with(
+            noisy(audio, &k, 15.0),
+            Opts {
+                // The window's ID, then the read-back: the next window opens while it
+                // is keyed, with no audio kept in between.
+                next_window_at_piece: Some(2),
+                ..Opts::default()
+            },
+        );
+        // The new window's tune and ID, then the transaction goes on.
+        assert_eq!(
+            h.keyed,
+            "DE N0DE R 42 TX MOM HI ? DE N0DE K DE N0DE SENT 43 DE N0DE K"
+        );
+        // And no tune before the SENT: the window's is recent.
+        assert_eq!(h.tunes, 2, "{}", h.rx_log);
+        assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
+    }
+
+    #[test]
     fn listening_ends_once_the_result_cannot_be_repeated() {
         let (audio, ends) = late_commit_and_repeat();
         let h = run_node_with(
@@ -1036,6 +1099,38 @@ mod tests {
         assert_eq!(over_end(&ev("TX MOM K SEE ")), None);
         assert_eq!(over_end(&ev("TX MOM K * ")), None);
         assert_eq!(over_end(&ev("")), None);
+    }
+
+    #[test]
+    fn each_window_is_told_apart() {
+        let mut s = Schedule {
+            always: false,
+            every_minutes: 15,
+            window_minutes: 10,
+            ..Schedule::default()
+        };
+        let at = |minute: u64| WINDOW_OPEN + minute * 60;
+        assert_eq!(window_at(&s, at(0)), Some(WINDOW_OPEN / 60));
+        assert_eq!(window_at(&s, at(9) + 59), Some(WINDOW_OPEN / 60));
+        assert_eq!(window_at(&s, at(10)), None);
+        assert_eq!(window_at(&s, at(16)), Some(WINDOW_OPEN / 60 + 15));
+        // A window open all through its period: still a new one each period.
+        s.window_minutes = 15;
+        assert_eq!(window_at(&s, at(14)), Some(WINDOW_OPEN / 60));
+        assert_eq!(window_at(&s, at(15)), Some(WINDOW_OPEN / 60 + 15));
+        // Offset past the top of the hour, and a window that began the day before.
+        s.offset_minutes = 5;
+        assert_eq!(window_at(&s, at(4)), Some(WINDOW_OPEN / 60 - 10));
+        assert_eq!(window_at(&s, at(5)), Some(WINDOW_OPEN / 60 + 5));
+        let midnight = 1_700_006_400;
+        s.every_minutes = 60;
+        s.offset_minutes = 50;
+        s.window_minutes = 20;
+        assert_eq!(window_at(&s, midnight + 5 * 60), Some(midnight / 60 - 10));
+        // Listening all the time is one window.
+        s.always = true;
+        assert_eq!(window_at(&s, at(0)), window_at(&s, at(600)));
+        assert!(window_at(&s, 0).is_some());
     }
 
     #[test]

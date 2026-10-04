@@ -44,8 +44,10 @@
 //!   reply is identified by the reply that follows it.
 //! - **Identification** (47 CFR 97.119(a)). Every transmission the session builds
 //!   ends with `DE <call> K`; inside a long one this layer keys `DE <call>` on its
-//!   own between chunks, so that no more than [`ID_INTERVAL`] passes from the start
-//!   of a transmission, or from its last ID, to the next ID.
+//!   own between chunks (or before the first, after a long over from the field), so
+//!   that no more than [`ID_INTERVAL`] passes from the node's last ID to its next.
+//!   An ID 10 minutes old or more no longer counts: then the time runs from the
+//!   start of the transmission.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
 //! - **Storm stand-down.** With a [`StormHold`] attached, nothing is tuned or keyed
@@ -94,14 +96,16 @@ pub struct StationConfig {
     /// `DE <node_call>`, keyed on its own after the tune when the node starts listening, and inside long
     /// transmissions.
     pub station_id: String,
-    /// Most time from the start of a transmission, or from its last ID, to the end
-    /// of the next ID: [`ID_INTERVAL`] (divided by the time scale in tests).
+    /// Most time from the node's last ID (or the start of a transmission, if that ID
+    /// is a quarter more than this old) to the end of the next ID: [`ID_INTERVAL`]
+    /// (divided by the time scale in tests).
     pub id_interval: Duration,
 }
 
-/// Longest stretch of one transmission without the node's callsign: well inside
-/// the 10 minutes of 47 CFR 97.119(a), so that the previous over's `DE <call> K`
-/// (normally seconds before) still falls within 10 minutes of the next ID.
+/// Longest stretch without the node's callsign, from its last ID (the previous
+/// over's `DE <call> K`, or an ID inside it) to the end of the next: well inside
+/// the 10 minutes of 47 CFR 97.119(a). Measured from the start of a transmission
+/// instead once the last ID is 10 minutes old, from an earlier exchange.
 pub const ID_INTERVAL: Duration = Duration::from_secs(8 * 60);
 
 impl StationConfig {
@@ -381,6 +385,9 @@ pub struct Station<R: Rig + 'static> {
     tuner_ran: bool,
     /// SWR has been measured on the current transmission.
     swr_checked: bool,
+    /// When the node last identified: the start of the last piece of a
+    /// transmission that ended with its ID, or of an ID keyed inside one.
+    last_id: Option<Instant>,
     health_log: Option<PathBuf>,
     /// While this says so, nothing is tuned or keyed.
     storm: Option<Arc<StormHold>>,
@@ -421,6 +428,7 @@ impl<R: Rig + 'static> Station<R> {
             swr_lockout: false,
             tuner_ran: false,
             swr_checked: false,
+            last_id: None,
             health_log,
             storm: None,
         };
@@ -729,8 +737,13 @@ impl<R: Rig + 'static> Station<R> {
         // Keyer-sized like any text: 17 takes "Up to 30 characters" (manual text
         // line 9711), and node_call is not limited in length.
         let id = split_for_keyer(&self.cfg.station_id);
-        // The start of the transmission, then the start of each ID keyed in it.
-        let mut since_id = Instant::now();
+        // The node's last ID if it is recent enough to be part of this exchange (the
+        // last over's `DE <call> K`: the field operator's over since may have been
+        // long, and the read-back of it as long again), and then an ID may be due
+        // before the first chunk too; otherwise the start of the transmission. Then
+        // the start of each ID keyed in it.
+        let carried = self.last_id.filter(|t| t.elapsed() < self.id_carry());
+        let mut since_id = carried.unwrap_or_else(Instant::now);
         for (si, segment) in tx.segments.iter().enumerate() {
             if si > 0 {
                 thread::sleep(self.cfg.segment_pause);
@@ -738,7 +751,7 @@ impl<R: Rig + 'static> Station<R> {
             let pieces = split_for_keyer(segment);
             let ends_with_id = si + 1 == tx.segments.len() && self.ends_with_id(segment);
             for (pi, piece) in pieces.iter().enumerate() {
-                if si > 0 || pi > 0 {
+                if si > 0 || pi > 0 || carried.is_some() {
                     // At a chunk boundary look ahead over the whole chunk, so the ID
                     // falls between chunks; inside one too long for that, over the
                     // next keyer piece.
@@ -756,13 +769,25 @@ impl<R: Rig + 'static> Station<R> {
                         for p in &id {
                             self.key_piece(p)?;
                         }
+                        self.last_id = Some(since_id);
                         thread::sleep(self.cfg.segment_pause);
                     }
                 }
+                let at = Instant::now();
                 self.key_piece(piece)?;
+                if ends_with_id && pi + 1 == pieces.len() {
+                    self.last_id = Some(at);
+                }
             }
         }
         Ok(())
+    }
+
+    /// How long the node's last ID still counts for its next transmission: the 10
+    /// minutes of 47 CFR 97.119(a) at the default [`ID_INTERVAL`] (and scaled with it
+    /// in tests). An older one was in an earlier exchange.
+    fn id_carry(&self) -> Duration {
+        self.cfg.id_interval * 5 / 4
     }
 
     /// Whether `text` ends with the station ID as a whole word, as an over does
@@ -1994,11 +2019,14 @@ mod tests {
 
     /// Checks one keyed transmission: the text without the IDs is `segments`, each ID
     /// is a piece of its own after a chunk's `= <letter>` (or inside a chunk too long
-    /// for that), and no stretch from the start (or an ID) to the next ID's end is
-    /// longer than `interval`.
+    /// for that), and no stretch from `start` (or an ID) to the next ID's end is
+    /// longer than `interval`. `start` is the start of the transmission, or with
+    /// `carried` the node's last ID before it, which may make one due before the
+    /// first piece.
     fn check_ids(
         keyed: &[(Instant, String)],
         start: Instant,
+        carried: bool,
         segments: &[String],
         interval: Duration,
         dot: Duration,
@@ -2025,7 +2053,7 @@ mod tests {
             }
             if piece == "DE N0DE" {
                 ids += 1;
-                assert!(!last && i > 0, "{keyed:?}");
+                assert!(!last && (i > 0 || carried), "{keyed:?}");
             }
         }
         assert!(keyed.last().unwrap().1.ends_with("DE N0DE K"));
@@ -2047,16 +2075,30 @@ mod tests {
             read_ids: Vec::new(),
         };
         let dot = st.rig().lock().unwrap().dot_duration().unwrap();
-        // The whole transmission, then again as AGN repeats it: the same rule.
+        // The whole transmission, then again as AGN repeats it: the same rule, from
+        // the ID at the end of the first.
+        let mut last_id = None;
         for _ in 0..2 {
             st.rig().lock().unwrap().sent_at.clear();
-            let start = Instant::now();
+            let start = last_id.unwrap_or_else(Instant::now);
             st.transmit(&t).unwrap();
             let keyed = st.rig().lock().unwrap().sent_at.clone();
-            let ids = check_ids(&keyed, start, &segments, c.id_interval, dot);
+            let ids = check_ids(
+                &keyed,
+                start,
+                last_id.is_some(),
+                &segments,
+                c.id_interval,
+                dot,
+            );
+            last_id = Some(keyed.last().unwrap().0);
             assert!(ids >= 1, "{keyed:?}");
-            // Between chunks: after a chunk's letter.
-            for (i, _) in keyed.iter().enumerate().filter(|(_, k)| k.1 == "DE N0DE") {
+            // Between chunks: after a chunk's letter (or before the first chunk).
+            for (i, _) in keyed
+                .iter()
+                .enumerate()
+                .filter(|(i, k)| k.1 == "DE N0DE" && *i > 0)
+            {
                 let prev = &keyed[i - 1].1;
                 assert!(
                     prev.chars().nth_back(1) == Some(' ') && prev.contains(" = "),
@@ -2083,9 +2125,52 @@ mod tests {
         st.transmit(&t).unwrap();
         let keyed = st.rig().lock().unwrap().sent_at.clone();
         assert!(
-            check_ids(&keyed, start, &[segment], c.id_interval, dot) >= 1,
+            check_ids(&keyed, start, false, &[segment], c.id_interval, dot) >= 1,
             "{keyed:?}"
         );
+    }
+
+    #[test]
+    fn the_last_over_s_id_counts_toward_the_next_transmission() {
+        let station = |interval| {
+            let mut c = cfg();
+            c.id_interval = interval;
+            let st = Station::new(Radio::new(fast_rig()), c, None);
+            st.configure().unwrap();
+            st
+        };
+        let interval = Duration::from_secs(6);
+        let mut st = station(interval);
+        let dot = st.rig().lock().unwrap().dot_duration().unwrap();
+        let read_back = format!("R 44 TX MOM {} ? DE N0DE K", ["TEST"; 9].join(" "));
+        // An over, then the field operator's long one (the sleep), then the read-back
+        // of it: within the interval on its own, but not from the last over's ID.
+        st.transmit(&tx(&["SENT 43 DE N0DE K"])).unwrap();
+        let over_id = st.rig().lock().unwrap().sent_at.last().unwrap().0;
+        thread::sleep(Duration::from_millis(3500));
+        st.rig().lock().unwrap().sent_at.clear();
+        st.transmit(&tx(&[&read_back])).unwrap();
+        let keyed = st.rig().lock().unwrap().sent_at.clone();
+        assert_eq!(
+            keyed[0].1, "DE N0DE",
+            "the read-back opens with the ID: {keyed:?}"
+        );
+        assert_eq!(
+            check_ids(&keyed, over_id, true, &[read_back], interval, dot),
+            1,
+            "{keyed:?}"
+        );
+        // An ID too old to count, from an earlier exchange: the reply as it is.
+        let interval = Duration::from_secs(1);
+        let mut st = station(interval);
+        st.transmit(&tx(&["SENT 43 DE N0DE K"])).unwrap();
+        thread::sleep(interval * 5 / 4);
+        st.rig().lock().unwrap().sent_at.clear();
+        let reply = "R 44 TX MOM HI ? DE N0DE K";
+        st.transmit(&tx(&[reply])).unwrap();
+        let keyed = st.rig().lock().unwrap().sent_at.clone();
+        let text: Vec<&str> = keyed.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(text, [reply]);
     }
 
     #[test]

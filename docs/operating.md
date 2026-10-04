@@ -4,16 +4,18 @@ How to use the node from the field: what to carry, what to send, and what the no
 sends back. Examples use field callsign `W5XXX` and node callsign `N0CALL`; every
 reply ends with `DE N0CALL K`. The node also sends `DE N0CALL` on its own after its
 tuning carrier when it starts listening (at start-up, or at the start of a
-listening window) and between two chunks of a long readout: that is its station
-identification.
+listening window), between two chunks of a long readout, and before a reply that
+would otherwise end more than 8 minutes after its last `DE N0CALL` (the read-back
+of a long `TX`, say): that is its station identification, not part of the text.
 
 ## Before you leave
 
 - **Frequency.** Know the node's frequency. By default the node listens **all the
   time**. If it has been set to listen only in windows (`[schedule] always = false`
   in the node's config, for example the first 10 minutes of every hour, UTC), know
-  them too: outside a window it does not decode or transmit at all, except to finish
-  a transaction you started in one (see [Timing](#timing)).
+  them too: outside a window it does not decode or transmit at all, except while it
+  is still finishing a transaction you started in one, when it answers whatever it
+  would in a window (see [Timing](#timing)). Start new requests inside a window.
 - **Contacts.** Know the contact names configured at home (for example `MOM`,
   `BOB`). You can only send to those names.
 - **Where you will be, for weather.** `WX` gives the forecast for the place you
@@ -166,7 +168,7 @@ Node:  NR 1 FM MOM DRIVE SAFE CALL WHEN YOU CAN NR 2 FM BOB THE = A
   again; use `AGN` (below) if you missed part of them.
 - A single message too long for 26 chunks on its own is cut off and ends
   `TRUNCATED`. It counts as read: the rest of it cannot be had over the air.
-- A readout longer than about 7 minutes has `DE N0CALL` on its own between two
+- A readout longer than about 7½ minutes has `DE N0CALL` on its own between two
   chunks (with the usual pause on both sides, no letter, no `K`). It is the node's
   station identification, not part of the text: copy around it. Chunk letters are
   unaffected, and `AGN` for the whole readout may place it between different
@@ -236,11 +238,11 @@ The node forgets the request. Cross off both lines and start over on the next tw
 
 - A `NO` without a line and its code (`NO K`) is ignored, so nobody who heard your
   exchange can cancel it.
-- If you miss the `R NO`, send exactly the same `NO` again. While the node is still
-  listening (inside the window, or past it while it is finishing your transaction)
-  it is answered again, free, up to 3 times within 10 minutes, until you use a
-  later line. If no `R NO` comes back, nothing is sent anyway: a request is only
-  acted on after your `OK`.
+- If you miss the `R NO`, send exactly the same `NO` again: it is answered again,
+  free, up to 3 times within 10 minutes, until you use a later line. If the node
+  uses listening windows, this works only inside the window: past its end the node
+  stops listening once it has sent `R NO`, so a repeat gets silence. If no `R NO`
+  comes back, nothing is sent anyway: a request is only acted on after your `OK`.
 - A `NO` when nothing is pending (it timed out, or your `OK` already went through)
   gets silence and still uses its line. If you sent `OK` and missed the result,
   repeat the `OK` instead.
@@ -279,8 +281,8 @@ The node never answers anything it cannot decode or authenticate. There is no
 - a contact name, weather preset number or grid square the node does not know or
   that is not valid (check it against your table);
 - you are not close enough to the node's frequency, or outside a listening window
-  if the node uses them (past a window's end it only listens while it is finishing
-  a transaction you started in it);
+  if the node uses them (past a window's end it listens on only while it is still
+  finishing a transaction, see [Timing](#timing));
 - the node measured a high SWR, or no output, or its tuner could not match the
   antenna, and it has stopped transmitting until it next tunes: within an hour by
   default (`schedule.retune_minutes`), or at the next window. If you heard its
@@ -338,12 +340,13 @@ forecast for the node before a trip in storm season.
   which transmits a carrier for a few seconds, and then sends `DE N0CALL`: wait for
   that before calling. If you hear the carrier but no `DE N0CALL`, the tune failed
   and the node may stay silent until its next tune.
-- Past the end of a window the node keeps listening only to finish a transaction
-  you started in it: while it is pending (until you commit, abort, or the 10
-  minutes run out), and then for up to 10 minutes after the result, so that a
-  repeated `OK` or an `AGN` still gets it (not if it cannot transmit). After that,
-  or after `R NO`, it is silent until the next window. Start new requests inside a
-  window.
+- Past the end of a window the node keeps listening while it is finishing a
+  transaction you started in it: while it is pending (until you commit, abort, or
+  the 10 minutes run out), and then for up to 10 minutes after the result, so that
+  a repeated `OK` or an `AGN` still gets it (not if it cannot transmit). Meanwhile
+  it answers anything it would in a window, a new request included, which keeps it
+  listening longer. Once nothing holds it, or after `R NO`, it is silent until the
+  next window. Start new requests inside a window.
 - Wait for the node's reply before sending again. The reply starts a few seconds
   after you stop (it waits for about 3 seconds of silence first, and a tune adds a
   few more).

@@ -184,8 +184,21 @@ fn smtp(e: &Email, to: &str) -> Result<Deliver> {
 }
 
 /// The alert for `n`, from node `call` whose config file is `config`, sent at
-/// `now` (Unix time): (subject, body), plain text.
+/// `now` (Unix time): (subject, body), plain text, with the steps for this computer.
 pub fn message(call: &str, config: &Path, n: &InhibitNotice, now: u64) -> (String, String) {
+    message_on(std::env::consts::OS, call, config, n, now)
+}
+
+/// [`message`], with the steps for `os` (as [`std::env::consts::OS`] names it): a
+/// Mac or Windows PC runs the node as its owner, from the start-up scripts in
+/// `deploy/`, and anything else as the Pi does, under systemd as user `hfnode`.
+fn message_on(
+    os: &str,
+    call: &str,
+    config: &Path,
+    n: &InhibitNotice,
+    now: u64,
+) -> (String, String) {
     let when = n.at.map_or_else(|| "not recorded".to_string(), utc);
     let reason = if n.reason.is_empty() {
         "not recorded"
@@ -226,27 +239,65 @@ pub fn message(call: &str, config: &Path, n: &InhibitNotice, now: u64) -> (Strin
         },
         String::new(),
         "What to do:".into(),
-        "1. Stop the node: sudo systemctl stop hfnode".into(),
+    ]);
+    let windows = os == "windows";
+    let config = quoted(config, windows);
+    let file = n.file.as_deref().map(|f| quoted(f, windows));
+    // What differs: how to stop and start the node, and the commands that check the
+    // radio and read and delete the file.
+    let (stop, check, [cat, rm], start): (&[&str], _, _, &[&str]) = match os {
+        "macos" => (
+            &[
+                "1. Stop the node: Ctrl-C in its Terminal window, or for the launchd",
+                "   agent: launchctl bootout gui/$(id -u)/io.github.robinonsay.hfnode",
+            ],
+            "hfnode radio",
+            ["cat", "rm"],
+            &[
+                "4. Start the node again: double-click hfnode.command in its folder, or",
+                "   for the agent, launchctl bootstrap as in section 7 of docs/macos-setup.md.",
+            ],
+        ),
+        "windows" => (
+            &[
+                "1. Stop the node: Ctrl-C in its window (or deploy\\windows\\stop-hfnode.ps1",
+                "   as in section 8 of docs/windows-setup.md).",
+            ],
+            "hfnode radio",
+            ["Get-Content", "Remove-Item"],
+            &[
+                "4. Start the node again: close its old window, then in PowerShell",
+                "   Start-ScheduledTask -TaskName hfnode",
+            ],
+        ),
+        // The state directory is readable only by the hfnode user.
+        _ => (
+            &["1. Stop the node: sudo systemctl stop hfnode"],
+            "sudo -u hfnode hfnode radio",
+            ["sudo cat", "sudo rm"],
+            &[
+                "4. Start the node: sudo systemctl start hfnode",
+                "   (if systemd gave up on it: sudo systemctl reset-failed hfnode first)",
+            ],
+        ),
+    };
+    lines.extend(stop.iter().map(|l| l.to_string()));
+    lines.extend([
         "2. Check the radio: power, the USB cable, the TX indicator off, nothing".into(),
         "   else keying it. Then run the read-only check; it must pass:".into(),
-        format!(
-            "   sudo -u hfnode hfnode radio --config {} check",
-            config.display()
-        ),
+        format!("   {check} --config {config} check"),
     ]);
-    match &n.file {
+    match &file {
         Some(f) => lines.extend([
             "3. Read the reason, then delete the file (deleting it while the node".into(),
             "   runs changes nothing):".into(),
-            // The state directory is readable only by the hfnode user.
-            format!("   sudo cat {}", f.display()),
-            format!("   sudo rm {}", f.display()),
+            format!("   {cat} {f}"),
+            format!("   {rm} {f}"),
         ]),
         None => lines.push("3. There is no file to delete.".into()),
     }
+    lines.extend(start.iter().map(|l| l.to_string()));
     lines.extend([
-        "4. Start the node: sudo systemctl start hfnode".into(),
-        "   (if systemd gave up on it: sudo systemctl reset-failed hfnode first)".into(),
         String::new(),
         "Do not clear the inhibit before you know what happened.".into(),
         String::new(),
@@ -254,6 +305,23 @@ pub fn message(call: &str, config: &Path, n: &InhibitNotice, now: u64) -> (Strin
         "contact addresses would be queued as a message for the field operator.".into(),
     ]);
     (subject, lines.join("\n") + "\n")
+}
+
+/// `path` as one word in the owner's shell (PowerShell on Windows, else sh): as it
+/// is if plain, otherwise in single quotes, so that a space (`Application Support`)
+/// does not split it.
+fn quoted(path: &Path, windows: bool) -> String {
+    let p = path.display().to_string();
+    let plain = !p.is_empty()
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:".contains(c) || (windows && c == '\\'));
+    if plain {
+        p
+    } else if windows {
+        format!("'{}'", p.replace('\'', "''"))
+    } else {
+        format!("'{}'", p.replace('\'', r"'\''"))
+    }
 }
 
 /// `YYYY-MM-DD HH:MM:SS UTC`.
@@ -303,11 +371,26 @@ mod tests {
         assert_eq!(utc(4_102_444_799), "2099-12-31 23:59:59 UTC");
     }
 
-    /// `message`, with every line short enough for any mail reader.
-    fn plain(n: &InhibitNotice, now: u64) -> (String, String) {
-        let (subject, body) = message("N0CALL", Path::new(CONFIG), n, now);
+    /// `message` on `os`, with every line short enough for any mail reader.
+    fn plain_on(os: &str, n: &InhibitNotice, now: u64) -> (String, String) {
+        let (subject, body) = message_on(os, "N0CALL", Path::new(CONFIG), n, now);
         assert!(body.lines().all(|l| l.len() <= 78), "{body}");
         (subject, body)
+    }
+
+    /// On a Pi (or any Linux).
+    fn plain(n: &InhibitNotice, now: u64) -> (String, String) {
+        plain_on("linux", n, now)
+    }
+
+    /// Whether `steps` are all in `body`, in that order.
+    fn in_order(body: &str, steps: &[&str]) {
+        let mut from = 0;
+        for step in steps {
+            let at = body[from..].find(step);
+            assert!(at.is_some(), "{step:?} missing or out of order in:\n{body}");
+            from += at.unwrap() + step.len();
+        }
     }
 
     #[test]
@@ -324,18 +407,99 @@ mod tests {
             assert!(body.contains(want), "{want:?} missing from:\n{body}");
         }
         // The steps, in the order to take them.
-        let mut from = 0;
-        for step in [
-            "sudo systemctl stop hfnode",
-            "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check",
-            "sudo cat /var/lib/hfnode/tx-inhibited",
-            "sudo rm /var/lib/hfnode/tx-inhibited",
-            "sudo systemctl start hfnode",
-        ] {
-            let at = body[from..].find(step);
-            assert!(at.is_some(), "{step:?} missing or out of order in:\n{body}");
-            from += at.unwrap() + step.len();
+        in_order(
+            &body,
+            &[
+                "sudo systemctl stop hfnode",
+                "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check",
+                "sudo cat /var/lib/hfnode/tx-inhibited",
+                "sudo rm /var/lib/hfnode/tx-inhibited",
+                "sudo systemctl start hfnode",
+            ],
+        );
+        // This computer's steps.
+        assert_eq!(
+            message("N0CALL", Path::new(CONFIG), &latched(), 1_791_120_400),
+            message_on(
+                std::env::consts::OS,
+                "N0CALL",
+                Path::new(CONFIG),
+                &latched(),
+                1_791_120_400
+            )
+        );
+    }
+
+    #[test]
+    fn a_mac_or_windows_pc_gets_its_own_steps() {
+        let (_, body) = plain_on("macos", &latched(), 0);
+        in_order(
+            &body,
+            &[
+                "Ctrl-C in its Terminal window",
+                "launchctl bootout gui/$(id -u)/io.github.robinonsay.hfnode",
+                "\n   hfnode radio --config /etc/hfnode/hfnode.toml check",
+                "\n   cat /var/lib/hfnode/tx-inhibited",
+                "\n   rm /var/lib/hfnode/tx-inhibited",
+                "double-click hfnode.command",
+            ],
+        );
+        let n = InhibitNotice {
+            file: Some(r"C:\Users\Robin\AppData\Local\hfnode\state\tx-inhibited".into()),
+            ..latched()
+        };
+        let (_, body) = plain_on("windows", &n, 0);
+        in_order(
+            &body,
+            &[
+                "Ctrl-C in its window",
+                r"deploy\windows\stop-hfnode.ps1",
+                "\n   hfnode radio --config /etc/hfnode/hfnode.toml check",
+                r"Get-Content C:\Users\Robin\AppData\Local\hfnode\state\tx-inhibited",
+                r"Remove-Item C:\Users\Robin\AppData\Local\hfnode\state\tx-inhibited",
+                "Start-ScheduledTask -TaskName hfnode",
+            ],
+        );
+        for body in [plain_on("macos", &latched(), 0).1, body] {
+            for linux in ["sudo", "systemctl"] {
+                assert!(!body.contains(linux), "{linux:?} in:\n{body}");
+            }
         }
+    }
+
+    #[test]
+    fn paths_with_spaces_are_quoted() {
+        let mac = "/Users/robin/Library/Application Support/hfnode";
+        let n = InhibitNotice {
+            file: Some(format!("{mac}/state/tx-inhibited").into()),
+            ..latched()
+        };
+        let config = format!("{mac}/hfnode.toml");
+        let (_, body) = message_on("macos", "N0CALL", Path::new(&config), &n, 0);
+        in_order(
+            &body,
+            &[
+                &format!("hfnode radio --config '{mac}/hfnode.toml' check"),
+                &format!("cat '{mac}/state/tx-inhibited'"),
+                &format!("rm '{mac}/state/tx-inhibited'"),
+            ],
+        );
+        let (_, body) = message_on("linux", "N0CALL", Path::new(&config), &n, 0);
+        assert!(
+            body.contains(&format!("sudo rm '{mac}/state/tx-inhibited'")),
+            "{body}"
+        );
+        // A quote in the path, in each shell.
+        assert_eq!(quoted(Path::new("/a/it's"), false), r"'/a/it'\''s'");
+        assert_eq!(
+            quoted(Path::new(r"C:\Users\O'Neil Smith"), true),
+            r"'C:\Users\O''Neil Smith'"
+        );
+        assert_eq!(
+            quoted(Path::new(r"C:\Users\Robin"), true),
+            r"C:\Users\Robin"
+        );
+        assert_eq!(quoted(Path::new(r"/a\b"), false), r"'/a\b'");
     }
 
     #[test]
