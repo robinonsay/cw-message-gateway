@@ -177,6 +177,10 @@ pub struct Email {
     /// `gateway::email::authenticated`.
     #[serde(default)]
     pub authserv_id: Option<String>,
+    /// Where to email an alert when the node stops transmitting (the transmit
+    /// inhibit, see `alert`). Unset, the inhibit is only logged.
+    #[serde(default)]
+    pub alert_to: Option<String>,
 }
 
 /// Someone the field operator can message by name, reached by iMessage, a text from
@@ -931,6 +935,16 @@ impl Config {
             }
             check_tag("imessage", &im.tag)?;
         }
+        if let Some(to) = self.email.as_ref().and_then(|e| e.alert_to.as_deref()) {
+            // A bare address, as for contacts.
+            let bare = to.parse::<lettre::Address>().is_ok()
+                && to
+                    .parse::<lettre::message::Mailbox>()
+                    .is_ok_and(|m| m.name.is_none());
+            if !bare {
+                bail!("email.alert_to {to:?} is not an email address");
+            }
+        }
         if let Some(w) = &self.weather {
             if !protocol::is_grid(&w.default_grid) {
                 bail!(
@@ -1163,6 +1177,10 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.station.civ_address, 0x94);
+        assert_eq!(
+            cfg.email.unwrap().alert_to.as_deref(),
+            Some("you@example.com")
+        );
         // The example leaves the audio device to the per-system default, so the same
         // file works on Linux, macOS and Windows.
         assert_eq!(cfg.audio.device, default_audio_device());
@@ -1473,6 +1491,22 @@ mod tests {
         assert!(w.contains("never used for TX while phone is set"), "{w}");
         assert!(w.contains("DAD can reply only within reply_hours"), "{w}");
         assert!(w.contains("email.authserv_id"), "{w}");
+    }
+
+    #[test]
+    fn rejects_a_bad_alert_address() {
+        for (to, ok) in [
+            (None, true),
+            (Some("robin@example.com"), true),
+            (Some("5551234567@vtext.com"), true),
+            (Some("robin at example.com"), false),
+            (Some("Robin <robin@example.com>"), false),
+            (Some(""), false),
+        ] {
+            let mut cfg = example();
+            cfg.email.as_mut().unwrap().alert_to = to.map(String::from);
+            assert_eq!(cfg.validate().is_ok(), ok, "{to:?}");
+        }
     }
 
     #[test]

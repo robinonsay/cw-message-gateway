@@ -45,6 +45,10 @@ bandwidth_hz = 150
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
                                   # Mac: "~/Library/Application Support/hfnode/node.key"
+# The letters codes are made of, in this order: at least 16 different uppercase
+# letters, all 26 when left out. Changing it, even only the order, changes every
+# code: print a new table and destroy the old one.
+# alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 [schedule]
 # While it runs the node owns the radio: stop it before using the radio yourself.
@@ -56,6 +60,10 @@ retune_minutes = 60               # tune before a reply if the last tune is olde
 every_minutes = 60
 offset_minutes = 0
 window_minutes = 10
+# Past a window's end the node listens on while a transaction begun in it is
+# pending, and for up to 10 minutes after its result (for a repeated OK or AGN).
+# Meanwhile it answers anything it would in a window, a new open included, which
+# keeps it listening (and keying) longer.
 
 [email]
 smtp_host = "smtp.example.com"
@@ -71,6 +79,11 @@ poll_secs = 300
 # first word of its header) if it does not add the topmost one. Gmail: "mx.google.com"
 # (set it with [google_voice]).
 # authserv_id = "mx.example.com"
+# Emailed once if the node stops transmitting after a radio fault (it writes
+# state_dir/tx-inhibited), and again at each start while that file is there. Use
+# an address you read often, not the node's own mailbox; a phone's email-to-SMS
+# address gets only the start of it. Leave it out to only log it.
+alert_to = "you@example.com"
 
 # Texting from a Google Voice number on the [email] Gmail account: texts to it arrive
 # as mail, and the node texts back by email. A contact can be texted only after they

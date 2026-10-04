@@ -173,10 +173,14 @@ None of these affects the bench steps; all need deciding before stage `done`:
   node tunes at start-up and then only just before a reply once the last tune is
   older than `schedule.retune_minutes` (60): when it has just heard a call it will
   answer, so the frequency is in use, and normally followed at once by the reply,
-  which identifies the station. A tune the tuner cannot match is followed by
-  nothing, since that locks the reply out. With windows it still tunes at the top
-  of every window. Either way it is an unidentified carrier of up to 15 s, sent
-  without first checking the frequency is clear.
+  which identifies the station. With windows it tunes at the top of every window.
+  A tune at start-up or at a window's top that matched is followed at once by
+  `DE <node_call>` through the keyer (`17`, line 9711), so the carrier is
+  identified. A tune that fails (no match, a lost reply, a timeout) is not, because
+  the node then keys nothing; after a lost reply or a timeout it may still answer
+  later. Either way the tune is a carrier of 2-3 s and at most 15 s (lines
+  8118-8119), sent without first checking the frequency is clear. The bench's
+  `hfnode radio tune` does not identify; the operator does (step 12).
 - **`hfnode radio rx` failing in the service's stop hook** does not write the
   inhibit file.
 - **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated

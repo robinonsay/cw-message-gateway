@@ -10,7 +10,7 @@ use hfnode::inbox::Inbox;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
 use hfnode::storm::StormHold;
-use hfnode::{audio, gateway, node, selftest};
+use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -311,7 +311,7 @@ fn main() -> Result<()> {
         } => record(&Config::load(&config)?, &out, seconds),
         Cmd::Devices => devices(),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
-        Cmd::Run { config } => run(&Config::load(&config)?),
+        Cmd::Run { config } => run(&config, &Config::load(&config)?),
         Cmd::Storm { config } => storm_check(&Config::load(&config)?),
         Cmd::Messages { config, action } => messages_cmd(&Config::load(&config)?, action),
         Cmd::Filter { config, action } => filter_cmd(&Config::load(&config)?, action),
@@ -442,7 +442,9 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
         cfg.station.node_call,
         from + count - 1
     );
-    println!("Use each line once, in order; skipping lines is fine. Two lines per message.");
+    for line in SHEET_RULES {
+        println!("{line}");
+    }
     println!();
     let rows: Vec<String> = book
         .table(from, count)
@@ -503,6 +505,12 @@ fn messages_cmd(cfg: &Config, action: MessagesCmd) -> Result<()> {
         }
     }
 }
+
+/// The rules printed under the code table's title; docs/operating.md shows them too.
+const SHEET_RULES: [&str; 2] = [
+    "Use each line once, in order; skipping lines is fine.",
+    "Two lines per message (open, OK), and one more for each NO or AGN.",
+];
 
 /// The `[weather]` presets as printed under the code table, one per line.
 fn preset_lines(cfg: &Config) -> Vec<String> {
@@ -996,11 +1004,20 @@ fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
     }
 }
 
-fn run(cfg: &Config) -> Result<()> {
+fn run(config: &Path, cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)
         .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     // First, so the first check is likely back before the first window.
     let storm = start_storm_watch(cfg)?;
+    let alerts = alert::Alerts::start(cfg, config);
+    let result = run_node(cfg, &alerts, storm);
+    // The station is gone: dropping it forced receive, which can still latch the
+    // inhibit. Let an alert already queued go out before the process exits.
+    alerts.finish(alert::EXIT_GRACE);
+    result
+}
+
+fn run_node(cfg: &Config, alerts: &alert::Alerts, storm: Option<Arc<StormHold>>) -> Result<()> {
     let inbox = node::open_inbox(cfg)?;
     let mut session = node::build_session(cfg)?;
     // Checked by the node's iMessage thread, and not ready until then.
@@ -1017,6 +1034,9 @@ fn run(cfg: &Config) -> Result<()> {
         Some(cfg.state_dir.join("health.csv")),
     );
     guard_radio(station.rig());
+    // Email the owner when transmitting is inhibited: now, if tx-inhibited was
+    // already there, or when it latches.
+    station.notify_inhibit(alerts.sender());
     if let Some(hold) = storm {
         // So the start-up tune is not skipped just because the first answer (up
         // to three NWS requests of at most 20 s each) is still on its way.
@@ -1317,6 +1337,48 @@ mod tests {
         sim_add(&mut ib, "mom", "second", 1000).unwrap();
         let ready: Vec<String> = ib.ready().into_iter().map(|m| m.raw).collect();
         assert_eq!(ready, ["first", "second"]);
+    }
+
+    #[test]
+    fn the_operating_guide_shows_the_code_sheet_as_printed() {
+        let guide = include_str!("../../../docs/operating.md");
+        for line in SHEET_RULES {
+            assert!(
+                guide.contains(line),
+                "docs/operating.md does not show {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readme_lists_every_command() {
+        use clap::CommandFactory;
+        let readme = include_str!("../../../README.md");
+        let cli = Cli::command();
+        let radio = cli.find_subcommand("radio").expect("radio subcommand");
+        let rows = cli
+            .get_subcommands()
+            .map(|c| format!("| `hfnode {}", c.get_name()))
+            .chain(
+                radio
+                    .get_subcommands()
+                    .map(|c| format!("| `hfnode radio --config C {}", c.get_name())),
+            );
+        for row in rows.filter(|r| !r.ends_with(" help")) {
+            assert!(readme.contains(&row), "README.md, Commands: no row {row}`");
+        }
+    }
+
+    #[test]
+    fn the_example_config_shows_the_default_alphabet() {
+        let example = include_str!("../../../hfnode.example.toml");
+        let shown = example
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("# alphabet = "))
+            .expect("hfnode.example.toml shows [auth] alphabet");
+        let alphabet = shown.trim_matches('"');
+        assert_eq!(alphabet, auth::DEFAULT_ALPHABET);
+        CodeBook::with_alphabet(b"any key at all", alphabet).unwrap();
     }
 
     #[test]

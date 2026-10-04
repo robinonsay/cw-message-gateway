@@ -16,6 +16,11 @@
 //!   lower is refused; a valid open on fresh lines replaces the pending one.
 //!   Re-sending the commit repeats its result, but only a few times, only shortly
 //!   after the commit, and only until a newer transaction opens.
+//! - `NO` and `AGN` carry the next fresh line and its code, so nobody who only
+//!   heard the exchange can abort it or make the node key again. Their line is used
+//!   once accepted, even when there is nothing to abort or repeat. Re-sending
+//!   exactly a `NO` or `AGN` that was answered is answered again a few times, until
+//!   a later line is used.
 //! - Silence is the NACK. Anything that fails to parse or authenticate gets no reply.
 //! - `last_seq` is saved to disk before acting, so a crash can never let a used code
 //!   be replayed.
@@ -130,7 +135,16 @@ pub struct SessionConfig {
     pub wx_presets: Vec<(u32, String)>,
 }
 
-/// How many times a repeated commit is answered before it is ignored.
+impl SessionConfig {
+    /// Whether `now` is still within [`Self::again_window`] of `at`, its last moment
+    /// included. The one test for `AGN` and for a repeated `OK`, `NO` or `AGN`, and
+    /// so for how long the node listens on for them past the end of its window.
+    fn again_in_time(&self, at: Instant, now: Instant) -> bool {
+        now.duration_since(at) <= self.again_window
+    }
+}
+
+/// How many times a repeated commit, `NO` or `AGN` is answered before it is ignored.
 const MAX_COMMIT_RETRIES: u32 = 3;
 
 /// Ends an inbound message that was too long for one `RX` and was cut.
@@ -159,6 +173,36 @@ struct LastCommit {
     chunks: Vec<Chunk>,
 }
 
+/// The node's last reply other than an `AGN` repeat: what `AGN` repeats.
+#[derive(Debug, Clone)]
+struct LastTx {
+    /// When the message it answered was handled.
+    at: Instant,
+    transmission: Transmission,
+    /// The result's chunks, for `AGN <letter>`; empty unless it is a chunked result.
+    chunks: Vec<Chunk>,
+    /// It is the last commit's result (or a repeat of it), not a read-back or `R NO`.
+    result: bool,
+}
+
+/// What a `NO` or `AGN` asked for; an identical retry asks the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Abort,
+    Again(Option<char>),
+}
+
+/// The last `NO` or `AGN` the node answered, so that an identical retry (same
+/// line, code and chunk letter) is answered again without a fresh line.
+#[derive(Debug, Clone)]
+struct LastAsk {
+    seq: u64,
+    ask: Ask,
+    /// When it was first answered; retries do not move it.
+    at: Instant,
+    retries: u32,
+}
+
 #[derive(Debug)]
 pub struct Session {
     cfg: SessionConfig,
@@ -169,7 +213,8 @@ pub struct Session {
     places: LastPlaces,
     pending: Option<Pending>,
     last_commit: Option<LastCommit>,
-    last_tx: Option<(Instant, Transmission, Vec<Chunk>)>,
+    last_tx: Option<LastTx>,
+    last_ask: Option<LastAsk>,
 }
 
 impl Session {
@@ -189,6 +234,7 @@ impl Session {
             pending: None,
             last_commit: None,
             last_tx: None,
+            last_ask: None,
         }
     }
 
@@ -200,6 +246,21 @@ impl Session {
         self.pending
             .as_ref()
             .is_some_and(|p| now.duration_since(p.opened_at) < self.cfg.pending_timeout)
+    }
+
+    /// Whether the last commit's result can still be had again: a repeated `OK`
+    /// would be answered with it, or `AGN` would repeat it. Past the end of its
+    /// window the node keeps listening for as long as this is true.
+    pub fn result_repeatable(&self, now: Instant) -> bool {
+        let ok = self
+            .last_commit
+            .as_ref()
+            .is_some_and(|c| c.retries < MAX_COMMIT_RETRIES && self.cfg.again_in_time(c.at, now));
+        let agn = self
+            .last_tx
+            .as_ref()
+            .is_some_and(|l| l.result && self.cfg.again_in_time(l.at, now));
+        ok || agn
     }
 
     /// Handle one decoded field transmission.
@@ -222,24 +283,17 @@ impl Session {
                 cmd,
             } => self.open(&call, seq, &code, cmd, now, svc),
             FieldMsg::Commit { seq, code } => self.commit(seq, &code, now, svc),
-            FieldMsg::Abort => match self.pending.take() {
-                Some(p) => {
-                    log::info!("transaction {} aborted by field", p.open_seq);
-                    Outcome::Transmit(Transmission::single(
-                        Reply::Aborted.render(&self.cfg.node_call),
-                    ))
-                }
-                None => Outcome::Silent("NO with nothing pending".into()),
-            },
-            FieldMsg::Again { chunk } => return self.again(chunk, now),
+            FieldMsg::Abort { seq, code } => self.abort(seq, &code, now),
+            FieldMsg::Again { seq, code, chunk } => return self.again(seq, &code, chunk, now),
         };
         if let Outcome::Transmit(t) = &outcome {
-            let chunks = self
-                .last_commit
-                .as_ref()
-                .filter(|c| c.transmission == *t)
-                .map(|c| c.chunks.clone());
-            self.last_tx = Some((now, t.clone(), chunks.unwrap_or_default()));
+            let commit = self.last_commit.as_ref().filter(|c| c.transmission == *t);
+            self.last_tx = Some(LastTx {
+                at: now,
+                transmission: t.clone(),
+                chunks: commit.map(|c| c.chunks.clone()).unwrap_or_default(),
+                result: commit.is_some(),
+            });
         }
         outcome
     }
@@ -324,9 +378,7 @@ impl Session {
         // heard OK cannot make the node key the whole result again and again.
         if let Some(c) = &mut self.last_commit {
             if c.seq == seq && self.verifier.check_code_only(seq, code).is_ok() {
-                if now.duration_since(c.at) > self.cfg.again_window
-                    || c.retries >= MAX_COMMIT_RETRIES
-                {
+                if !self.cfg.again_in_time(c.at, now) || c.retries >= MAX_COMMIT_RETRIES {
                     self.last_commit = None;
                     return Outcome::Silent(format!("repeat of commit {seq} no longer honoured"));
                 }
@@ -548,16 +600,100 @@ impl Session {
         )
     }
 
-    fn again(&mut self, letter: Option<char>, now: Instant) -> Outcome {
-        let Some((at, tx, chunks)) = &self.last_tx else {
+    /// An identical retry of the last `NO` or `AGN` answered: `Some` with what to
+    /// do, `None` if this is not one. Honoured a few times, only shortly after,
+    /// and only while its line is still the highest one used.
+    fn ask_retry(
+        &mut self,
+        seq: u64,
+        code: &str,
+        ask: Ask,
+        now: Instant,
+    ) -> Option<Result<(), String>> {
+        let a = self.last_ask.as_mut()?;
+        if a.seq != seq || a.ask != ask || self.verifier.check_code_only(seq, code).is_err() {
+            return None;
+        }
+        if self.verifier.last_seq() != seq
+            || !self.cfg.again_in_time(a.at, now)
+            || a.retries >= MAX_COMMIT_RETRIES
+        {
+            self.last_ask = None;
+            return Some(Err(format!("repeat of line {seq} no longer honoured")));
+        }
+        a.retries += 1;
+        Some(Ok(()))
+    }
+
+    /// Check and burn a fresh line for a `NO` or `AGN`, saved before acting.
+    fn use_line(&mut self, what: &str, seq: u64, code: &str) -> Result<(), String> {
+        self.verifier
+            .check(seq, code)
+            .map_err(|e| format!("{what} rejected: {e}"))?;
+        if let Err(e) = self.store.save(seq) {
+            log::error!("cannot save last_seq {seq}: {e}; not acting");
+            return Err(format!("state write failed: {e}"));
+        }
+        self.verifier.commit(seq);
+        Ok(())
+    }
+
+    fn abort(&mut self, seq: u64, code: &str, now: Instant) -> Outcome {
+        let aborted = Outcome::Transmit(Transmission::single(
+            Reply::Aborted.render(&self.cfg.node_call),
+        ));
+        match self.ask_retry(seq, code, Ask::Abort, now) {
+            Some(Ok(())) => return aborted,
+            Some(Err(why)) => return Outcome::Silent(why),
+            None => {}
+        }
+        if let Err(why) = self.use_line("NO", seq, code) {
+            return Outcome::Silent(why);
+        }
+        let Some(p) = self.pending.take() else {
+            return Outcome::Silent(format!("NO {seq} with nothing pending (line used)"));
+        };
+        log::info!("transaction {} aborted by field with {seq}", p.open_seq);
+        self.last_ask = Some(LastAsk {
+            seq,
+            ask: Ask::Abort,
+            at: now,
+            retries: 0,
+        });
+        aborted
+    }
+
+    fn again(&mut self, seq: u64, code: &str, letter: Option<char>, now: Instant) -> Outcome {
+        match self.ask_retry(seq, code, Ask::Again(letter), now) {
+            Some(Ok(())) => return self.repeat(letter, now),
+            Some(Err(why)) => return Outcome::Silent(why),
+            None => {}
+        }
+        if let Err(why) = self.use_line("AGN", seq, code) {
+            return Outcome::Silent(why);
+        }
+        let out = self.repeat(letter, now);
+        if let Outcome::Transmit(_) = &out {
+            self.last_ask = Some(LastAsk {
+                seq,
+                ask: Ask::Again(letter),
+                at: now,
+                retries: 0,
+            });
+        }
+        out
+    }
+
+    fn repeat(&self, letter: Option<char>, now: Instant) -> Outcome {
+        let Some(last) = &self.last_tx else {
             return Outcome::Silent("AGN with nothing sent".into());
         };
-        if now.duration_since(*at) > self.cfg.again_window {
+        if !self.cfg.again_in_time(last.at, now) {
             return Outcome::Silent("AGN too long after last transmission".into());
         }
         match letter {
-            None => Outcome::Transmit(tx.clone()),
-            Some(l) => match chunks.iter().find(|c| c.letter == l) {
+            None => Outcome::Transmit(last.transmission.clone()),
+            Some(l) => match last.chunks.iter().find(|c| c.letter == l) {
                 Some(c) => Outcome::Transmit(Transmission::single(format!(
                     "{} DE {} K",
                     c.render(),
@@ -786,9 +922,16 @@ mod tests {
     fn abort_drops_the_pending_transaction() {
         let mut r = Rig::new();
         tx(&r.send(0, "W5XXX 42 {42} TX MOM WRONG K"));
-        assert_eq!(tx(&r.send(10, "NO K")), "R NO DE N0DE K");
-        assert!(silent(&r.send(20, "OK 43 {43} K")));
-        assert!(silent(&r.send(30, "NO K")));
+        // A bare NO is ignored.
+        assert!(silent(&r.send(5, "NO K")));
+        assert!(r.session.has_pending(r.t0 + Duration::from_secs(5)));
+        assert_eq!(tx(&r.send(10, "NO 43 {43} K")), "R NO DE N0DE K");
+        assert_eq!(r.stored_seq(), 43, "the NO's line is used");
+        assert!(silent(&r.send(20, "OK 44 {44} K")));
+        // Nothing pending: silence, but the line is used.
+        assert!(silent(&r.send(30, "NO 45 {45} K")));
+        assert_eq!(r.stored_seq(), 45);
+        assert!(r.svc.sent.is_empty());
     }
 
     #[test]
@@ -847,15 +990,15 @@ mod tests {
         );
 
         // Repeat one chunk.
-        let b = tx(&r.send(20, "AGN B K"));
+        let b = tx(&r.send(20, "AGN 44 {44} B K"));
         assert!(
             b.starts_with(&t.segments[1][..10]) && b.ends_with("= B DE N0DE K"),
             "{b}"
         );
         // Repeat everything.
-        assert_eq!(tx(&r.send(30, "AGN K")), t.text());
+        assert_eq!(tx(&r.send(30, "AGN 45 {45} K")), t.text());
         // Too late.
-        assert!(silent(&r.send(2000, "AGN K")));
+        assert!(silent(&r.send(2000, "AGN 46 {46} K")));
     }
 
     #[test]
@@ -925,12 +1068,12 @@ mod tests {
         tx(&r.send(10, "OK 43 {43} K"));
         // A grid that is read back and refused with NO is not remembered.
         tx(&r.send(20, "W5XXX 44 {44} WX DL88 K"));
-        tx(&r.send(30, "NO K"));
+        tx(&r.send(30, "NO 45 {45} K"));
         assert_eq!(
             tx(&r.send(40, "W5XXX 46 {46} WX K")),
             "R 46 WX EM10 ? DE N0DE K"
         );
-        tx(&r.send(50, "NO K"));
+        tx(&r.send(50, "NO 47 {47} K"));
         // A confirmed preset is.
         tx(&r.send(60, "W5XXX 48 {48} WX 2 K"));
         tx(&r.send(70, "OK 49 {49} K"));
@@ -1047,7 +1190,7 @@ mod tests {
     fn an_aborted_open_cannot_be_replayed() {
         let mut r = Rig::new();
         tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
-        tx(&r.send(10, "NO K"));
+        tx(&r.send(10, "NO 43 {43} K"));
         // Replaying the burned open keys nothing and does not hold the window open.
         assert!(silent(&r.send(20, "W5XXX 42 {42} TX MOM EVIL K")));
         assert!(!r.session.has_pending(r.t0 + Duration::from_secs(20)));
@@ -1083,8 +1226,49 @@ mod tests {
         let (mut r, _) = open_and_commit();
         tx(&r.send(20, "W5XXX 44 {44} RX K"));
         assert!(silent(&r.send(30, "OK 43 {43} K")));
-        tx(&r.send(40, "NO K"));
+        tx(&r.send(40, "NO 45 {45} K"));
         assert!(silent(&r.send(50, "OK 43 {43} K")));
+        assert_eq!(r.svc.sent.len(), 1);
+    }
+
+    #[test]
+    fn a_result_is_repeatable_while_a_repeated_ok_or_agn_would_get_it() {
+        let at = |r: &Rig, secs: u64| r.t0 + Duration::from_secs(secs);
+        let mut r = Rig::new();
+        assert!(!r.session.result_repeatable(r.t0), "nothing committed");
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        // A read-back is not a result: the pending transaction covers it.
+        assert!(!r.session.result_repeatable(at(&r, 5)));
+        let sent = tx(&r.send(10, "OK 43 {43} K"));
+        // Until the again window (900 s here) after the commit, its last second
+        // included, as for the repeated OK itself.
+        assert!(r.session.result_repeatable(at(&r, 10)));
+        assert!(r.session.result_repeatable(at(&r, 910)));
+        assert!(!r.session.result_repeatable(at(&r, 911)));
+        // AGN repeats it without moving that.
+        assert_eq!(tx(&r.send(15, "AGN 44 {44} K")), sent);
+        assert!(!r.session.result_repeatable(at(&r, 911)));
+        // An open that is not valid does not end it, nor a NO with nothing to
+        // abort, which still uses its line.
+        assert!(silent(&r.send(20, "W5XXX 42 {42} TX MOM HI K")));
+        assert!(silent(&r.send(25, "NO 45 {45} K")));
+        assert_eq!(r.stored_seq(), 45);
+        assert!(r.session.result_repeatable(at(&r, 25)));
+        // Repeats used up: AGN still repeats it, until the window after the last
+        // repeat.
+        for i in 0..MAX_COMMIT_RETRIES {
+            assert_eq!(tx(&r.send(30 + u64::from(i), "OK 43 {43} K")), sent);
+        }
+        assert!(silent(&r.send(40, "OK 43 {43} K")));
+        assert!(r.session.result_repeatable(at(&r, 932)));
+        assert!(!r.session.result_repeatable(at(&r, 933)));
+        // A newer transaction ends it, and R NO is no result.
+        tx(&r.send(50, "W5XXX 46 {46} TX MOM AGAIN K"));
+        assert!(!r.session.result_repeatable(at(&r, 50)));
+        assert!(r.session.has_pending(at(&r, 50)));
+        assert_eq!(tx(&r.send(60, "NO 47 {47} K")), "R NO DE N0DE K");
+        assert!(!r.session.result_repeatable(at(&r, 60)));
+        assert!(!r.session.has_pending(at(&r, 60)));
         assert_eq!(r.svc.sent.len(), 1);
     }
 
@@ -1096,6 +1280,129 @@ mod tests {
         assert!(silent(&r.send(10, "W5XX 42 {42} TX MOM SAY NO K")));
         assert_eq!(tx(&r.send(20, "OK 43 {43} K")), "SENT 43 DE N0DE K");
         assert_eq!(r.svc.sent, [("MOM".to_string(), "SAY NO".to_string())]);
+    }
+
+    #[test]
+    fn no_and_agn_need_a_fresh_line_and_its_code() {
+        let mut r = Rig::new();
+        let rb = tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        // Bare, with another line's code, or on the open's line (heard on the
+        // air): ignored, and the transaction stays.
+        for text in [
+            "NO K",
+            "AGN K",
+            "AGN A K",
+            "NO 43 {44} K",
+            "AGN 43 {44} K",
+            "NO 42 {42} K",
+            "AGN 42 {42} K",
+        ] {
+            assert!(silent(&r.send(10, text)), "{text}");
+        }
+        assert_eq!(r.stored_seq(), 42);
+        assert!(r.session.has_pending(r.t0 + Duration::from_secs(10)));
+        // AGN on the next line repeats the read-back and uses that line, so the
+        // OK comes on a line above it.
+        assert_eq!(tx(&r.send(20, "AGN 43 {43} K")), rb);
+        assert_eq!(r.stored_seq(), 43);
+        assert!(r.session.has_pending(r.t0 + Duration::from_secs(20)));
+        assert!(silent(&r.send(30, "OK 43 {43} K")));
+        assert_eq!(tx(&r.send(40, "OK 44 {44} K")), "SENT 44 DE N0DE K");
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "HI".to_string())]);
+    }
+
+    #[test]
+    fn a_repeated_no_or_agn_is_answered_again_for_free() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        let no = tx(&r.send(10, "NO 43 {43} K"));
+        for i in 0..MAX_COMMIT_RETRIES {
+            assert_eq!(tx(&r.send(20 + u64::from(i), "NO 43 {43} K")), no);
+        }
+        assert!(silent(&r.send(30, "NO 43 {43} K")), "bounded");
+        assert_eq!(r.stored_seq(), 43);
+
+        r.svc.inbox = vec![msg(1, "MOM", &"WORD ".repeat(30))];
+        tx(&r.send(40, "W5XXX 44 {44} RX K"));
+        let Outcome::Transmit(all) = r.send(50, "OK 45 {45} K") else {
+            panic!()
+        };
+        let b = tx(&r.send(60, "AGN 46 {46} B K"));
+        assert!(b.ends_with("= B DE N0DE K"), "{b}");
+        assert_eq!(tx(&r.send(70, "AGN 46 {46} B K")), b);
+        // The same line asking for something else is a used line.
+        assert!(silent(&r.send(80, "AGN 46 {46} C K")));
+        assert!(silent(&r.send(80, "AGN 46 {46} K")));
+        // Once a later line is used, the repeat is over.
+        assert_eq!(tx(&r.send(90, "AGN 47 {47} K")), all.text());
+        assert!(silent(&r.send(100, "AGN 46 {46} B K")));
+        assert_eq!(r.stored_seq(), 47);
+    }
+
+    #[test]
+    fn a_repeated_no_or_agn_is_answered_only_within_the_agn_window() {
+        // The window counts from the first answer, and its last second still counts.
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        let no = tx(&r.send(10, "NO 43 {43} K"));
+        assert_eq!(tx(&r.send(910, "NO 43 {43} K")), no);
+        assert!(silent(&r.send(911, "NO 43 {43} K")));
+
+        // An AGN's repeat is bounded by that and by the window of what it repeats.
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        let sent = tx(&r.send(10, "OK 43 {43} K"));
+        assert_eq!(tx(&r.send(10, "AGN 44 {44} K")), sent);
+        assert_eq!(tx(&r.send(910, "AGN 44 {44} K")), sent);
+        assert!(silent(&r.send(911, "AGN 44 {44} K")));
+        assert_eq!(r.stored_seq(), 44);
+    }
+
+    #[test]
+    fn a_heard_no_cannot_abort_a_later_transaction() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM WRONG K"));
+        tx(&r.send(10, "NO 43 {43} K"));
+        tx(&r.send(20, "W5XXX 44 {44} TX MOM RIGHT K"));
+        assert!(silent(&r.send(30, "NO 43 {43} K")));
+        assert_eq!(tx(&r.send(40, "OK 45 {45} K")), "SENT 45 DE N0DE K");
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "RIGHT".to_string())]);
+    }
+
+    #[test]
+    fn no_or_agn_with_nothing_to_do_still_uses_its_line() {
+        let mut r = Rig::new();
+        assert!(silent(&r.send(0, "NO 42 {42} K")));
+        assert!(silent(&r.send(0, "AGN 43 {43} K")));
+        assert_eq!(r.stored_seq(), 43);
+        tx(&r.send(10, "W5XXX 44 {44} TX MOM HI K"));
+        // A read-back has no chunks.
+        assert!(silent(&r.send(20, "AGN 45 {45} A K")));
+        assert_eq!(r.stored_seq(), 45);
+        // Its line cannot open anything now, and the transaction is still there.
+        assert!(silent(&r.send(30, "W5XXX 45 {45} TX BOB EVIL K")));
+        assert_eq!(tx(&r.send(40, "OK 46 {46} K")), "SENT 46 DE N0DE K");
+        assert_eq!(r.svc.sent, [("MOM".to_string(), "HI".to_string())]);
+        // Too long after the last over.
+        assert!(silent(&r.send(2000, "AGN 47 {47} K")));
+        assert_eq!(r.stored_seq(), 47);
+    }
+
+    #[test]
+    fn agn_k_k_repeats_chunk_k() {
+        let mut r = Rig::new();
+        // 13 chunks of at most 40 characters.
+        r.svc.inbox = vec![msg(1, "MOM", &"WORD ".repeat(100))];
+        tx(&r.send(0, "W5XXX 42 {42} RX K"));
+        let Outcome::Transmit(all) = r.send(10, "OK 43 {43} K") else {
+            panic!()
+        };
+        assert!(all.segments.len() > 11, "{}", all.segments.len());
+        assert_eq!(
+            tx(&r.send(20, "AGN 44 {44} K K")),
+            format!("{} DE N0DE K", all.segments[10])
+        );
+        assert_eq!(tx(&r.send(30, "AGN 45 {45} K")), all.text());
     }
 
     #[test]

@@ -239,7 +239,9 @@ every `schedule.check_minutes` (10) and before every transmission.
 receive, it stops transmitting and writes `tx-inhibited` in
 `%LOCALAPPDATA%\hfnode\state` with the time and reason. It keeps running and
 logging but transmits nothing, also after a restart, until that file is removed.
-Check the radio first.
+Check the radio first. With `[email] alert_to` set, the node emails you the reason
+and the steps to clear it when this happens, and at each start while the file is
+there.
 
 **Updating.** Stop the node, then in the repository folder: `git pull`,
 `cargo install --locked --path crates/hfnode`, and start it again. `last_seq` and the inbox
