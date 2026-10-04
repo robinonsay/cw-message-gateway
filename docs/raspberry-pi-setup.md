@@ -294,6 +294,8 @@ What happens if a secret is missing:
 - With `[email]` configured, `hfnode run` refuses to start without the email password.
 - Without the API key (or if the API cannot be reached), inbound messages stay
   unscreened and are never transmitted; the node logs a warning and keeps running.
+  With `filter.provider = "ollama"` no API key is needed; see
+  [reply-filter.md](reply-filter.md).
   Setting `filter.enabled = false` transmits third-party text unscreened, which the
   design advises against.
 

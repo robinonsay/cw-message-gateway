@@ -145,8 +145,16 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 One `KEY=value` per line, no quotes. The start-up script reads the file without
 running it. To set one for a command run by hand (for example `sim` without
-`--offline`): `$env:HFNODE_EMAIL_PASSWORD = "..."`. What happens when a secret is
-missing is in [raspberry-pi-setup.md, section 8](raspberry-pi-setup.md#8-secrets).
+`--offline`): `$env:HFNODE_EMAIL_PASSWORD = "..."`.
+
+With `filter.provider = "ollama"` (a model run by Ollama on this PC or another
+computer) leave out `ANTHROPIC_API_KEY`; see [reply-filter.md](reply-filter.md).
+To check the filter before the node goes live, run
+`hfnode filter --config "$D\hfnode.toml" test` (with Claude, set
+`$env:ANTHROPIC_API_KEY` first).
+
+What happens when a secret is missing is in [raspberry-pi-setup.md, section
+8](raspberry-pi-setup.md#8-secrets).
 
 ## 7. Starting the node
 

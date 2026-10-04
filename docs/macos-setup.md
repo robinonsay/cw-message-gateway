@@ -174,6 +174,12 @@ example `sim` without `--offline`):
 while IFS= read -r l; do case $l in ''|'#'*) ;; *=*) export "$l" ;; esac; done < "$D/env"
 ```
 
+With `filter.provider = "ollama"` (a model run by Ollama on this Mac or another
+computer) leave out `ANTHROPIC_API_KEY`; see [reply-filter.md](reply-filter.md).
+To check the filter before the node goes live, run
+`hfnode filter --config "$D/hfnode.toml" test` (with Claude, load `env` first as
+above).
+
 What happens when a secret is missing is in [raspberry-pi-setup.md, section
 8](raspberry-pi-setup.md#8-secrets).
 

@@ -38,7 +38,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Read-backs, `SENT`, chunk letters for `AGN` | `crates/protocol/src/reply.rs` |
 | Stop-and-wait ARQ, silence as NACK, idempotent retries | `crates/hfnode/src/session.rs` |
 | CW decoder | `crates/cw` (decoder plus a synthesizer used for tests) |
-| Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API) |
+| Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API, or a local model through Ollama) |
 | Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
@@ -59,7 +59,7 @@ crates/
   civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig,
               mock: a byte-level IC-7300 that answers as the manual's Section 19 says
   hfnode/     config, inbox, session state machine, station safety layer,
-              gateways (SMTP/IMAP, NWS, Claude filter), node loop, CLI (src/main.rs)
+              gateways (SMTP/IMAP, NWS, reply filter), node loop, CLI (src/main.rs)
               selftest: scripted field operator + scenarios against the mock radio
               tests/end_to_end.rs: synthesized CW audio in, keyer text out, no hardware
               tests/mock_radio_e2e.rs: every selftest scenario, as cargo tests
@@ -324,6 +324,8 @@ the air.
 | `hfnode selftest --sweep [--wpm ..] [--snr ..] [--keying ..] [--trials N] [--rx] [--csv F]` | no | Sweep speed x SNR x keying with complete exchanges; print where it breaks. |
 | `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
 | `hfnode devices` | no | List serial ports and audio inputs, marking the radio's. Opens nothing. |
+| `hfnode filter --config C test` | no | Screen ten sample replies with the configured filter model and check the verdicts. With Claude, each is a paid API call. |
+| `hfnode filter --config C screen TEXT [--from NAME]` | no | Show what one reply would be keyed as. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
 | `hfnode record --config C --out F [--seconds N]` | no | Record the radio's audio as the node hears it; print the peak level. |
 | `hfnode radio --config C check` | no | Read-only preflight: identify the radio, check every setting that could make it transmit. Writes nothing. |
@@ -350,4 +352,5 @@ decoded transmission) and `health.csv` (every tune and SWR reading).
 - [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
+- [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
 - [hfnode.example.toml](hfnode.example.toml): every config key, with comments.
