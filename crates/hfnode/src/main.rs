@@ -905,6 +905,37 @@ mod tests {
     }
 
     #[test]
+    fn the_readme_lists_every_command() {
+        use clap::CommandFactory;
+        let readme = include_str!("../../../README.md");
+        let cli = Cli::command();
+        let radio = cli.find_subcommand("radio").expect("radio subcommand");
+        let rows = cli
+            .get_subcommands()
+            .map(|c| format!("| `hfnode {}", c.get_name()))
+            .chain(
+                radio
+                    .get_subcommands()
+                    .map(|c| format!("| `hfnode radio --config C {}", c.get_name())),
+            );
+        for row in rows.filter(|r| !r.ends_with(" help")) {
+            assert!(readme.contains(&row), "README.md, Commands: no row {row}`");
+        }
+    }
+
+    #[test]
+    fn the_example_config_shows_the_default_alphabet() {
+        let example = include_str!("../../../hfnode.example.toml");
+        let shown = example
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("# alphabet = "))
+            .expect("hfnode.example.toml shows [auth] alphabet");
+        let alphabet = shown.trim_matches('"');
+        assert_eq!(alphabet, auth::DEFAULT_ALPHABET);
+        CodeBook::with_alphabet(b"any key at all", alphabet).unwrap();
+    }
+
+    #[test]
     fn presets_are_printed_in_order_under_the_code_table() {
         let mut cfg: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
         cfg.weather.as_mut().unwrap().presets.reverse();

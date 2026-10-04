@@ -31,12 +31,18 @@ bandwidth_hz = 150
 
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
+# The letters codes are made of, in this order: at least 16 different uppercase
+# letters, all 26 when left out. Changing it, even only the order, changes every
+# code: print a new table and destroy the old one.
+# alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 [schedule]
 always = false
 every_minutes = 60                # first ten minutes of every hour (UTC)
 offset_minutes = 0
 window_minutes = 10
+# Past a window's end the node listens on only to finish a transaction begun in it:
+# while it is pending, and for up to 10 minutes after its result (for a repeated OK).
 
 [email]
 smtp_host = "smtp.example.com"

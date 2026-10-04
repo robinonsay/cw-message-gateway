@@ -169,9 +169,14 @@ None of these affects the bench steps; all need deciding before stage `done`:
   including exact band edges, regardless of licence class. The radio's own
   "ON (User) & TX Limit" band-edge setting (line 1531) could enforce the licensed
   segment.
-- **Tuning carrier.** The node tunes at the top of every listening window, an
-  unidentified carrier of up to 15 s, without first checking the frequency is
-  clear.
+- **Tuning carrier.** The node tunes at the top of every listening window, a
+  carrier of 2-3 s and at most 15 s (lines 8118-8119), without first checking the
+  frequency is clear. In `hfnode run` a tune that matched is now followed at once
+  by `DE <node_call>` through the keyer (`17`, line 9711), so the carrier is
+  identified. A tune that fails (no match, a lost reply, a timeout) is not, because
+  the node then keys nothing; after a lost reply or a timeout it may still answer
+  later in that window. The bench's `hfnode radio tune` does not identify; the
+  operator does (step 12).
 - **`hfnode radio rx` failing in the service's stop hook** does not write the
   inhibit file.
 - **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated

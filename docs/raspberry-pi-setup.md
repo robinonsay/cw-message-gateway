@@ -19,10 +19,10 @@ timedatectl
 ```
 
 Listening windows are computed from UTC, so a wrong clock means the node listens at
-the wrong time, and tunes (a short carrier) at the wrong time too. The Pi has no
-battery-backed clock; it needs the network at boot to get the time. Make the
-service wait until the clock has actually synchronised, not just until the time
-service has started:
+the wrong time, and tunes (a short carrier, then its callsign) at the wrong time
+too. The Pi has no battery-backed clock; it needs the network at boot to get the
+time. Make the service wait until the clock has actually synchronised, not just
+until the time service has started:
 
 ```sh
 sudo systemctl enable systemd-time-wait-sync.service
@@ -197,7 +197,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Item | Set to | Why |
 |---|---|---|
 | CW PITCH | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
-| BKIN D (break-in delay) | Leave to the node | Holds transmit between characters. The node sets it from `station.break_in_delay_dots` (default 10.0) at start-up and reads it back. |
+| BKIN D (break-in delay) | Leave to the node | Holds transmit between characters and words. The node sets it to 10.0 dots (fixed, not a config key: 3 dots longer than a word gap, so the radio stays on transmit for a whole keyer message) at start-up and at the start of each listening window, and reads it back at start-up. |
 | Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on), and reads it back. It never selects full break-in. |
 | Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder. The node warns if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
@@ -230,8 +230,10 @@ transmit somewhere other than the frequency the node set; the node refuses to
 write to the radio unless both read OFF.
 
 **Power and tuner:** the node sets RF power to `station.power_watts` (30-50 W per
-the design; start bench tests at 10 W) and runs the internal tuner at start-up and
-at the start of each listening window. Leave the tuner switched on.
+the design; start bench tests at 10 W) and runs the internal tuner at the start of
+each listening window, not when it starts: started outside a window, it first tunes
+when the next one opens. After a tune that matches, it sends its callsign
+(`DE <node_call>`) in CW to identify the carrier. Leave the tuner switched on.
 
 ## 7. Configuration
 
@@ -242,16 +244,18 @@ sudo nano /etc/hfnode/hfnode.toml
 ```
 
 At minimum set `station.node_call`, `station.field_calls`, `station.frequency_hz`,
-`station.serial_port`, `audio.device`, the `[[contacts]]`, `[email]` and
-`[weather]`, with a `[[weather.presets]]` entry for each place you often key from
-(`WX 1`, `WX 2`, ...). The file is checked on load; unknown keys are errors, and
-`power_watts` (1-100), `max_key_seconds` (1-120) and `swr_limit` (1.1-3.0) are range
-checked.
+`station.serial_port`, `audio.device`, the `[[contacts]]`, `[email]` (with
+`alert_to`, an address you read often: the node emails it if it stops transmitting)
+and `[weather]`, with a `[[weather.presets]]` entry for each place you often key
+from (`WX 1`, `WX 2`, ...). The file is checked on load; unknown keys are errors,
+and `power_watts` (1-100), `max_key_seconds` (1-120) and `swr_limit` (1.1-3.0) are
+range checked.
 
 Keep `state_dir = "/var/lib/hfnode"` and `key_file = "/etc/hfnode/node.key"` to match
 the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log`,
 `health.csv` and `wx_last.json` (the last weather place each field callsign
-confirmed, used for `WX` alone) in `state_dir`.
+confirmed, used for `WX` alone) in `state_dir`, and `tx-inhibited` if it stops
+transmitting (section 10).
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
 
@@ -285,6 +289,7 @@ personal account password.
 What happens if a secret is missing:
 
 - With `[email]` configured, `hfnode run` refuses to start without the email password.
+  The alert to `email.alert_to` goes out through the same mail server and password.
 - Without the API key (or if the API cannot be reached), inbound messages stay
   unscreened and are never transmitted; the node logs a warning and keeps running.
   Setting `filter.enabled = false` transmits third-party text unscreened, which the
@@ -317,16 +322,22 @@ sudo systemctl enable --now hfnode
 journalctl -u hfnode -f
 ```
 
-On start you should see `last_seq is N`, `preflight:` lines (the read-only radio
-checks), `read-back:` lines, a `health: tune ...` line, and
-`N0CALL listening on 7030000 Hz`. The unit:
+On start you should see `if transmitting is inhibited, you@example.com is emailed`
+(or a warning that it is only logged, without `alert_to`), `last_seq is N`,
+`preflight:` lines (the read-only radio checks), `read-back:` lines and `N0CALL
+listening on 7030000 Hz`. The node tunes only when a listening window opens, so
+`listening window open`, a `health: tune NNNms` line and `health: swr ...` (from
+the `DE N0CALL` after the tune) follow at once if it started inside a window,
+otherwise at the next window (with the default schedule, up to 50 minutes later).
+The unit:
 
 - runs `/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml` as `hfnode`, with
   `dialout` and `audio` as supplementary groups;
 - loads `/etc/hfnode/env`;
 - restarts on failure after 30 s, and gives up after 3 starts in an hour, so a
-  broken radio connection does not turn into an endless loop of start-up tunes
-  (`sudo systemctl reset-failed hfnode` before starting it again by hand);
+  broken radio connection does not turn into an endless loop of restarts, each of
+  which tunes again (a carrier) if it falls inside a listening window (`sudo
+  systemctl reset-failed hfnode` before starting it again by hand);
 - runs `hfnode radio ... rx` after every stop or crash, to make sure the radio is on
   receive;
 - only allows the process to open USB serial (`ttyUSB`) and ALSA devices, and
@@ -336,9 +347,38 @@ If you use a udev symlink or by-id path, it still resolves to a `ttyUSB` device,
 so the device allow-list covers it.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
-receive, it stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the
-time and reason. It keeps running (and keeps logging) but transmits nothing, also
-after a restart, until that file is removed. Check the radio first.
+receive (the radio off or unplugged at the top of a window, or stuck on transmit
+after a fault), or the radio reads receive while its Po meter shows output, it
+stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
+reason. It keeps running and decoding, but it does not tune or key, so the field
+operator hears nothing, and this lasts across restarts. With `[email] alert_to`
+set it emails that address once when this happens (subject `N0CALL: node stopped
+transmitting (tx-inhibited)`), and once more each time the service starts while the
+file is there; the email gives the reason and these steps. Without `alert_to` it is
+only in the journal. To clear it:
+
+```sh
+sudo systemctl stop hfnode
+sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check   # read-only; must pass
+sudo cat /var/lib/hfnode/tx-inhibited                                # the time and the reason
+sudo rm /var/lib/hfnode/tx-inhibited
+sudo systemctl reset-failed hfnode                                   # only if systemd gave up
+sudo systemctl start hfnode
+```
+
+Check the radio before deleting the file. Deleting it while the node runs changes
+nothing: the node reads it only when it starts.
+
+**Check the alert.** Make the node start inhibited and see the email arrive.
+Nothing is transmitted while the file is there:
+
+```sh
+echo "$(date +%s) alert check by hand" | sudo -u hfnode tee /var/lib/hfnode/tx-inhibited
+sudo systemctl restart hfnode
+journalctl -u hfnode -n 20     # look for: emailed the transmit-inhibit alert
+```
+
+Then clear it as above.
 
 **Stopping the node.** `sudo systemctl stop hfnode`. If the node was keying when it
 was stopped, the radio may finish the text already handed to its keyer (at most 30
