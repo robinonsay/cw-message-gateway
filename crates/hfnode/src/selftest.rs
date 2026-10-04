@@ -2539,11 +2539,23 @@ fn snr_head(snr: Option<f32>) -> String {
     snr.map_or("clean".into(), |s| format!("{s} dB"))
 }
 
-/// The region every trial must pass, or the sweep fails. It is set well inside
-/// what the full sweep measured on 2026-10-04 (every trial passed down to -3 dB at
-/// 8-35 wpm machine-keyed and at 8-30 wpm hand-keyed, -6 dB failed throughout,
-/// and 5 wpm failed some trials even at 20 dB), so that it flags a regression,
-/// not the luck of three trials at an edge.
+/// What a sweep's seeds do and do not fix, printed with every sweep.
+pub const TIMING_NOTE: &str = "Seeds fix each trial's audio (noise and keying jitter), \
+     not its outcome: the node and the mock radio run on the wall clock, so where the \
+     node's transmissions fall against the operator's audio depends on thread \
+     scheduling. A re-run repeats the success counts away from the edges, but the \
+     extra transmissions and decode percentages vary a little, and a trial at an edge \
+     can go either way, more so under a different load or --jobs.";
+
+/// The region every trial must pass, or the sweep fails. It is set well inside the
+/// edges the full sweep measured on 2026-10-04 (default grid, 3 trials per cell;
+/// the same success counts in five sweeps but for one trial). Machine-keyed: every
+/// trial passed down to -3 dB at 8-35 wpm; 5 wpm failed a trial at 20 dB and at
+/// 10 dB yet passed from 6 to -3 dB; -6 dB let 1 of 30 runs through (8 wpm).
+/// Hand-keyed: every trial passed down to -3 dB at 8-18, 25 and 30 wpm, to 0 dB at
+/// 20 and 35 wpm (2/3 and 1/3 at -3 dB), to 3 dB at 5 wpm; -6 dB never passed.
+/// Seeds do not fix outcomes ([`TIMING_NOTE`]), so the region stays clear of the
+/// edges and flags a regression, not the luck of three trials at an edge.
 pub fn should_pass(c: &Cell) -> bool {
     let snr = c.snr_db.unwrap_or(f32::INFINITY);
     match c.keying {
@@ -2684,6 +2696,12 @@ pub fn sweep_scenario(cell: &Cell, trial: u32, rx: bool) -> Scenario {
 pub struct TrialResult {
     pub cell: Cell,
     pub trial: u32,
+    /// Seeds the trial's noise and keying jitter: its audio, not its outcome. The
+    /// node and the mock radio run on the wall clock (the mock's radio time is real
+    /// time times the scale, the node's transmit guard uses `Instant`), so where the
+    /// node's transmissions fall against the operator's audio depends on thread
+    /// scheduling, and a trial near an edge can go the other way when re-run with
+    /// the same seed. See [`TIMING_NOTE`].
     pub seed: u64,
     /// The exact message reached the gateway, once and nothing else did, the
     /// operator heard `SENT` for it (and with RX, heard the readout exactly and the
@@ -3025,6 +3043,7 @@ pub fn render_sweep(spec: &SweepSpec, results: &[TrialResult]) -> String {
          time limit; W! WRONG MESSAGE DELIVERED; S! SAFETY VIOLATION; [ ] should-pass \
          region ({SHOULD_PASS})."
     );
+    let _ = writeln!(s, "{TIMING_NOTE}");
     let n = results.len();
     let ok = results.iter().filter(|r| r.success).count();
     let sum = |f: fn(&TrialResult) -> u32| results.iter().map(f).sum::<u32>();
@@ -3043,7 +3062,7 @@ pub fn render_sweep(spec: &SweepSpec, results: &[TrialResult]) -> String {
     for r in &v.hard {
         let _ = writeln!(
             s,
-            "\n!!! HARD FAILURE: {} trial {} (seed {:#x}): {}",
+            "\n!!! HARD FAILURE: {} trial {} (audio seed {:#x}): {}",
             r.cell,
             r.trial + 1,
             r.seed,
@@ -3054,7 +3073,7 @@ pub fn render_sweep(spec: &SweepSpec, results: &[TrialResult]) -> String {
         if !r.hard_failure() {
             let _ = writeln!(
                 s,
-                "\n!!! SHOULD-PASS FAILURE: {} trial {} (seed {:#x}): {}",
+                "\n!!! SHOULD-PASS FAILURE: {} trial {} (audio seed {:#x}): {}",
                 r.cell,
                 r.trial + 1,
                 r.seed,
@@ -3168,7 +3187,7 @@ fn render_edges(spec: &SweepSpec, results: &[TrialResult], keying: Keying) -> St
 /// The raw results, one row per run.
 pub fn sweep_csv(results: &[TrialResult]) -> String {
     let mut s = String::from(
-        "keying,wpm,snr_db,trial,seed,success,delivered,wrong_delivered,safety_violation,\
+        "keying,wpm,snr_db,trial,audio_seed,success,delivered,wrong_delivered,safety_violation,\
          timed_out,transmissions,repeats,restarts,wrong_read_backs,receptions,decoded_exact,\
          decode_mismatches,decoded_intact,should_pass,wall_s,radio_s,why\n",
     );
@@ -3547,6 +3566,11 @@ mod tests {
         r.why = "said \"no\", twice".into();
         let csv = sweep_csv(&[r]);
         assert_eq!(csv.lines().count(), 2);
+        // The seed fixes the audio only; the column says so.
+        assert!(
+            csv.starts_with("keying,wpm,snr_db,trial,audio_seed,"),
+            "{csv}"
+        );
         assert!(csv.ends_with(",\"said \"\"no\"\", twice\"\n"), "{csv}");
         assert_eq!(
             csv.lines().next().unwrap().split(',').count(),

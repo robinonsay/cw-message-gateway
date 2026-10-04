@@ -134,7 +134,7 @@ enum Cmd {
             requires = "sweep"
         )]
         keying: Vec<String>,
-        /// Sweep: trials per cell, each with its own noise and timing.
+        /// Sweep: trials per cell, each with its own noise and keying jitter.
         #[arg(long, default_value_t = selftest::SWEEP_TRIALS, requires = "sweep")]
         trials: u32,
         /// Sweep: follow each TX exchange with an RX exchange reading out a message.

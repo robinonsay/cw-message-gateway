@@ -248,12 +248,29 @@ The default grid is 480 runs, about 3.5 minutes on a 4-core laptop (the run is p
 by the time scale, not the CPU); `tests/sweep_e2e.rs` runs a few cells of it in a
 few seconds.
 
-Measured on 2026-10-04 (default grid, 3 trials per cell, 100x real time; the
-noise and jitter seeds are fixed, so a re-run gives nearly the same matrices):
+**Seeds fix the audio, not the outcome.** Each trial's seed (`audio_seed` in the
+CSV) fixes its noise and keying jitter. The node and the mock radio run on the wall
+clock, though: the mock's radio time is real time times the scale, and the node's
+transmit guard uses `Instant`. So where the node's transmissions fall against the
+operator's audio, and which received audio the node drops while it transmits,
+depend on thread scheduling, and a re-run with the same seed is not the same run.
+In five sweeps of the default grid on one machine (4 at once), 479 of 480 trials
+had the same outcome each time (machine-keyed 5 wpm at 10 dB went 2/3, 2/3, 1/3,
+2/3, 2/3), but 8 trials needed a different number of transmissions and 119 logged
+a different number of receptions. Re-running the edge cells with `--jobs 1` or
+`--jobs 16` flipped 2 of 36 trials (hand-keyed 35 wpm at 0 dB, machine-keyed 5 wpm
+at 10 dB), and on another machine machine-keyed 5 wpm at -6 dB went from 0/3 to
+1/3. Read a single count at an edge as give or take one trial; the should-pass
+region stays clear of the edges for this reason.
+
+Measured on 2026-10-04 (default grid, 3 trials per cell, 100x real time, 4 at once;
+the success counts below came out the same in five sweeps, except the one trial
+named above):
 
 - **Machine-keyed:** 8 to 35 wpm pass every trial from clean down to -3 dB. At -6
-  dB nothing gets through (1 success in 30 runs, at 8 wpm). 5 wpm passes clean and
-  from 6 to -3 dB, but 1 of 3 trials fails at 20 dB and at 10 dB.
+  dB almost nothing gets through (1 success in 30 runs in each sweep, at 8 wpm). 5
+  wpm passes clean and from 6 to -3 dB, but 1 of 3 trials fails at 20 dB and at 10
+  dB.
 - **Hand-keyed:** 8 to 30 wpm pass down to -3 dB (20 wpm down to 0 dB), 35 wpm down
   to 0 dB, 5 wpm down to 3 dB; -6 dB fails at every speed.
 - **At 10 dB:** machine-keyed 8 to 35 wpm, hand-keyed 5 to 35 wpm pass every trial.

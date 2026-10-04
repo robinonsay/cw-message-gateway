@@ -146,7 +146,8 @@ non-zero on a hard failure or a failed trial in the should-pass region
 above). About 3.5 minutes on a 4-core laptop; on a Pi 4 estimate 4 to 6 minutes at
 the default scale, about 17 minutes at `--scale 20`.
 
-Edges measured on 2026-10-04 (default grid, 3 trials per cell):
+Edges measured on 2026-10-04 (default grid, 3 trials per cell, 4 at once; the
+same success counts in five sweeps but for one trial, machine-keyed 5 wpm at 10 dB):
 
 | | Every trial passes down to | Fails | At 10 dB |
 |---|---|---|---|
@@ -159,6 +160,11 @@ read-backs were garbled text that still parsed (hand-keyed even when clean): the
 operator's read-back check caught them all, and no wrong message was delivered.
 No run broke a safety bound. These are synthetic signals in white noise: they say
 where the node's own decoding and protocol give out, not how a real band behaves.
+A trial's seed (`audio_seed` in the CSV) fixes its audio, not its outcome: the node
+and the mock radio run on the wall clock, so a re-run, especially under a different
+load or `--jobs`, can turn a trial at an edge either way and changes the extra
+transmissions a little. Compare a Pi's matrices with these give or take one trial
+per cell at the edges.
 
 **Pass (sweep):** `verdict: PASS`, with no `W!` or `S!` anywhere in the matrices.
 Compare the edges with the table above after a software update; an edge that moves
