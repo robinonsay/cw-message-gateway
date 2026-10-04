@@ -621,6 +621,16 @@ impl<P: Port> Rig for Ic7300<P> {
         Ok(self.tuner_state()? == 0x01)
     }
 
+    /// 1C 03 "Read transmit frequency" (p. 19-7).
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        Ic7300::transmit_frequency(self)
+    }
+
+    /// 0F "Read Split setting" (p. 19-3) and 21 02 "Send/read ∂TX setting" (p. 19-7).
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(self.split()? || self.delta_tx()?)
+    }
+
     fn read_swr(&mut self) -> Result<f32> {
         Ok(swr_from_meter(self.read_level(cmd::SWR_METER)?))
     }

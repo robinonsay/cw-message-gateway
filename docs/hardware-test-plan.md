@@ -62,6 +62,11 @@ These hold whatever the stage or config, and are covered by unit tests:
   refuses to send `1C 00 01` (force transmit), refuses frequencies outside the
   radio's 30 kHz-74.8 MHz, and treats any reply that is not exactly the documented
   shape as an error, never as a guess.
+- **Every listening window starts from a known state.** Before its tune the node
+  checks the radio reads receive, sends the settings again (someone may have used
+  the front panel since), and checks that split and ∂TX are still off and `1C 03`
+  reads the configured frequency. If any of that fails it forces receive and stays
+  silent until the next window.
 - **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
   5917); the node then stays silent for that listening window. Any tuner error
   forces receive. SWR is measured at the start of every transmission. Every SWR

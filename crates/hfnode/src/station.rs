@@ -360,6 +360,24 @@ impl<R: Rig + 'static> Station<R> {
         })
     }
 
+    /// The radio would transmit on the configured frequency: split and ∂TX off, and
+    /// 1C 03 reads the frequency set. Someone at the radio may have switched either
+    /// on since start-up, when the preflight checked them.
+    fn check_transmit_frequency(&self) -> civ::Result<()> {
+        let hz = self.cfg.frequency_hz;
+        self.with_rig(|r| {
+            if r.split_or_delta_tx()? {
+                return Err(RigError::Protocol("split or ∂TX is on".into()));
+            }
+            match r.transmit_frequency()? {
+                tx if tx == hz => Ok(()),
+                tx => Err(RigError::Protocol(format!(
+                    "transmit frequency reads {tx} Hz, not {hz} Hz"
+                ))),
+            }
+        })
+    }
+
     /// Set the radio up again and run the internal tuner. Call at start-up and at
     /// the top of each listening window; clears any SWR lockout from the last window,
     /// and locks out transmitting for this one if the radio could not be set up or
@@ -374,12 +392,14 @@ impl<R: Rig + 'static> Station<R> {
         // Set the radio up again: the front panel, another program or a power cycle
         // may have changed it since the last window, and the tune transmits. It
         // should be on receive already; if it is not, something else is keying it.
+        // Split and ∂TX are not set by the node, so they are only checked.
         let ready = self
             .with_rig(|r| r.is_transmitting())
             .and_then(|tx| match tx {
                 false => self.apply_settings(),
                 true => Err(RigError::Protocol("on transmit at window start".into())),
-            });
+            })
+            .and_then(|()| self.check_transmit_frequency());
         if let Err(e) = ready {
             self.swr_lockout = true;
             log::error!("could not set the radio up ({e}): silent until next window");
@@ -839,6 +859,22 @@ mod tests {
         let mut r = rig.lock().unwrap();
         assert_eq!(r.tunes, 0);
         assert!(!r.is_transmitting().unwrap(), "receive forced");
+    }
+
+    #[test]
+    fn a_radio_left_in_split_is_not_tuned() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        // Someone at the radio switches split on between windows.
+        st.rig().lock().unwrap().split_tx_hz = Some(7_040_000);
+        assert!(st.start_window().is_err());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        assert_eq!(st.rig().lock().unwrap().tunes, 1);
+        // Back off, the next window works again.
+        st.rig().lock().unwrap().split_tx_hz = None;
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
     }
 
     #[test]

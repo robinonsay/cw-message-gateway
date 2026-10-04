@@ -43,7 +43,7 @@ branch.
 | Nothing in the code enforced the bench plan; setup, tune, cw and run worked at up to 100 W on an untested radio | High | `station.commissioned` stage gates; at most 10 W before stage `keying`; read-only preflight before every write; `hfnode radio check` |
 | Split, ∂TX or a memory channel could move the transmit frequency unseen | High | Preflight requires `0F` and `21 02` OFF; read-back requires `1C 03` (transmit frequency) to equal the set frequency |
 | Settings trusted on a bare OK, never read back | High | Read-back after every setup: `03`, `1C 03`, `04`, `0F`, `21 02`, `16 47`, `14 0A`, `14 0C`, `14 0F` |
-| The radio was set up once at start-up; each window's tune used whatever the front panel left | High | Every window re-reads `1C 00` and re-sends the settings before tuning; if the radio is on transmit, receive is forced and the window stays silent |
+| The radio was set up once at start-up; each window's tune used whatever the front panel left | High | Every window re-reads `1C 00`, re-sends the settings and checks split, ∂TX and `1C 03` before tuning; if the radio is on transmit, a setting is refused or the transmit frequency is not the configured one, receive is forced and the window stays silent |
 | A tuner that fails to match bypasses itself and reads `00`, which was logged as a good tune | High | `1C 01` parsed strictly; `00` after a tune locks the window out; any tune error forces receive |
 | SWR checked once per window (once per boot with `schedule.always`) | High | SWR checked on every transmission |
 | Every receive check assumes `1C 00` reads transmit while the keyer sends; the manual does not say so | High | Each SWR sample also reads `1C 00`; output on the Po meter while it reads receive stops all transmitting |

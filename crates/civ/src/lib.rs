@@ -78,6 +78,17 @@ pub trait Rig: Send {
     fn tuner_matched(&mut self) -> Result<bool> {
         Ok(true)
     }
+    /// The frequency the radio would transmit on: with split or ∂TX on it is not
+    /// the operating frequency. Rigs that cannot tell answer the operating
+    /// frequency.
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        self.frequency()
+    }
+    /// Whether split or ∂TX is on, either of which moves the transmit frequency
+    /// away from the one set. Rigs without them answer `false`.
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(false)
+    }
     /// SWR meter reading. Only meaningful while transmitting with the key down;
     /// with no RF out it reads 1.0.
     fn read_swr(&mut self) -> Result<f32>;

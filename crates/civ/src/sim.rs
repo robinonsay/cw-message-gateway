@@ -34,6 +34,8 @@ pub struct SimRig {
     pub tx_jammed: bool,
     /// Fault: the tuner cannot match the load and bypasses itself.
     pub tuner_bypassed: bool,
+    /// Someone at the radio switched split on, transmitting on this frequency.
+    pub split_tx_hz: Option<u64>,
     /// Simulated speed-up: keying takes `real time / time_scale`.
     pub time_scale: f32,
     keying: Option<Keying>,
@@ -76,6 +78,7 @@ impl Default for SimRig {
             stop_cw_fails: false,
             tx_jammed: false,
             tuner_bypassed: false,
+            split_tx_hz: None,
             time_scale: 1.0,
             keying: None,
             forced_tx: false,
@@ -189,6 +192,14 @@ impl Rig for SimRig {
 
     fn tuner_matched(&mut self) -> Result<bool> {
         Ok(!self.tuner_bypassed)
+    }
+
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        Ok(self.split_tx_hz.unwrap_or(self.frequency_hz))
+    }
+
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(self.split_tx_hz.is_some())
     }
 
     fn read_swr(&mut self) -> Result<f32> {

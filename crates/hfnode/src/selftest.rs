@@ -495,6 +495,12 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn tuner_matched(&mut self) -> civ::Result<bool> {
         self.inner.tuner_matched()
     }
+    fn transmit_frequency(&mut self) -> civ::Result<u64> {
+        self.inner.transmit_frequency()
+    }
+    fn split_or_delta_tx(&mut self) -> civ::Result<bool> {
+        self.inner.split_or_delta_tx()
+    }
     fn read_swr(&mut self) -> civ::Result<f32> {
         self.inner.read_swr()
     }
