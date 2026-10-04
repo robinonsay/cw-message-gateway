@@ -66,7 +66,7 @@ hfnode keygen --out "$D/node.key"        # created with mode 0600
 | `hfnode.toml` | The config. |
 | `node.key` | The secret key. Back it up somewhere offline (a USB stick kept at home). Anyone with it can print valid codes; never carry it in the field, only the printed table. |
 | `env` | Passwords and API keys (section 6). |
-| `state/` | `last_seq`, `inbox.json`, `rx.log`, `health.csv`, `wx_last.json`, and `tx-inhibited` if the node ever stops transmitting (section 8). |
+| `state/` | `last_seq`, `inbox.json`, `rx.log`, `health.csv`, `wx_last.json`, and `tx-inhibited` if the node ever stops transmitting (section 8). With texting set up, also `google_voice.json`, `imessage.json` and `imessage_windows.json` ([texting.md](texting.md#files-in-state_dir)). |
 | `hfnode-supervise.sh`, `hfnode.command` | The start-up scripts (section 7). |
 
 In `hfnode.toml` point the node at that folder (`~` is your home folder):
@@ -151,6 +151,9 @@ Then edit `hfnode.toml` as in [section 7](raspberry-pi-setup.md#7-configuration)
 there, with the serial port, audio device and folder paths from above. Keep
 `station.commissioned = "none"` until the hardware test plan sets it.
 
+To reach contacts by text or iMessage as well as email, set up `[google_voice]`
+and `[imessage]` as in [texting.md](texting.md).
+
 Fill in `[storm]` with your home's latitude and longitude (`run` refuses to start
 without it), then check the node can read the forecast. It prints `clear:` or
 `storm:`; an error means the node would never transmit:
@@ -205,7 +208,8 @@ or crash, loads `env`, and keeps the Mac awake while it runs.
 Terminal window and runs the node there, with the log in the window. To start it
 at log-in, add `hfnode.command` under System Settings > General > Login Items >
 Open at Login. Running in Terminal is what makes the microphone permission
-dependable.
+dependable, and it is the only way the node can use iMessage: the permissions for
+Messages are Terminal's too ([texting.md](texting.md#imessage-mac-only)).
 
 On start you should see `last_seq is N`, `preflight:` lines, `read-back:` lines, a
 `health: tune ...` line and `N0CALL listening on 7030000 Hz`.
@@ -223,7 +227,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.robinonsay.hfn
 The microphone permission is the weak point here: the agent asks for itself, not
 through Terminal, and macOS may never show the prompt for a program that is not an
 app, or may forget the grant when `hfnode` is rebuilt. Check the log for the
-silence warning and that `hfnode` decodes what it hears. Stop it with
+silence warning and that `hfnode` decodes what it hears. The agent cannot use
+iMessage: it sets `HFNODE_LAUNCHD=1`, and the node then logs that iMessage is not
+available and sends by Google Voice or email. Stop it with
 `launchctl bootout gui/$(id -u)/io.github.robinonsay.hfnode`; macOS 13 and later
 also list it under Login Items > Allow in the Background.
 
@@ -266,7 +272,10 @@ that file is removed. Check the radio first.
 **Updating.** Stop the node, then in `~/rust/ic7300-hf-server`: `git pull`,
 `cargo install --locked --path crates/hfnode`, copy the start-up scripts again
 (`cp deploy/hfnode-supervise.sh deploy/macos/hfnode.command "$D/"`), and start it
-again. `last_seq` and the inbox stay in the node's folder.
+again. `last_seq` and the inbox stay in the node's folder. With iMessage set up,
+start it with `hfnode.command` and check its log says `iMessage ready`: after an
+update macOS may ask again for Terminal to control Messages, so run `hfnode
+messages check` in Terminal once if it does not.
 
 **Moving the node to or from another computer.** First stop the old node and turn
 off its start-up (on a Pi `sudo systemctl disable --now hfnode`, on a Mac its Login
@@ -277,4 +286,5 @@ already used. Copy it at that moment, not from a backup, Migration Assistant or 
 earlier copy, which would hold an older `last_seq`; before the first `hfnode run`,
 check that `last_seq` is at least the last line crossed off the printed table. Then
 set `station.commissioned = "none"` and redo the hardware test plan from step 1,
-since the computer changed.
+since the computer changed. `state/imessage.json` belongs to the old Mac's Messages:
+on a new Mac expect one `rescanning` warning, then run `hfnode messages check`.

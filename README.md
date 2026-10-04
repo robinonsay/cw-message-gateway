@@ -329,6 +329,8 @@ the air.
 | `hfnode selftest --sweep [--wpm ..] [--snr ..] [--keying ..] [--trials N] [--rx] [--csv F]` | no | Sweep speed x SNR x keying with complete exchanges; print where it breaks. |
 | `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
 | `hfnode devices` | no | List serial ports and audio inputs, marking the radio's. Opens nothing. |
+| `hfnode messages --config C check [--since H] [--save-raw DIR] [--dump ROWID]` | no | Show how TX reaches each contact and what the node would take from its mailbox and Messages. Changes nothing. See [docs/texting.md](docs/texting.md). |
+| `hfnode messages --config C send [--via imessage\|google-voice\|email] NAME TEXT` | no | Really send one message to a contact by the route TX would use. |
 | `hfnode filter --config C test` | no | Screen ten sample replies with the configured filter model and check the verdicts. With Claude, each is a paid API call. |
 | `hfnode filter --config C screen TEXT [--from NAME]` | no | Show what one reply would be keyed as. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
@@ -362,5 +364,6 @@ decoded transmission) and `health.csv` (every tune and SWR reading).
 - [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
+- [docs/texting.md](docs/texting.md): reaching contacts by text (Google Voice) and iMessage, and checking it.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
 - [hfnode.example.toml](hfnode.example.toml): every config key, with comments.

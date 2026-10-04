@@ -18,9 +18,13 @@ always ends with `DE <its callsign> K`.
   before you go (GPS and ham apps show it), and write it on the table.
 - **The code table.** Print a fresh one (below) and check that its first line is
   above the last code you used.
-- **Tell your contacts** to reply to the node's email (or text) with short, plain
-  messages. Quoted text and signatures are stripped, and only replies from the
-  contact's configured address or phone number are kept.
+- **Tell your contacts** to reply with short, plain messages, and what is in
+  [Texts and iMessages](#texts-and-imessages). Quoted text and signatures are
+  stripped, and only replies from the contact's configured address, phone number
+  or iMessage handle are kept.
+- **Check every contact can be reached.** At home, with the node running, run
+  `hfnode messages check` and send one test by each route with `hfnode messages
+  send` ([texting.md](texting.md#before-a-trip)).
 
 ## The code table
 
@@ -101,17 +105,21 @@ You:   OK 43 WBNFHJGC K
 Node:  SENT 43 DE N0CALL K
 ```
 
-`SENT` means the node handed the message to its mail server. The contact receives an
-email (or a text, through their carrier's email-to-SMS address) from the node with
-the subject `From W5XXX`.
+`SENT` means the message is on its way: by email (subject `From W5XXX`), by text
+from the node's Google Voice number, or by iMessage, whichever the node has for
+that contact ([Texts and iMessages](#texts-and-imessages)).
 
 **Check the read-back word by word.** Words the node could not decode are left out,
 and only characters that exist in Morse are sent on. If anything is wrong, send
 `NO K` and start again with the next two lines.
 
 If the node replies `FAIL 43 GATEWAY DE N0CALL K`, the codes were accepted and are
-used up, but the message could not be sent (mail server problem). Try again later
-with new lines.
+used up, but the message could not be sent (mail server or Messages problem). Try
+again later with new lines.
+
+If it replies `FAIL 43 NO ROUTE DE N0CALL K`, the codes are used up and the node has
+no way to reach that contact yet. Trying again usually fails the same way; see
+[Texts and iMessages](#texts-and-imessages).
 
 ### RX: read messages
 
@@ -265,6 +273,52 @@ forecast for the node before a trip in storm season.
   The decoder follows your speed, but it handles even, well-spaced sending best.
 - Stick to letters, numbers and simple punctuation. Characters Morse does not have
   are dropped.
+
+## Texts and iMessages
+
+Each contact is reached the first way that works, as set up at home
+([texting.md](texting.md)): an iMessage from the owner's Apple ID, a text from the
+node's Google Voice number, or an email. The code table lists each contact's route.
+
+**What `SENT` means:**
+
+- email: the node's mail server accepted it;
+- text: Gmail accepted it for Google Voice. If the node's Google Voice number has
+  lapsed it goes nowhere, which only a test before the trip shows;
+- iMessage: Messages on the node's Mac shows it sent.
+
+**An iMessage can take up to about 30 seconds** after your `OK` before the node
+answers `SENT` or `FAIL`. Wait for it; do not send the `OK` again meanwhile.
+
+**`FAIL 43 GATEWAY`** after an iMessage: it may still arrive. Before sending it
+again, give it time and check with `RX` whether the contact answered.
+
+**`FAIL 43 NO ROUTE`**: for example the contact has never texted the node's Google
+Voice number (so the node cannot text them yet), or iMessage is not working and the
+contact has no other route. It clears once the contact texts the node's number, or
+after a fix at home, so don't spend lines retrying it.
+
+**Replies on `RX`:**
+
+- Texts and iMessages are read like emails (`NR 1 FM MOM ...`), all in the order
+  they were sent.
+- A phone's reaction to a text is read as `FM MOM LIKED YOUR MSG` (or `LOVED`,
+  `LAUGHED AT`, `REACTED TO`, ...). A reaction to an iMessage is not read.
+- `FM MOM TEXT NOT READABLE SEE NODE LOG`: MOM texted something the node could not
+  read, such as a format it does not know. Ask for it again in plain words.
+- An iMessage reply is read only if it was sent within 48 hours of the node's last
+  iMessage to that contact. After that, the contact texts the node's Google Voice
+  number instead.
+
+**Tell your contacts:**
+
+- texts come from the node's Google Voice number and iMessages from the owner's own
+  number, both starting `W5XXX via HF radio, replies are read on air`;
+- their replies are sent **unencrypted over amateur radio**: anyone can listen, so
+  nothing private;
+- with the Claude filter their replies also go to Anthropic for screening; with
+  Ollama they stay at home;
+- to answer an iMessage within 2 days, or else text the Google Voice number.
 
 ## What REDACTED and MSG WITHHELD BY FILTER mean
 
