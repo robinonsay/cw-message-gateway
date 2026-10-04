@@ -214,6 +214,11 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 |---|---|---|
 | Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent for that listening window. |
 
+**Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
+With it ON the radio streams waveform data to the port the node uses, which slows
+the node's stop commands. Close any panadapter program before starting the node;
+`radio check` warns while it is ON.
+
 **On the main screen:** SPLIT off and XIT (∂TX) off. With either on, the radio would
 transmit somewhere other than the frequency the node set; the node refuses to
 write to the radio unless both read OFF.

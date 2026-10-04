@@ -128,6 +128,11 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 3. For the service: `sudo systemctl stop hfnode`. The unit then runs
    `hfnode radio ... rx` (see `deploy/hfnode.service`).
 
+After option 1, also stop `hfnode` (option 2 or 3) **before** switching the radio
+back on. A running node does not take the radio being off as a reason to stop: if
+it was off at the start of a listening window the node inhibits transmitting, but
+if it comes back within the same window the node answers the next call it hears.
+
 ## Before you start
 
 **Bench config.** Make a copy of the config for testing, so you can change values
@@ -358,10 +363,11 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.27 | `1A 05 00 29` | Time-Out Timer (CI-V): `00` = OFF, `01` = 3 min to `05` = 30 min. `run` refuses OFF | p. 19-4 (line 8861) | ☐ |
 | 0.28 | `1A 05 01 97`, `1A 05 00 74` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON. CI-V USB Port: `00` = Link to [REMOTE] (warning), `01` = Unlink | p. 19-7 (line 9269); p. 19-5 (line 8975) | ☐ |
 | 0.29 | `1A 05 00 71`, `00 75`, `00 84`, `01 61` | Reported only: CI-V Transceive, USB Echo Back (raw value), meter peak hold (warning if ON), keyer dot/dash ratio (warning unless `30`, 1:1:3) | pp. 19-5 and 19-6 (lines 8966, 8978, 9006, 9185) | ☐ |
-| 0.30 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
-| 0.31 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
-| 0.32 | Serial link | DTR and RTS low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
-| 0.33 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` and `transmit_control_and_read_frames_on_the_wire` tests match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
+| 0.30 | `27 11` scope data output | Reads `27 11`; `00` = OFF, `01` = ON (warning: the radio streams `27 00` waveform frames to the port, which slow the stop commands after a timeout) | p. 19-14: "Send/read the Scope wave data output (00=OFF, 01=ON)" (lines 9353-9361) | ☐ |
+| 0.31 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
+| 0.32 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
+| 0.33 | Serial link | DTR and RTS low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
+| 0.34 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` and `transmit_control_and_read_frames_on_the_wire` tests match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
@@ -384,8 +390,8 @@ hfnode radio --config $C status
 ```
 
 `check` only reads: `19 00`, `1C 00`, `1A 05 00 78`, `00 79`, `00 80`, `0F`, `21 02`,
-`1A 05 00 29`, `1A 05 00 74`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `03`,
-`1C 03`, `04`, `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent
+`1A 05 00 29`, `1A 05 00 74`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `27 11`,
+`03`, `1C 03`, `04`, `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent
 with no data, which reads the item. To see every frame on the wire, with the time
 each reply took, put `RUST_LOG=civ=trace` in front of the command.
 

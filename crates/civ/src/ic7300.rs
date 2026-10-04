@@ -162,6 +162,9 @@ mod cmd {
     /// 1A 05 01 61: "Send/read CW keyer dot/dash ratio (28=1:1:2.8 to 45=1:1:4.5)"
     /// (p. 19-6).
     pub const KEYER_RATIO: &[u8] = &[0x1A, 0x05, 0x01, 0x61];
+    /// 27 11: "Send/read the Scope wave data output (00=OFF, 01=ON)" (p. 19-14);
+    /// with it and the scope ON the radio streams 27 00 waveform data unasked.
+    pub const SCOPE_DATA_OUTPUT: &[u8] = &[0x27, 0x11];
 }
 
 /// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
@@ -517,6 +520,11 @@ impl<P: Port> Ic7300<P> {
     pub fn transmit_frequency(&mut self) -> Result<u64> {
         let data = self.read(cmd::TX_FREQ)?;
         parse_frequency(&data)
+    }
+
+    /// 27 11: whether scope waveform data output is on.
+    pub fn scope_data_output(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::SCOPE_DATA_OUTPUT, 0x00..=0x01)? == 0x01)
     }
 
     /// 1A 05 00 84: whether meter peak hold is on.

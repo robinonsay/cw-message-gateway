@@ -1124,6 +1124,94 @@ mod tests {
         assert!(!st.tx_inhibited());
     }
 
+    /// A radio switched off: no command gets a reply. Wraps a SimRig so it can be
+    /// switched back on.
+    struct Switchable {
+        on: bool,
+        rig: SimRig,
+    }
+
+    impl Switchable {
+        fn rig(&mut self) -> civ::Result<&mut SimRig> {
+            match self.on {
+                true => Ok(&mut self.rig),
+                false => Err(RigError::Timeout),
+            }
+        }
+    }
+
+    impl Rig for Switchable {
+        fn frequency(&mut self) -> civ::Result<u64> {
+            self.rig()?.frequency()
+        }
+        fn set_frequency(&mut self, hz: u64) -> civ::Result<()> {
+            self.rig()?.set_frequency(hz)
+        }
+        fn set_mode_cw(&mut self) -> civ::Result<()> {
+            self.rig()?.set_mode_cw()
+        }
+        fn set_rf_power_watts(&mut self, watts: u32) -> civ::Result<()> {
+            self.rig()?.set_rf_power_watts(watts)
+        }
+        fn set_key_speed(&mut self, wpm: u32) -> civ::Result<()> {
+            self.rig()?.set_key_speed(wpm)
+        }
+        fn set_break_in(&mut self, on: bool) -> civ::Result<()> {
+            self.rig()?.set_break_in(on)
+        }
+        fn set_break_in_delay(&mut self, dots: f32) -> civ::Result<()> {
+            self.rig()?.set_break_in_delay(dots)
+        }
+        fn dot_duration(&mut self) -> civ::Result<Duration> {
+            self.rig()?.dot_duration()
+        }
+        fn start_tune(&mut self) -> civ::Result<()> {
+            self.rig()?.start_tune()
+        }
+        fn tuner_busy(&mut self) -> civ::Result<bool> {
+            self.rig()?.tuner_busy()
+        }
+        fn read_swr(&mut self) -> civ::Result<f32> {
+            self.rig()?.read_swr()
+        }
+        fn read_po(&mut self) -> civ::Result<f32> {
+            self.rig()?.read_po()
+        }
+        fn send_cw(&mut self, text: &str) -> civ::Result<()> {
+            self.rig()?.send_cw(text)
+        }
+        fn stop_cw(&mut self) -> civ::Result<()> {
+            self.rig()?.stop_cw()
+        }
+        fn is_transmitting(&mut self) -> civ::Result<bool> {
+            self.rig()?.is_transmitting()
+        }
+        fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
+            self.rig()?.set_transmit(tx)
+        }
+    }
+
+    #[test]
+    fn a_radio_off_at_window_start_inhibits_transmitting() {
+        let rig = Switchable {
+            on: true,
+            rig: fast_rig(),
+        };
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        st.rig().lock().unwrap().on = false;
+        assert!(st.start_window().is_err());
+        assert!(st.tx_inhibited());
+        // Switched back on, it still keys nothing and does not tune.
+        st.rig().lock().unwrap().on = true;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(st.start_window().is_err());
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.rig.tunes, r.rig.sent.len()), (1, 0));
+    }
+
     #[test]
     fn unconfirmed_receive_inhibits_transmit() {
         let mut st = Station::new(fast_rig(), cfg(), None);

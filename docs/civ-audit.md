@@ -104,6 +104,7 @@ named test-plan step measures it.
 | `1A 05 00 84` | Meter peak hold: warns if ON | 9006 | Yes |
 | `1A 05 01 61` | Keyer dot/dash ratio: warns unless `30` (1:1:3.0) | 9185 | Yes |
 | `1A 05 01 97` | Inhibit Timer at USB Connection: warns if OFF | 9269 | Yes |
+| `27 11` | Scope wave data output: warns if ON (the waveform stream keeps the link busy) | 9353-9361 | Yes; reply format bench (step 0) |
 
 **The link:**
 
@@ -173,3 +174,13 @@ None of these affects the bench steps; all need deciding before stage `done`:
   clear.
 - **`hfnode radio rx` failing in the service's stop hook** does not write the
   inhibit file.
+- **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated
+  as a lost radio. Off at a window start, the node inhibits itself; switched off
+  and on within one window, it answers the next call without setting the radio up
+  again. A USB device that re-enumerates leaves the node holding a dead port. The
+  stop procedure now says to stop `hfnode` before switching the radio back on; the
+  node should latch the inhibit and exit after a few consecutive timeouts.
+- **Clock.** Listening windows follow the Pi's clock, and the service does not wait
+  for it to be synchronised (`time-sync.target` is reached when timesyncd starts,
+  not when it has synced). After a power cut the window-start tunes can come at
+  unscheduled times until NTP corrects it.

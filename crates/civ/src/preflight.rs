@@ -384,6 +384,22 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
         ),
     }
 
+    // With the scope and its data output ON (27 10, 27 11; line 9353), waveform
+    // frames stream to this port unasked. They are skipped, but the link is never
+    // quiet, so every command after a timeout first waits out the drain, the stop
+    // commands included.
+    match r.scope_data_output() {
+        Ok(false) => rep.add("scope data output", "27 11", "OFF", Level::Pass, ""),
+        Ok(true) => rep.add(
+            "scope data output",
+            "27 11",
+            "ON",
+            Level::Warn,
+            "close any panadapter program: its waveform stream delays the stop commands",
+        ),
+        Err(e) => rep.add("scope data output", "27 11", "-", Level::Warn, unread(&e)),
+    }
+
     rep.info("frequency", "03", r.frequency(), |hz| format!("{hz} Hz"));
     rep.info(
         "transmit frequency",
@@ -614,6 +630,7 @@ mod tests {
             (&[0x1A, 0x05, 0x00, 0x75], &[0x01]),
             (&[0x1A, 0x05, 0x01, 0x61], &[0x30]),
             (&[0x1A, 0x05, 0x00, 0x84], &[0x00]),
+            (&[0x27, 0x11], &[0x00]),
             (&[0x1C, 0x03], &[0x00, 0x00, 0x03, 0x07, 0x00]),
         ] {
             t.answers.insert(cmd.to_vec(), data.to_vec());
@@ -648,7 +665,7 @@ mod tests {
         // that sets a value, keys or tunes.
         let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
         let sent = sent_bodies(&r);
-        assert_eq!(sent.len(), 20);
+        assert_eq!(sent.len(), 21);
         for body in sent {
             assert!(reads.contains(&body), "{body:02X?} is not a read");
         }
@@ -703,16 +720,18 @@ mod tests {
     }
 
     #[test]
-    fn keyer_ratio_peak_hold_and_a_linked_port_only_warn() {
+    fn warning_items_do_not_fail_the_preflight() {
         let mut t = good();
         t.answers.insert(vec![0x1A, 0x05, 0x01, 0x61], vec![0x45]);
         t.answers.insert(vec![0x1A, 0x05, 0x00, 0x84], vec![0x01]);
         t.answers.insert(vec![0x1A, 0x05, 0x00, 0x74], vec![0x00]);
+        t.answers.insert(vec![0x27, 0x11], vec![0x01]);
         let rep = preflight(&mut rig(t), true);
         assert!(rep.passed(), "{rep}");
         assert_eq!(level_of(&rep, "keyer dot/dash ratio"), Level::Warn);
         assert_eq!(level_of(&rep, "meter peak hold"), Level::Warn);
         assert_eq!(level_of(&rep, "CI-V USB port"), Level::Warn);
+        assert_eq!(level_of(&rep, "scope data output"), Level::Warn);
     }
 
     #[test]
