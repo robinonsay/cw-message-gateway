@@ -35,7 +35,12 @@ const NAMES: &[&str] = &[
     "wx-home",
     "wx-grid",
     "wx-grid6",
+    "wx-grid-split",
+    "wx-preset",
+    "wx-last",
+    "wx-unknown-preset",
     "wx-fail",
+    "wx-no-coverage",
     "no-abort",
     "agn",
     "pending-timeout",
@@ -110,7 +115,12 @@ scenario_tests! {
     wx_home => "wx-home",
     wx_grid => "wx-grid",
     wx_grid6 => "wx-grid6",
+    wx_grid_split => "wx-grid-split",
+    wx_preset => "wx-preset",
+    wx_last => "wx-last",
+    wx_unknown_preset => "wx-unknown-preset",
     wx_fail => "wx-fail",
+    wx_no_coverage => "wx-no-coverage",
     no_abort => "no-abort",
     agn => "agn",
     pending_timeout => "pending-timeout",
@@ -184,6 +194,7 @@ fn test_vectors_decode_to_their_manifest_text() {
     let vocab = protocol::Vocabulary {
         field_calls: vec![selftest::FIELD_CALL.into()],
         contacts: vec!["MOM".into(), "BOB".into()],
+        presets: vec![1, 2],
     };
     for cols in &rows {
         let (file, text, decodes_as, reply) = (cols[0], cols[3], cols[4], cols[5]);

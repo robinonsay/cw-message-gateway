@@ -9,7 +9,7 @@ use hfnode::audio::{self, Block};
 use hfnode::config::Config;
 use hfnode::inbox::Message;
 use hfnode::node;
-use hfnode::session::Services;
+use hfnode::session::{Services, WxError};
 use hfnode::station::{Station, StationConfig};
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,7 @@ impl Services for Fake {
         Vec::new()
     }
     fn mark_read(&mut self, _: &[u64]) {}
-    fn weather(&mut self, _: Option<&str>) -> Result<String, String> {
+    fn weather(&mut self, _: &str) -> Result<String, WxError> {
         Ok("SUNNY".into())
     }
 }

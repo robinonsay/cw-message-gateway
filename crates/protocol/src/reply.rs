@@ -13,8 +13,13 @@ pub enum Reply {
     },
     /// Read-back of an `RX` request: how many messages are waiting.
     ReadBackRx { seq: u64, count: usize },
-    /// Read-back of a `WX` request.
-    ReadBackWx { seq: u64, grid: Option<String> },
+    /// Read-back of a `WX` request: the preset number if one was sent, and the grid
+    /// the forecast will be for (`None` only when the node has no grid at all).
+    ReadBackWx {
+        seq: u64,
+        preset: Option<u32>,
+        grid: Option<String>,
+    },
     /// The message was handed to the email/SMS gateway.
     Sent { seq: u64 },
     /// The commit was accepted but the action failed; the operator may retry with
@@ -42,10 +47,16 @@ impl Reply {
                     if *count == 1 { "MSG" } else { "MSGS" }
                 )
             }
-            Self::ReadBackWx { seq, grid } => match grid {
-                Some(g) => format!("R {seq} WX {g} ?"),
-                None => format!("R {seq} WX ?"),
-            },
+            Self::ReadBackWx { seq, preset, grid } => {
+                let mut s = format!("R {seq} WX");
+                if let Some(p) = preset {
+                    s.push_str(&format!(" {p}"));
+                }
+                if let Some(g) = grid {
+                    s.push_str(&format!(" {g}"));
+                }
+                s + " ?"
+            }
             Self::Sent { seq } => format!("SENT {seq}"),
             Self::Failed { seq, reason } => format!("FAIL {seq} {}", sanitize(reason)),
             Self::Aborted => "R NO".to_string(),
@@ -147,6 +158,17 @@ mod tests {
             "R 44 3 MSGS ? DE N0DE K"
         );
         assert_eq!(Reply::Sent { seq: 43 }.render("N0DE"), "SENT 43 DE N0DE K");
+        let wx = |preset, grid: Option<&str>| {
+            Reply::ReadBackWx {
+                seq: 46,
+                preset,
+                grid: grid.map(str::to_string),
+            }
+            .render("N0DE")
+        };
+        assert_eq!(wx(None, Some("DL89IG")), "R 46 WX DL89IG ? DE N0DE K");
+        assert_eq!(wx(Some(3), Some("DL89IG")), "R 46 WX 3 DL89IG ? DE N0DE K");
+        assert_eq!(wx(None, None), "R 46 WX ? DE N0DE K");
     }
 
     #[test]

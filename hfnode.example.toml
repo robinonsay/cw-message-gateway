@@ -63,9 +63,25 @@ name = "BOB"
 address = "bob@example.com"
 
 [weather]
+# WX with no place gives the last place the field callsign confirmed (kept in
+# state_dir/wx_last.json; delete it with the node stopped to forget), and this
+# grid square until there is one.
 default_grid = "DL89"             # e.g. Big Bend
 user_agent = "hfnode (you@example.com)"
 periods = 2
+
+# Usual spots, asked for as WX 1, WX 2 and so on (1-99), and printed under the
+# code table by `hfnode codes`. Use 6-character grids: a 4-character square is
+# about 110 by 190 km. The name is for the printout only and is never sent.
+[[weather.presets]]
+number = 1
+grid = "DL89IG"
+name = "Chisos Basin"
+
+[[weather.presets]]
+number = 2
+grid = "DL89ME"
+name = "Rio Grande Village"
 
 # Screens replies before they are keyed on air. See docs/reply-filter.md.
 [filter]
