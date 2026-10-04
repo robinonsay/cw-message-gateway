@@ -209,19 +209,21 @@ longest transmit, no transmit past the break-in delay plus the stuck margin, dut
 cycle, receive when the node stops, the tuner cycles expected).
 
 The scenarios cover the field grammar end to end: TX, RX with one to many messages,
-the five-message cap and truncation, WX with 4- and 6-character grids, `FAIL`
-replies, NO, AGN and AGN with a chunk letter, codes sent in two groups, a repeated
-`OK` after a lost result, an open on fresh lines replacing a pending one, and the
-10-minute pending-commit and `AGN` windows. Also lost read-backs, replayed and wrong
-codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm, SNR
-20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand key, the radio's sidetone in the receive
-audio, USB echo off, CI-V Transceive frames from someone at the radio, a load the
-tuner matches and one beyond its range (the window stays silent), listening windows
-(a high-SWR lockout cleared by the next window's tune), and radio faults: SWR rising
-after the tune, power fold-back, stuck transmit or key (also
-after the last over), a transmitter that will not unkey, one that only the watchdog
-gets off transmit, refused status commands, NG and lost or late CI-V replies, a
-readout the radio refuses (left unread), and a tuner that never finishes.
+the five-message cap and truncation, WX with 4- and 6-character grids, a grid sent
+as two words, known and unknown presets, WX alone reusing the last place, `FAIL`
+replies (`WX NO COVERAGE` among them), NO, AGN and AGN with a chunk letter, codes
+sent in two groups, a repeated `OK` after a lost result, an open on fresh lines
+replacing a pending one, and the 10-minute pending-commit and `AGN` windows. Also
+lost read-backs, replayed and wrong codes, garbled callsigns, noise bursts after
+`K`, sending speeds 10 to 30 wpm, SNR 20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand
+key, the radio's sidetone in the receive audio, USB echo off, CI-V Transceive frames
+from someone at the radio, a load the tuner matches and one beyond its range (the
+window stays silent), listening windows (a high-SWR lockout cleared by the next
+window's tune), and radio faults: SWR rising after the tune, power fold-back, stuck
+transmit or key (also after the last over), a transmitter that will not unkey, one
+that only the watchdog gets off transmit, refused status commands, NG and lost or
+late CI-V replies, a readout the radio refuses (left unread), and a tuner that never
+finishes.
 
 It runs 100 times faster than real time by default (about 30 s for all of them on a
 laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
@@ -793,7 +795,14 @@ The second station plays the field operator, inside a listening window, using
 2. Reply to that message from the contact's address or phone. After `email.poll_secs`
    (and screening), `RX`: expect `R n 1 MSG ?`, then the message after `OK`.
 3. `AGN` and `AGN A`: expect the whole transmission, then chunk A, repeated.
-4. `WX`: expect a read-back and a forecast.
+4. `WX` with the field station's 6-character grid square, then with a preset: expect
+   a read-back naming the grid square (and the preset number), then a forecast that
+   starts with it. Then `WX` alone: expect the read-back to name the preset's grid
+   square, the last place confirmed. Then `WX IO91` (southern England): expect
+   `FAIL n WX NO COVERAGE`, which shows the node tells a place the NWS does not
+   cover apart from an outage (that place is not remembered). The node keeps the
+   last place for that callsign in `state_dir/wx_last.json`; to start the trip
+   from `weather.default_grid` instead, stop the node and delete that file.
 5. Open a transaction, then `NO`: expect `R NO`, and nothing sent.
 6. Resend the open of an already-completed transaction: expect silence.
 7. Send a code from the wrong line: expect silence.

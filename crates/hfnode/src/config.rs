@@ -171,14 +171,32 @@ pub struct Contact {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Weather {
-    /// Grid square used when `WX` is sent without one, e.g. where the field
-    /// operator is headed.
+    /// Grid square for `WX` sent without a place, until the field callsign has
+    /// confirmed a place of its own (then `WX` alone is that place, kept in
+    /// `<state_dir>/wx_last.json`). E.g. where the field operator is headed.
     pub default_grid: String,
     /// api.weather.gov asks for a contact in the User-Agent.
     pub user_agent: String,
     /// How many forecast periods to send (each is about half a day).
     #[serde(default = "default_periods")]
     pub periods: usize,
+    /// Numbered places the field operator can ask for as `WX <number>`. They are
+    /// printed under the code table.
+    #[serde(default)]
+    pub presets: Vec<Preset>,
+}
+
+/// A usual spot, so that `WX 3` stands for a grid square.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preset {
+    /// Keyed after `WX`: 1 to 99.
+    pub number: u32,
+    /// The 4- or 6-character grid square the forecast is for.
+    pub grid: String,
+    /// What the place is, for the printed code table only. Never transmitted.
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -397,6 +415,24 @@ impl Config {
             if !(1..=6).contains(&w.periods) {
                 bail!("weather.periods must be 1-6");
             }
+            for (i, p) in w.presets.iter().enumerate() {
+                if !(1..=99).contains(&p.number) {
+                    bail!("weather preset number {} must be 1-99", p.number);
+                }
+                if w.presets[..i].iter().any(|o| o.number == p.number) {
+                    bail!("weather preset {} is listed twice", p.number);
+                }
+                if !protocol::is_grid(&p.grid) {
+                    bail!(
+                        "weather preset {} grid {:?} is not a grid square",
+                        p.number,
+                        p.grid
+                    );
+                }
+                if p.name.chars().any(char::is_control) {
+                    bail!("weather preset {} name must be one line", p.number);
+                }
+            }
         }
         if self.schedule.window_minutes > self.schedule.every_minutes {
             bail!("schedule.window_minutes is longer than schedule.every_minutes");
@@ -420,6 +456,15 @@ impl Config {
 
     pub fn contact_names(&self) -> Vec<String> {
         self.contacts.iter().map(|c| c.name.clone()).collect()
+    }
+
+    /// The weather presets as (number, uppercased grid); empty without `[weather]`.
+    pub fn weather_presets(&self) -> Vec<(u32, String)> {
+        self.weather
+            .iter()
+            .flat_map(|w| &w.presets)
+            .map(|p| (p.number, p.grid.to_ascii_uppercase()))
+            .collect()
     }
 }
 
@@ -541,6 +586,32 @@ mod tests {
             cfg.weather.as_mut().unwrap().periods = periods;
             assert_eq!(cfg.validate().is_ok(), ok, "{periods} periods");
         }
+    }
+
+    #[test]
+    fn weather_presets() {
+        let cfg = example();
+        let presets = cfg.weather_presets();
+        assert!(!presets.is_empty(), "the example shows presets");
+        assert!(presets.iter().all(|(_, g)| protocol::is_grid(g)));
+        let bad = |edit: fn(&mut Weather)| {
+            let mut cfg = example();
+            edit(cfg.weather.as_mut().unwrap());
+            cfg.validate().is_err()
+        };
+        assert!(bad(|w| w.presets[0].number = 0));
+        assert!(bad(|w| w.presets[0].number = 100));
+        assert!(bad(|w| w.presets[0].grid = "ZZ99".into()));
+        assert!(bad(|w| w.presets[0].name = "two\nlines".into()));
+        assert!(bad(|w| {
+            let again = w.presets[0].clone();
+            w.presets.push(again);
+        }));
+        // Lowercase subsquare letters are fine and come out uppercased.
+        let mut cfg = example();
+        cfg.weather.as_mut().unwrap().presets[0].grid = "DL89ig".into();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.weather_presets()[0].1, "DL89IG");
     }
 
     #[test]

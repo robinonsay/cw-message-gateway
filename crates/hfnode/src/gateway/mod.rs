@@ -6,7 +6,7 @@ pub mod weather;
 
 use crate::config::Config;
 use crate::inbox::{Inbox, Message};
-use crate::session::Services;
+use crate::session::{Services, WxError};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -51,9 +51,12 @@ impl Services for LiveServices {
         }
     }
 
-    fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-        let nws = self.weather.as_ref().ok_or("weather is not configured")?;
-        nws.forecast(grid).map_err(|e| format!("{e:#}"))
+    fn weather(&mut self, grid: &str) -> Result<String, WxError> {
+        let nws = self
+            .weather
+            .as_ref()
+            .ok_or_else(|| WxError::Unavailable("weather is not configured".into()))?;
+        nws.forecast(grid)
     }
 }
 
@@ -79,10 +82,7 @@ impl Services for OfflineServices {
         }
     }
 
-    fn weather(&mut self, grid: Option<&str>) -> Result<String, String> {
-        Ok(format!(
-            "{} TDA SUNNY HI 95 WIND W 10 TNGT CLEAR LO 60",
-            grid.unwrap_or("HOME")
-        ))
+    fn weather(&mut self, grid: &str) -> Result<String, WxError> {
+        Ok(format!("{grid} TDA SUNNY HI 95 WIND W 10 TNGT CLEAR LO 60"))
     }
 }
