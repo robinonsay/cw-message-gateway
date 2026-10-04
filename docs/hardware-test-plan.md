@@ -737,8 +737,8 @@ hfnode codes --config $C --count 10
 ```
 
 `run` also needs a `[storm]` section with the station's latitude and longitude (see
-`hfnode.example.toml`). Check it reads the forecast; it must print `clear:` before
-the node will transmit:
+`hfnode.example.toml`). Check it reads the forecast (it prints `clear:` or
+`storm:`; an error means the node would never transmit):
 
 ```sh
 hfnode storm --config $C

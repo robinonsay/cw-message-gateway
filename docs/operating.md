@@ -232,10 +232,12 @@ for the node's own location (`[storm]` in its config) mentions thunder within th
 `lookahead_hours` (default 2), or an active alert there mentions thunder, lightning or
 a tornado. It holds for `clear_minutes` (default 30) after the last thunder, and also
 whenever it cannot get a forecast. A transmission under way stops and the radio
-returns to receive. It keeps decoding, so try again later. If the stand-down began
-after your `OK`, the message may already have gone without a `SENT`; repeating the
-`OK` later is safe, as above. This is about the weather at home, not where you are:
-check the forecast for the node before a trip in storm season.
+returns to receive. It keeps decoding, so try again later with fresh lines. If the
+stand-down began after your `OK`, the message may already have gone without a
+`SENT`, and repeats of that `OK` get no answer while it lasts (they also count
+against the usual repeat limits). Check with the recipient, or with an `RX`, before
+sending it again. This is about the weather at home, not where you are: check the
+forecast for the node before a trip in storm season.
 
 ## Timing and listening windows
 

@@ -516,12 +516,18 @@ impl Config {
     /// The User-Agent for the storm check: `storm.user_agent`, else
     /// `weather.user_agent`.
     pub fn storm_user_agent(&self) -> Option<&str> {
+        fn usable(ua: &str) -> Option<&str> {
+            Some(ua.trim()).filter(|ua| !ua.is_empty())
+        }
         self.storm
             .as_ref()
             .and_then(|st| st.user_agent.as_deref())
-            .or(self.weather.as_ref().map(|w| w.user_agent.as_str()))
-            .map(str::trim)
-            .filter(|ua| !ua.is_empty())
+            .and_then(usable)
+            .or_else(|| {
+                self.weather
+                    .as_ref()
+                    .and_then(|w| usable(w.user_agent.as_str()))
+            })
     }
 
     /// Decoder settings for the receiver audio.
@@ -781,6 +787,8 @@ mod tests {
         // The User-Agent falls back to [weather]; with neither, it is refused.
         let mut cfg = with(&|s| s.user_agent = None);
         assert_eq!(cfg.storm_user_agent(), Some("hfnode (you@example.com)"));
+        let blank = with(&|s| s.user_agent = Some("  ".into()));
+        assert_eq!(blank.storm_user_agent(), Some("hfnode (you@example.com)"));
         cfg.weather = None;
         assert!(cfg.validate().is_err());
         cfg.storm.as_mut().unwrap().user_agent = Some("me@example.com".into());

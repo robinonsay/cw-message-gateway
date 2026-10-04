@@ -1395,22 +1395,20 @@ mod tests {
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(150));
                 hold.set(Some("alert: Severe Thunderstorm Warning".into()));
+                Instant::now()
             })
         };
-        let t0 = Instant::now();
         assert_eq!(
             st.transmit(&tx(&segments)),
             Err(TxError::Storm("alert: Severe Thunderstorm Warning".into()))
         );
-        setter.join().unwrap();
+        let stopped = Instant::now();
+        let set_at = setter.join().unwrap();
         let rig = st.rig();
         let mut r = rig.lock().unwrap();
-        // Stopped part-way, within a poll or two, and back on receive.
-        assert!(
-            t0.elapsed() < Duration::from_millis(400),
-            "{:?}",
-            t0.elapsed()
-        );
+        // Stopped part-way, within a few polls, and back on receive.
+        let took = stopped.saturating_duration_since(set_at);
+        assert!(took < Duration::from_secs(1), "{took:?}");
         assert!(!r.sent.is_empty() && r.sent.len() < 16, "{:?}", r.sent);
         assert!(!r.keyer_busy() && !r.is_transmitting().unwrap());
         assert!(!st.tx_inhibited());

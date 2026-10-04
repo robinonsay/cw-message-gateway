@@ -8,17 +8,19 @@
 //! the field operator's):
 //!
 //! - the hourly forecast for the next `lookahead_hours`: any mention of thunder
-//!   ("Slight Chance Showers And Thunderstorms", "T-storms") counts. The NWS warns
-//!   only for severe thunderstorms, so the forecast, not the alerts, is the main
-//!   trigger;
+//!   ("Slight Chance Showers And Thunderstorms", "T-storms"), or a thunderstorm
+//!   icon (`tsra`), counts. The NWS warns only for severe thunderstorms, so the
+//!   forecast, not the alerts, is the main trigger. The forecast must be fresh
+//!   (updated within [`MAX_FORECAST_AGE`]) and cover the whole look-ahead;
 //! - the active alerts for the point: any whose event, headline or description
 //!   mentions thunder, lightning or a tornado.
 //!
 //! It fails closed. The station is held until the first check succeeds, after any
 //! failed check (no network, an NWS outage, a reply that is not a forecast, a
-//! forecast that does not cover the present hour), and when no check has finished
-//! for three intervals (a hung request, a dead thread). A hold ends only after
-//! `clear_minutes` without thunder. While held, the station neither tunes nor keys,
+//! forecast that is old or does not cover the look-ahead), and when no check has
+//! finished for three intervals or `lookahead_hours`, whichever is shorter (a hung
+//! request, a dead thread). A hold ends only after `clear_minutes` without thunder,
+//! counted from the last thunder or from the last failed check after it. While held, the station neither tunes nor keys,
 //! and a transmission under way is stopped and the radio forced to receive
 //! ([`crate::station`]). Listening goes on; nothing here switches the antenna or the
 //! power.
@@ -107,7 +109,16 @@ impl Watch {
         found: Result<Option<String>, String>,
     ) -> Option<String> {
         match found {
-            Err(e) => Some(format!("storm check failed: {e}")),
+            Err(e) => {
+                // Nobody knows whether the thunder went on: count the clear wait
+                // from here.
+                if let Some((t, _)) = &mut self.last_thunder {
+                    if now.duration_since(*t) < self.clear_after {
+                        *t = now;
+                    }
+                }
+                Some(format!("storm check failed: {e}"))
+            }
             Ok(Some(why)) => {
                 self.last_thunder = Some((now, why.clone()));
                 Some(why)
@@ -199,6 +210,10 @@ impl NwsStorm {
     }
 }
 
+/// A forecast last updated longer ago than this is not used. The NWS updates its
+/// grids several times a day.
+pub const MAX_FORECAST_AGE: Duration = Duration::from_secs(12 * 3600);
+
 fn mentions_thunder(text: &str) -> bool {
     let t = text.to_lowercase();
     ["thunder", "t-storm", "tstorm"]
@@ -207,14 +222,26 @@ fn mentions_thunder(text: &str) -> bool {
 }
 
 /// Thunder in the hourly forecast periods that overlap `now` to `now` +
-/// `lookahead_hours`. The forecast must cover `now`: an old one would leave out the
-/// hours that matter.
+/// `lookahead_hours`. The forecast must be fresh and cover that whole span: an old
+/// or short one would leave out the hours that matter.
 pub fn thunder_in_forecast(fc: &Value, now: i64, lookahead_hours: u32) -> Result<Option<String>> {
-    let periods = fc["properties"]["periods"]
+    let props = &fc["properties"];
+    let periods = props["periods"]
         .as_array()
         .context("the hourly forecast reply has no periods")?;
+    let updated = [&props["updateTime"], &props["generatedAt"]]
+        .into_iter()
+        .find_map(|v| v.as_str().and_then(parse_time))
+        .context("the hourly forecast says nothing about when it was updated")?;
+    let age = now - updated;
+    anyhow::ensure!(
+        age <= MAX_FORECAST_AGE.as_secs() as i64,
+        "the hourly forecast is {} h old",
+        age / 3600
+    );
     let until = now + i64::from(lookahead_hours) * 3600;
     let mut covers_now = false;
+    let mut reaches = now;
     for p in periods {
         let time = |key: &str| {
             p[key]
@@ -227,9 +254,12 @@ pub fn thunder_in_forecast(fc: &Value, now: i64, lookahead_hours: u32) -> Result
             continue;
         }
         covers_now |= start <= now;
+        reaches = reaches.max(end);
         let short = p["shortForecast"].as_str().unwrap_or("");
         let detail = p["detailedForecast"].as_str().unwrap_or("");
-        if mentions_thunder(short) || mentions_thunder(detail) {
+        // Icon URLs name the conditions: ".../icons/land/day/tsra,40?size=small".
+        let icon = p["icon"].as_str().unwrap_or("").to_lowercase();
+        if mentions_thunder(short) || mentions_thunder(detail) || icon.contains("tsra") {
             let hour = p["startTime"]
                 .as_str()
                 .and_then(|s| s.get(11..16))
@@ -240,6 +270,10 @@ pub fn thunder_in_forecast(fc: &Value, now: i64, lookahead_hours: u32) -> Result
     anyhow::ensure!(
         covers_now,
         "the hourly forecast does not cover the present hour"
+    );
+    anyhow::ensure!(
+        reaches >= until,
+        "the hourly forecast ends before the {lookahead_hours} h look-ahead"
     );
     Ok(None)
 }
@@ -284,12 +318,12 @@ fn parse_time(s: &str) -> Option<i64> {
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
         return None;
     }
-    let offset = match &s[19..] {
+    let offset = match s.get(19..)? {
         "Z" => 0,
-        o if o.len() == 6 && matches!(&o[..1], "+" | "-") && &o[3..4] == ":" => {
+        o if o.len() == 6 && matches!(o.get(..1), Some("+" | "-")) && o.get(3..4) == Some(":") => {
             let secs =
                 o.get(1..3)?.parse::<i64>().ok()? * 3600 + o.get(4..6)?.parse::<i64>().ok()? * 60;
-            if &o[..1] == "-" {
+            if o.starts_with('-') {
                 -secs
             } else {
                 secs
@@ -310,8 +344,10 @@ fn parse_time(s: &str) -> Option<i64> {
 /// writes each change to the health log.
 pub fn spawn(cfg: &Storm, user_agent: &str, health_log: Option<PathBuf>) -> Result<Arc<StormHold>> {
     let every = Duration::from_secs(cfg.check_minutes * 60);
-    // Three intervals without a finished check and the hold comes back on.
-    let hold = StormHold::new(every * 3);
+    // Three intervals without a finished check and the hold comes back on, sooner
+    // if the last clear check looked less far ahead than that.
+    let hold =
+        StormHold::new((every * 3).min(Duration::from_secs(u64::from(cfg.lookahead_hours) * 3600)));
     let mut source = NwsStorm::new(cfg, user_agent)?;
     let mut watch = Watch::new(Duration::from_secs(cfg.clear_minutes * 60));
     let shared = hold.clone();
@@ -388,7 +424,10 @@ mod tests {
                 })
             })
             .collect();
-        serde_json::json!({ "properties": { "periods": periods } })
+        serde_json::json!({ "properties": {
+            "updateTime": "2026-10-04T12:00:00-05:00",
+            "periods": periods,
+        } })
     }
 
     #[test]
@@ -420,6 +459,49 @@ mod tests {
         let mut fc = hourly(&["Sunny", "Sunny"]);
         fc["properties"]["periods"][1]["startTime"] = "soon".into();
         assert!(thunder_in_forecast(&fc, NOW, 2).is_err());
+        // Ends at 16:00: says nothing about the third hour.
+        let fc = hourly(&["Sunny", "Sunny", "Sunny"]);
+        assert_eq!(thunder_in_forecast(&fc, NOW, 2).unwrap(), None);
+        let err = thunder_in_forecast(&fc, NOW, 3).unwrap_err().to_string();
+        assert!(err.contains("ends before"), "{err}");
+    }
+
+    #[test]
+    fn an_old_forecast_is_an_error() {
+        let mut fc = hourly(&["Sunny", "Sunny", "Sunny"]);
+        // 13 h before now.
+        fc["properties"]["updateTime"] = "2026-10-04T01:00:00-05:00".into();
+        let err = thunder_in_forecast(&fc, NOW, 1).unwrap_err().to_string();
+        assert!(err.contains("13 h old"), "{err}");
+        fc["properties"]["updateTime"] = Value::Null;
+        assert!(thunder_in_forecast(&fc, NOW, 1).is_err());
+        fc["properties"]["generatedAt"] = "2026-10-04T13:59:00-05:00".into();
+        assert_eq!(thunder_in_forecast(&fc, NOW, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn a_thunderstorm_icon_holds() {
+        let mut fc = hourly(&["Sunny", "Sunny", "Mostly Cloudy"]);
+        fc["properties"]["periods"][2]["icon"] =
+            "https://api.weather.gov/icons/land/day/tsra_sct,30?size=small".into();
+        assert_eq!(
+            thunder_in_forecast(&fc, NOW, 2).unwrap(),
+            Some("thunder forecast 15:00: Mostly Cloudy".into())
+        );
+    }
+
+    #[test]
+    fn odd_times_do_not_parse_or_panic() {
+        for s in [
+            "2026-10-04T14:00:00",
+            "2026-10-04T14:00:00+05",
+            "2026-10-04T14:00:00\u{e9}5:00",
+            "2026-10-04T14:00:00-0\u{e9}:0",
+            "2026-13-04T14:00:00Z",
+            "",
+        ] {
+            assert_eq!(parse_time(s), None, "{s}");
+        }
     }
 
     #[test]
@@ -477,17 +559,32 @@ mod tests {
             Some("30 min clear wait after: alert: Tornado Warning".into())
         );
         assert_eq!(w.update(t0 + Duration::from_secs(1800), Ok(None)), None);
+        // Thunder, then the checks fail for a while: the clear wait starts again
+        // from the last failure, since nobody knows what the storm did meanwhile.
+        let t1 = t0 + Duration::from_secs(3600);
+        w.update(t1, Ok(Some("thunder forecast 16:00: T-storms".into())));
+        let failed = t1 + Duration::from_secs(1700);
+        assert!(w.update(failed, Err("timeout".into())).is_some());
+        assert!(w
+            .update(t1 + Duration::from_secs(1900), Ok(None))
+            .unwrap()
+            .contains("clear wait"));
+        assert_eq!(w.update(failed + Duration::from_secs(1800), Ok(None)), None);
+        // Long after the wait, a failure holds only for itself.
+        let t2 = failed + Duration::from_secs(7200);
+        assert!(w.update(t2, Err("timeout".into())).is_some());
+        assert_eq!(w.update(t2 + Duration::from_secs(1), Ok(None)), None);
     }
 
     #[test]
     fn a_hold_starts_on_and_comes_back_when_checks_stop() {
-        let hold = StormHold::new(Duration::from_millis(50));
+        let hold = StormHold::new(Duration::from_secs(1));
         assert_eq!(hold.reason(), Some("no storm check yet".into()));
         assert!(!hold.wait_for_first_check(Duration::from_millis(10)));
         hold.set(None);
         assert!(hold.wait_for_first_check(Duration::ZERO));
         assert_eq!(hold.reason(), None);
-        thread::sleep(Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(1100));
         assert!(hold.reason().unwrap().starts_with("no storm check for"));
         hold.set(Some("alert: Tornado Warning".into()));
         assert_eq!(hold.reason(), Some("alert: Tornado Warning".into()));
@@ -583,9 +680,13 @@ mod tests {
         // Thunder in the forecast is enough even when the alerts are unavailable.
         assert!(check(200, &stormy, 503, "{}").unwrap().is_some());
         // But "none" needs both.
-        assert!(check(200, &sunny, 503, "{}").is_err());
-        assert!(check(500, "{}", 200, no_alerts).is_err());
-        assert!(check(200, r#"{"title":"oops"}"#, 200, no_alerts).is_err());
+        let err = |r: Result<Option<String>>| format!("{:#}", r.unwrap_err());
+        let e = err(check(200, &sunny, 503, "{}"));
+        assert!(e.contains("/alerts/active"), "{e}");
+        let e = err(check(500, "{}", 200, no_alerts));
+        assert!(e.contains("/hourly"), "{e}");
+        let e = err(check(200, r#"{"title":"oops"}"#, 200, no_alerts));
+        assert!(e.contains("no periods"), "{e}");
         // Nothing listening at all.
         let closed = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

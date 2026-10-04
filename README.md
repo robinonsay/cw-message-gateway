@@ -314,7 +314,7 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
-| `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. |
+| `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
 | `hfnode run --config C` | **yes** | Run the node. |
 
 Logging goes to stderr; set `RUST_LOG=debug` for more detail.
