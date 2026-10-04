@@ -15,8 +15,12 @@ Does on Windows what deploy/hfnode.service has systemd do on Linux:
 - keeps the computer from going to sleep while it runs.
 
 Stop it with Ctrl-C in its window: the node puts the radio on receive itself, then
-this script checks receive again. Closing the window instead ends both at once,
-without those steps.
+this script checks receive again. Closing the window, logging off or a restart
+instead ends both at once, without either step (Windows does not wait for them);
+then run stop-hfnode.ps1, which checks receive.
+
+With -LogFile, this script's own lines (starts, exits, the receive checks, giving
+up) are also appended to that file.
 
 Do not set this to start automatically until docs/hardware-test-plan.md has been
 worked through; `hfnode run` refuses to start before station.commissioned = "done".
@@ -31,6 +35,7 @@ param(
     [Parameter(Mandatory = $true)] [string] $Hfnode,
     [Parameter(Mandatory = $true)] [string] $Config,
     [string] $EnvFile = "",
+    [string] $LogFile = "",
     # The same limits as the systemd unit; settable for tests.
     [int] $RestartSec = 30,
     [int] $StartLimitBurst = 3,
@@ -42,7 +47,9 @@ param(
 $ErrorActionPreference = "Continue"
 
 function Log([string] $Text) {
-    Write-Host ("{0} hfnode-supervise: {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Text)
+    $line = "{0} hfnode-supervise: {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Text
+    Write-Host $line
+    if ($LogFile) { Add-Content -LiteralPath $LogFile -Value $line -ErrorAction SilentlyContinue }
 }
 
 if ($EnvFile) {

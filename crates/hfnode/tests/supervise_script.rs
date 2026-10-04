@@ -71,6 +71,10 @@ impl Case {
     }
 
     fn start(&self, shell: &str, run: &str, env_file: Option<&Path>) -> Child {
+        self.command(shell, run, env_file).spawn().unwrap()
+    }
+
+    fn command(&self, shell: &str, run: &str, env_file: Option<&Path>) -> Command {
         let mut cmd = Command::new(shell);
         cmd.arg(SCRIPT)
             .arg(&self.fake)
@@ -85,7 +89,7 @@ impl Case {
         if let Some(f) = env_file {
             cmd.arg(f);
         }
-        cmd.spawn().unwrap()
+        cmd
     }
 
     fn lines(&self) -> Vec<String> {
@@ -202,7 +206,7 @@ fn secrets_come_from_the_env_file_without_running_it() {
             &env,
             format!(
                 "# node secrets\r\n\r\nHFNODE_EMAIL_PASSWORD=pa=ss word\r\n\
-                 BAD-KEY=x\n$(touch {})\nLAST=no newline",
+                 HFNODE_EMAIL_PASSWORD\nBAD-KEY=x\n$(touch {})\nLAST=no newline",
                 marker.display()
             ),
         )
@@ -212,8 +216,47 @@ fn secrets_come_from_the_env_file_without_running_it() {
             Duration::from_secs(20),
         );
         assert_eq!(status.code(), Some(0), "{sh}");
-        // Saved with Windows line endings (Notepad), the value still has no CR.
+        // Saved with Windows line endings (Notepad), the value still has no CR; a
+        // line without "=" is skipped, not read as a value.
         assert_eq!(c.count("pw=[pa=ss word]"), 1, "{sh}: {:?}", c.lines());
         assert!(!marker.exists(), "{sh} ran a line of the env file");
+    }
+}
+
+#[test]
+fn a_stop_before_the_node_starts_is_not_lost() {
+    // A slow `date` holds the script just before it starts the node, so the stop
+    // comes in while there is no node yet to pass it on to.
+    for sh in shells() {
+        let c = Case::new();
+        let slow = c.log.with_file_name("slow");
+        fs::create_dir(&slow).unwrap();
+        let date = slow.join("date");
+        fs::write(
+            &date,
+            "#!/bin/sh\necho date >> \"$FAKE_LOG\"\nsleep 1\nPATH=$REAL_PATH exec date \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&date, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let mut child = c
+            .command(sh, "wait", None)
+            .env("REAL_PATH", &path)
+            .env("PATH", format!("{}:{path}", slow.display()))
+            .spawn()
+            .unwrap();
+        c.wait_for("date");
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        let status = finish(&mut child, Duration::from_secs(20));
+        assert_eq!(status.code(), Some(0), "{sh}: {:?}", c.lines());
+        // The node never starts, or is told to stop at once.
+        assert!(
+            c.count(RUN) == 0 || c.count("TERM") == 1,
+            "{sh}: {:?}",
+            c.lines()
+        );
     }
 }

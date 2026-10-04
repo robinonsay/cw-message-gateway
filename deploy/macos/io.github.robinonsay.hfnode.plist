@@ -3,9 +3,10 @@
 <!--
   launchd agent for the HF CW message gateway node: an alternative to
   hfnode.command for starting the node at log-in without a Terminal window. See
-  docs/macos-setup.md, "Start at log-in". Install with __HOME__ replaced by your
-  home folder:
+  docs/macos-setup.md, section 7. Install with __HOME__ replaced by your home
+  folder:
 
+    mkdir -p ~/Library/LaunchAgents
     sed "s|__HOME__|$HOME|g" deploy/macos/io.github.robinonsay.hfnode.plist \
       > ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist

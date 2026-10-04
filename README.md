@@ -334,9 +334,11 @@ the air.
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
 | `hfnode run --config C` | **yes** | Run the node. |
 
-Logging goes to stderr; set `RUST_LOG=debug` for more detail. Ctrl-C, or a stop
-from systemd, launchd or Windows, makes a command that has started writing to the
-radio stop its keyer and confirm receive before it exits.
+Logging goes to stderr; set `RUST_LOG=debug` for more detail. Ctrl-C (or
+Ctrl-Break on Windows), or a stop from systemd or launchd, makes a command that has
+started writing to the radio stop its keyer and confirm receive before it exits. On
+Windows, closing the window, logging off or a restart ends it without that; check
+receive afterwards (`hfnode radio --config C rx`).
 
 The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
 decoded transmission) and `health.csv` (every tune and SWR reading).

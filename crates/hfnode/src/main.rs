@@ -289,7 +289,7 @@ fn guard_radio(radio: Radio) {
     *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some(radio);
 }
 
-/// Ctrl-C, or a stop from systemd, launchd or Windows (SIGINT, SIGTERM, SIGHUP, or
+/// Ctrl-C, or a stop from systemd or launchd (SIGINT, SIGTERM, SIGHUP, or on Windows
 /// a console Ctrl-C or Ctrl-Break): with a radio in use, put it back on receive
 /// first (see [`stop_radio`]) and exit while still holding it, so that nothing else
 /// can key it in between. Exits 0 once receive is confirmed (a clean stop, so

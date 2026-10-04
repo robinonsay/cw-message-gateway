@@ -133,8 +133,10 @@ Stop the test, force the radio to receive, and do not continue until you know wh
    exited.
 3. For the node started at boot or log-in: on Linux `sudo systemctl stop hfnode`;
    on a Mac Ctrl-C in its Terminal window (or `launchctl bootout` for the launchd
-   agent); on Windows Ctrl-C in its window, or `deploy\windows\stop-hfnode.ps1`. Each
-   then runs `hfnode radio ... rx` (see `deploy/`).
+   agent); on Windows Ctrl-C in its window, or, from the repository folder,
+   `powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\stop-hfnode.ps1`.
+   Each then runs `hfnode radio ... rx` (see `deploy/`). On Windows, closing the
+   window does not stop the keyer or check receive; run the stop script after it.
 
 After option 1, also stop `hfnode` (option 2 or 3) **before** switching the radio
 back on. A running node does not take the radio being off as a reason to stop: if
@@ -152,11 +154,16 @@ C=~/bench.toml
 ```
 
 On Windows, in PowerShell: `Copy-Item hfnode.example.toml ~\bench.toml` and
-`$C = "$HOME\bench.toml"`; the commands below then work as written, with `$C`.
+`$C = "$HOME\bench.toml"`. The `hfnode` commands below then work with `$C`, with
+two changes: where a command starts with `RUST_LOG=civ=trace`, run
+`$env:RUST_LOG = "civ=trace"` first and the command without it (and
+`Remove-Item Env:RUST_LOG` afterwards); and on the command line write `$HOME\...`
+where a path starts with `~/` (`~` works only inside the config file).
 
 In `~/bench.toml` set:
 
-- `station.node_call`, `station.field_calls`, `station.serial_port`, `audio.device`
+- `station.node_call`, `station.field_calls`, `station.serial_port`, and
+  `audio.device` if the radio's codec is not found under the default name
   (`hfnode devices` lists the ports and audio inputs, and marks the radio's; see
   the setup guide for your computer: [Raspberry Pi or Linux](raspberry-pi-setup.md),
   [Mac](macos-setup.md) or [Windows](windows-setup.md));
@@ -772,8 +779,9 @@ set -a; . /etc/hfnode/env; set +a     # or export HFNODE_EMAIL_PASSWORD=... by h
 hfnode run --config $C
 ```
 
-On a Mac load your own `env` file the same way (`. "$HOME/Library/Application
-Support/hfnode/env"`); on Windows set each one with `$env:HFNODE_EMAIL_PASSWORD = "..."`.
+On a Mac load your own `env` file as in [macos-setup.md, section
+6](macos-setup.md#6-secrets); on Windows set each one with
+`$env:HFNODE_EMAIL_PASSWORD = "..."`.
 
 From the field rig, send the open and commit for a `TX` to your own contact, using
 the exact formats in [operating.md](operating.md).

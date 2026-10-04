@@ -131,9 +131,10 @@ there, with the COM port, audio device and folder paths from above. Keep
 ## 6. Secrets
 
 Passwords and API keys never go in the TOML file. Put them in `env` in the node's
-folder:
+folder. Create the file first, or Notepad saves it as `env.txt`:
 
 ```powershell
+if (-not (Test-Path "$D\env")) { New-Item -ItemType File "$D\env" | Out-Null }
 notepad "$D\env"
 ```
 
@@ -166,8 +167,11 @@ Start-ScheduledTask -TaskName hfnode     # or log off and on
 This registers a Task Scheduler task, `hfnode`, that opens a console window when
 you log on and runs the node there, with its log in the window. It runs as you, in
 your session, the way the microphone setting above expects; running it as a Windows
-service is not supported. So the PC must be logged in. To run it once without the
-task:
+service is not supported. So the PC must be logged in. The window stays open after
+the node stops, so you can read why; the script's own lines (starts, stops, receive
+checks, giving up) also go to `supervise.log` in the node's folder. Close that
+window before starting the task again: while it is open, Windows counts the task as
+running and ignores a new start. To run it once without the task:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\hfnode-supervise.ps1 `
@@ -182,9 +186,10 @@ runs, but not from a laptop's lid: set "When I close the lid" to "Do nothing"
 (Control Panel > Power Options > Choose what closing the lid does), and keep it on
 the charger. A sleep takes the radio's USB devices away.
 
-**Updates.** Windows Update restarts the PC to install updates, which leaves the
-node stopped until you log on again. Set "Active hours" (Settings > Windows Update
-> Advanced options) to cover the hours the node should run.
+**Updates.** Windows Update restarts the PC to install updates, which ends the node
+without its own stop (see section 8) and leaves it stopped until you log on again.
+Set "Active hours" (Settings > Windows Update > Advanced options) to cover the
+hours the node should run.
 
 **Clock.** Listening windows are computed from UTC, so keep "Set time
 automatically" on (Settings > Time & language > Date & time) and press "Sync now"
@@ -195,15 +200,21 @@ once.
 **Stopping.** Press Ctrl-C in the node's window. The node stops the radio's keyer
 and confirms receive before it exits; the radio may first finish the text already
 in its keyer (at most 30 characters). The script then checks receive again.
-Closing the window also stops the node, but Windows ends the script within a few
-seconds, before it can check receive again, so use Ctrl-C. Without the window (for example from another session):
+
+Closing the window, logging off and restarting Windows do not do that: Windows
+ends the node and the script at once, before either can put the radio on receive.
+So use Ctrl-C, and if the node was ended any other way, check receive afterwards
+with the stop script below. It also works without the window (for example from
+another session), from the repository folder:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\stop-hfnode.ps1
 ```
 
-which ends the task and the node and then runs `hfnode radio ... rx`. To remove the
-task: `Unregister-ScheduledTask -TaskName hfnode`.
+It ends the task, any `hfnode-supervise.ps1` started by hand and the node, then
+runs `hfnode radio ... rx` and says whether receive was confirmed. Ended this way
+the node does not stop the keyer itself, so the radio may first finish the text in
+it. To remove the task: `Unregister-ScheduledTask -TaskName hfnode`.
 
 **Looking at `state\health.csv`.** Open a copy, not the file itself: Excel locks a
 file it has open, and the node could not add to it meanwhile.
@@ -218,8 +229,13 @@ Check the radio first.
 `cargo install --locked --path crates/hfnode`, and start it again. `last_seq` and the inbox
 stay in the node's folder.
 
-**Moving the node to or from another computer.** Copy the whole node folder,
-`state\last_seq` above all: without it the node starts again from sequence 0 and
-would accept codes from the table that were already used. Then set
+**Moving the node to or from another computer.** First stop the old node and turn
+off its start-up (on a Pi `sudo systemctl disable --now hfnode`, on a Mac its Login
+Item or launchd agent, on Windows `Unregister-ScheduledTask -TaskName hfnode`).
+Then copy the whole node folder from it, `state\last_seq` above all: without it the
+node starts again from sequence 0 and would accept codes from the table that were
+already used. Copy it at that moment, not from a backup or an earlier copy, which
+would hold an older `last_seq`; before the first `hfnode run`, check that `last_seq`
+is at least the last line crossed off the printed table. Then set
 `station.commissioned = "none"` and redo the hardware test plan from step 1, since
 the computer changed.

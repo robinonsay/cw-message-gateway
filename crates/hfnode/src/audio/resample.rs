@@ -88,7 +88,8 @@ impl Resampler {
     }
 
     /// Convert `input`, appending the output samples it completes to `out`. Output
-    /// lags input by the filter's half-width (under 1 ms at 44.1 kHz and up).
+    /// lags input by the filter's half-width, [`ZERO_CROSSINGS`] samples at the lower
+    /// of the two rates (2 ms when converting to 8 kHz, whatever the device's rate).
     pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if self.passthrough {
             out.extend_from_slice(input);

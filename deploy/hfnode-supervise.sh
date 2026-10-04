@@ -47,6 +47,11 @@ if [ -n "$env_file" ]; then
         line=${line%"$cr"}
         case $line in
             '' | '#'*) continue ;;
+            *=*) ;;
+            *)
+                log "ignoring a line in $env_file that is not KEY=value"
+                continue
+                ;;
         esac
         key=${line%%=*}
         case $key in
@@ -92,10 +97,6 @@ force_receive() {
 # gone within $stop_timeout seconds.
 wait_child() {
     while :; do
-        woken=0
-        wait "$child"
-        status=$?
-        [ "$woken" = 1 ] || break
         if [ "$stopping" = 1 ] && [ -z "$killer" ]; then
             (
                 sleep "$stop_timeout"
@@ -104,6 +105,10 @@ wait_child() {
             ) &
             killer=$!
         fi
+        woken=0
+        wait "$child"
+        status=$?
+        [ "$woken" = 1 ] || break
     done
     if [ -n "$killer" ]; then
         kill "$killer" 2>/dev/null
@@ -128,9 +133,18 @@ while :; do
     fi
     starts="$recent $now"
 
+    if [ "$stopping" = 1 ]; then
+        log "stopped"
+        exit 0
+    fi
     log "starting: $bin run --config $cfg"
     "$bin" run --config "$cfg" &
     child=$!
+    # A stop that came in since the check above found no node to pass the signal
+    # to; pass it on now.
+    if [ "$stopping" = 1 ]; then
+        kill -TERM "$child" 2>/dev/null
+    fi
     wait_child
     child=
     log "hfnode exited with status $status"

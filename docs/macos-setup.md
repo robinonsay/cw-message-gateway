@@ -167,11 +167,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 One `KEY=value` per line, no quotes and no `export`. The start-up script reads the
-file without running it. To load it for a command run by hand (for example `sim`
-without `--offline`):
+file without running it. To load it the same way for a command run by hand (for
+example `sim` without `--offline`):
 
 ```sh
-set -a; . "$D/env"; set +a
+while IFS= read -r l; do case $l in ''|'#'*) ;; *=*) export "$l" ;; esac; done < "$D/env"
 ```
 
 What happens when a secret is missing is in [raspberry-pi-setup.md, section
@@ -200,6 +200,7 @@ On start you should see `last_seq is N`, `preflight:` lines, `read-back:` lines,
 runs the same script in the background and logs to `~/Library/Logs/hfnode.log`:
 
 ```sh
+mkdir -p ~/Library/LaunchAgents
 sed "s|__HOME__|$HOME|g" deploy/macos/io.github.robinonsay.hfnode.plist \
   > ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist
@@ -243,11 +244,17 @@ It keeps running and logging but transmits nothing, also after a restart, until
 that file is removed. Check the radio first.
 
 **Updating.** Stop the node, then in `~/rust/ic7300-hf-server`: `git pull`,
-`cargo install --locked --path crates/hfnode`, and start it again. `last_seq` and the inbox
-stay in the node's folder.
+`cargo install --locked --path crates/hfnode`, copy the start-up scripts again
+(`cp deploy/hfnode-supervise.sh deploy/macos/hfnode.command "$D/"`), and start it
+again. `last_seq` and the inbox stay in the node's folder.
 
-**Moving the node to or from another computer.** Copy the whole node folder,
-`state/last_seq` above all: without it the node starts again from sequence 0 and
-would accept codes from the table that were already used. Then set
-`station.commissioned = "none"` and redo the hardware test plan from step 1, since
-the computer changed.
+**Moving the node to or from another computer.** First stop the old node and turn
+off its start-up (on a Pi `sudo systemctl disable --now hfnode`, on a Mac its Login
+Item or launchd agent, on Windows `Unregister-ScheduledTask -TaskName hfnode`).
+Then copy the whole node folder from it, `state/last_seq` above all: without it the
+node starts again from sequence 0 and would accept codes from the table that were
+already used. Copy it at that moment, not from a backup, Migration Assistant or an
+earlier copy, which would hold an older `last_seq`; before the first `hfnode run`,
+check that `last_seq` is at least the last line crossed off the printed table. Then
+set `station.commissioned = "none"` and redo the hardware test plan from step 1,
+since the computer changed.

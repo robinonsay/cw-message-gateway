@@ -211,12 +211,20 @@ read-back changed. What did:
   requires) the lines do nothing. None of this
   has been measured on an IC-7300. It can be measured without the radio, with a
   separate CP2102 breakout board and a meter or LED on its DTR and RTS pins.
-- **Stop signals.** Ctrl-C, SIGTERM, SIGHUP and the Windows console events now
-  reach a handler that, once a command has passed its preflight and may write to
-  the radio, runs the same forced receive as the station layer (`17 FF`, `1C 00 00`,
-  then `1C 00` until it reads receive) and exits while still holding the radio.
-  Before, the process died on the signal and only systemd's stop hook forced
-  receive. Step 7 of the bench plan now also checks this stop.
+- **Stop signals.** Ctrl-C, SIGTERM, SIGHUP and, on Windows, a console Ctrl-C or
+  Ctrl-Break now reach a handler that, once a command has passed its preflight and
+  may write to the radio, runs the same forced receive as the station layer
+  (`17 FF`, `1C 00 00`, then `1C 00` until it reads receive) and exits while still
+  holding the radio. Before, the process died on the signal and only systemd's stop
+  hook forced receive. Step 7 of the bench plan now also checks this stop. Not
+  covered: on Windows, closing the console window, logging off or shutting down
+  ends the process as soon as the handler is told (the `ctrlc` crate's console
+  handler returns at once, and Windows then terminates the process), and
+  `Stop-Process` or ending the scheduled task kills it outright; the radio then
+  finishes what is in its keyer by itself, and `stop-hfnode.ps1` (or `hfnode radio
+  ... rx`) checks receive afterwards. A handler of our own that runs the forced
+  receive within the few seconds Windows allows is a possible follow-up, to be
+  checked on the radio before it is relied on.
 - **Start-up outside systemd.** `deploy/hfnode-supervise.sh` (macOS) and
   `deploy/windows/hfnode-supervise.ps1` keep the unit's limits: restart 30 s after
   a failure, give up after 3 starts an hour, no restart after a clean stop, and
