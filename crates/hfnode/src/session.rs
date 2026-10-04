@@ -114,6 +114,15 @@ pub struct SessionConfig {
     pub wx_presets: Vec<(u32, String)>,
 }
 
+impl SessionConfig {
+    /// Whether `now` is still within [`Self::again_window`] of `at`, its last moment
+    /// included. The one test for `AGN` and for a repeated `OK`, `NO` or `AGN`, and
+    /// so for how long the node listens on for them past the end of its window.
+    fn again_in_time(&self, at: Instant, now: Instant) -> bool {
+        now.duration_since(at) <= self.again_window
+    }
+}
+
 /// How many times a repeated commit, `NO` or `AGN` is answered before it is ignored.
 const MAX_COMMIT_RETRIES: u32 = 3;
 
@@ -141,6 +150,18 @@ struct LastCommit {
     retries: u32,
     transmission: Transmission,
     chunks: Vec<Chunk>,
+}
+
+/// The node's last reply other than an `AGN` repeat: what `AGN` repeats.
+#[derive(Debug, Clone)]
+struct LastTx {
+    /// When the message it answered was handled.
+    at: Instant,
+    transmission: Transmission,
+    /// The result's chunks, for `AGN <letter>`; empty unless it is a chunked result.
+    chunks: Vec<Chunk>,
+    /// It is the last commit's result (or a repeat of it), not a read-back or `R NO`.
+    result: bool,
 }
 
 /// What a `NO` or `AGN` asked for; an identical retry asks the same.
@@ -171,7 +192,7 @@ pub struct Session {
     places: LastPlaces,
     pending: Option<Pending>,
     last_commit: Option<LastCommit>,
-    last_tx: Option<(Instant, Transmission, Vec<Chunk>)>,
+    last_tx: Option<LastTx>,
     last_ask: Option<LastAsk>,
 }
 
@@ -206,6 +227,21 @@ impl Session {
             .is_some_and(|p| now.duration_since(p.opened_at) < self.cfg.pending_timeout)
     }
 
+    /// Whether the last commit's result can still be had again: a repeated `OK`
+    /// would be answered with it, or `AGN` would repeat it. Past the end of its
+    /// window the node keeps listening for as long as this is true.
+    pub fn result_repeatable(&self, now: Instant) -> bool {
+        let ok = self
+            .last_commit
+            .as_ref()
+            .is_some_and(|c| c.retries < MAX_COMMIT_RETRIES && self.cfg.again_in_time(c.at, now));
+        let agn = self
+            .last_tx
+            .as_ref()
+            .is_some_and(|l| l.result && self.cfg.again_in_time(l.at, now));
+        ok || agn
+    }
+
     /// Handle one decoded field transmission.
     pub fn handle(&mut self, decoded: &str, now: Instant, svc: &mut dyn Services) -> Outcome {
         if let Some(p) = &self.pending {
@@ -230,12 +266,13 @@ impl Session {
             FieldMsg::Again { seq, code, chunk } => return self.again(seq, &code, chunk, now),
         };
         if let Outcome::Transmit(t) = &outcome {
-            let chunks = self
-                .last_commit
-                .as_ref()
-                .filter(|c| c.transmission == *t)
-                .map(|c| c.chunks.clone());
-            self.last_tx = Some((now, t.clone(), chunks.unwrap_or_default()));
+            let commit = self.last_commit.as_ref().filter(|c| c.transmission == *t);
+            self.last_tx = Some(LastTx {
+                at: now,
+                transmission: t.clone(),
+                chunks: commit.map(|c| c.chunks.clone()).unwrap_or_default(),
+                result: commit.is_some(),
+            });
         }
         outcome
     }
@@ -320,9 +357,7 @@ impl Session {
         // heard OK cannot make the node key the whole result again and again.
         if let Some(c) = &mut self.last_commit {
             if c.seq == seq && self.verifier.check_code_only(seq, code).is_ok() {
-                if now.duration_since(c.at) > self.cfg.again_window
-                    || c.retries >= MAX_COMMIT_RETRIES
-                {
+                if !self.cfg.again_in_time(c.at, now) || c.retries >= MAX_COMMIT_RETRIES {
                     self.last_commit = None;
                     return Outcome::Silent(format!("repeat of commit {seq} no longer honoured"));
                 }
@@ -552,7 +587,7 @@ impl Session {
             return None;
         }
         if self.verifier.last_seq() != seq
-            || now.duration_since(a.at) > self.cfg.again_window
+            || !self.cfg.again_in_time(a.at, now)
             || a.retries >= MAX_COMMIT_RETRIES
         {
             self.last_ask = None;
@@ -622,15 +657,15 @@ impl Session {
     }
 
     fn repeat(&self, letter: Option<char>, now: Instant) -> Outcome {
-        let Some((at, tx, chunks)) = &self.last_tx else {
+        let Some(last) = &self.last_tx else {
             return Outcome::Silent("AGN with nothing sent".into());
         };
-        if now.duration_since(*at) > self.cfg.again_window {
+        if !self.cfg.again_in_time(last.at, now) {
             return Outcome::Silent("AGN too long after last transmission".into());
         }
         match letter {
-            None => Outcome::Transmit(tx.clone()),
-            Some(l) => match chunks.iter().find(|c| c.letter == l) {
+            None => Outcome::Transmit(last.transmission.clone()),
+            Some(l) => match last.chunks.iter().find(|c| c.letter == l) {
                 Some(c) => Outcome::Transmit(Transmission::single(format!(
                     "{} DE {} K",
                     c.render(),
@@ -1131,6 +1166,47 @@ mod tests {
         assert!(silent(&r.send(30, "OK 43 {43} K")));
         tx(&r.send(40, "NO 45 {45} K"));
         assert!(silent(&r.send(50, "OK 43 {43} K")));
+        assert_eq!(r.svc.sent.len(), 1);
+    }
+
+    #[test]
+    fn a_result_is_repeatable_while_a_repeated_ok_or_agn_would_get_it() {
+        let at = |r: &Rig, secs: u64| r.t0 + Duration::from_secs(secs);
+        let mut r = Rig::new();
+        assert!(!r.session.result_repeatable(r.t0), "nothing committed");
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        // A read-back is not a result: the pending transaction covers it.
+        assert!(!r.session.result_repeatable(at(&r, 5)));
+        let sent = tx(&r.send(10, "OK 43 {43} K"));
+        // Until the again window (900 s here) after the commit, its last second
+        // included, as for the repeated OK itself.
+        assert!(r.session.result_repeatable(at(&r, 10)));
+        assert!(r.session.result_repeatable(at(&r, 910)));
+        assert!(!r.session.result_repeatable(at(&r, 911)));
+        // AGN repeats it without moving that.
+        assert_eq!(tx(&r.send(15, "AGN 44 {44} K")), sent);
+        assert!(!r.session.result_repeatable(at(&r, 911)));
+        // An open that is not valid does not end it, nor a NO with nothing to
+        // abort, which still uses its line.
+        assert!(silent(&r.send(20, "W5XXX 42 {42} TX MOM HI K")));
+        assert!(silent(&r.send(25, "NO 45 {45} K")));
+        assert_eq!(r.stored_seq(), 45);
+        assert!(r.session.result_repeatable(at(&r, 25)));
+        // Repeats used up: AGN still repeats it, until the window after the last
+        // repeat.
+        for i in 0..MAX_COMMIT_RETRIES {
+            assert_eq!(tx(&r.send(30 + u64::from(i), "OK 43 {43} K")), sent);
+        }
+        assert!(silent(&r.send(40, "OK 43 {43} K")));
+        assert!(r.session.result_repeatable(at(&r, 932)));
+        assert!(!r.session.result_repeatable(at(&r, 933)));
+        // A newer transaction ends it, and R NO is no result.
+        tx(&r.send(50, "W5XXX 46 {46} TX MOM AGAIN K"));
+        assert!(!r.session.result_repeatable(at(&r, 50)));
+        assert!(r.session.has_pending(at(&r, 50)));
+        assert_eq!(tx(&r.send(60, "NO 47 {47} K")), "R NO DE N0DE K");
+        assert!(!r.session.result_repeatable(at(&r, 60)));
+        assert!(!r.session.has_pending(at(&r, 60)));
         assert_eq!(r.svc.sent.len(), 1);
     }
 

@@ -2265,6 +2265,49 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.keyed.push(Over::Full(de("SENT 43")));
         s
     });
+    // A one-minute listening window: the read-back ends about 39 s into it (after
+    // the tune, the ID and the open), so an OK keyed 20 s later is heard and acted
+    // on past its end. No noise: noise bursts heard while waiting teach the
+    // decoder a wrong speed (it decodes them as dits), which can garble the next
+    // OK; these scenarios are about when the node listens.
+    let late = |name: &str, about: &str| {
+        let mut s = tx(name, about, "MOM", "HOME SUN");
+        s.node.schedule = Some((60, 1));
+        s.fist.snr_db = None;
+        s.script.insert(1, Step::Wait(20.0));
+        s
+    };
+    v.push({
+        let mut s = late(
+            "lost-result-after-window",
+            "the window ends before the OK and its SENT is lost: the node listens on, the \
+             repeated OK gets SENT again, the message sent once",
+        );
+        s.script.insert(2, Step::MissNext);
+        s.expect.keyed.push(Over::Full(de("SENT 43")));
+        s
+    });
+    v.push({
+        let mut s = late(
+            "listening-ends-after-result",
+            "past the window's end the node listens on while its result can be repeated (a \
+             repeated OK gets SENT again), then stops: an open on fresh lines gets silence",
+        );
+        let done = de("SENT 43");
+        s.script.extend([
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(done.clone()),
+            },
+            Step::Wait(ten_minutes),
+            Step::Say {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM HOME SUN K"),
+                expect: None,
+            },
+        ]);
+        s.expect.keyed.push(Over::Full(done));
+        s
+    });
     v.push({
         let mut s = tx(
             "fresh-lines",

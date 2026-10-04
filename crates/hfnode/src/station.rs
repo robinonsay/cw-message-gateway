@@ -310,6 +310,14 @@ impl<R: Rig + 'static> Station<R> {
         self.tx_inhibit.is_set()
     }
 
+    /// Whether a transmission could be keyed now: transmitting is not inhibited, and
+    /// not locked out for the rest of this window (high SWR, no output, a tuner that
+    /// could not match, or a radio that could not be set up at the window's start).
+    /// Reads no CI-V.
+    pub fn can_transmit(&self) -> bool {
+        !self.tx_inhibited() && !self.swr_lockout
+    }
+
     fn spawn_watchdog(&self) {
         let (rig, since, fired, inhibit, stop, max) = (
             self.rig.clone(),
@@ -872,7 +880,9 @@ mod tests {
             None,
         );
         st.configure().unwrap();
+        assert!(st.can_transmit());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        assert!(!st.can_transmit());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
         assert!(
             !st.rig().lock().unwrap().is_transmitting().unwrap(),
@@ -880,6 +890,7 @@ mod tests {
         );
         st.rig().lock().unwrap().swr = 1.2;
         st.start_window().unwrap();
+        assert!(st.can_transmit());
         st.transmit(&tx(&["TEST"])).unwrap();
     }
 
@@ -900,6 +911,7 @@ mod tests {
         st.configure().unwrap();
         st.rig().lock().unwrap().tuner_bypassed = true;
         assert!(st.start_window().is_err());
+        assert!(!st.can_transmit());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
         assert!(st.rig().lock().unwrap().sent.is_empty(), "nothing keyed");
         st.rig().lock().unwrap().tuner_bypassed = false;
@@ -1028,6 +1040,7 @@ mod tests {
         let mut st = Station::new(fast_rig(), cfg(), Some(health.clone()));
         st.configure().unwrap();
         assert!(st.tx_inhibited());
+        assert!(!st.can_transmit());
         assert!(st.start_window().is_err());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
         {
