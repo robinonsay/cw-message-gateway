@@ -42,10 +42,10 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
-| Station safety: reduced power, tune at window start, SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
-| Station ID (47 CFR 97.119(a)): `DE <call>` after each window's tune that matched, and between chunks so that no more than 8 minutes pass without it (the rule allows 10) | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
+| Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
+| Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks so that no more than 8 minutes pass without it (the rule allows 10); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
 | Owner alert when the node stops transmitting (transmit inhibit) | `crates/hfnode/src/alert.rs` (email to `[email] alert_to`; the latch is in `station.rs`) |
-| Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
+| Listening all the time (default) or in scheduled windows; radio set up again while idle | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
 The hardware PTT timer in the design is external hardware, not part of this
 repository. See the [hardware test plan](docs/hardware-test-plan.md#step-10-hardware-ptt-timer)
@@ -200,7 +200,7 @@ hfnode selftest --sweep --csv sweep.csv  # speed x SNR x keying matrices, where 
 
 The operator keys CW audio (`cw::Keyer` plus noise) into the node's audio queue,
 listens to what the mock radio actually keyed, and reacts: it waits out the
-window's tune and station ID, opens, checks the read-back, answers `OK`, `NO` or
+node's first tune and station ID, opens, checks the read-back, answers `OK`, `NO` or
 `AGN` (each on its own line), and repeats an open or an `OK` that got no answer.
 While the mock radio is on transmit the node hears nothing of the operator.
 Scenarios cover the grammar (TX, RX up to the five-message cap and truncation, WX
@@ -216,7 +216,11 @@ identified between two chunks, replayed and wrong codes, garbled callsigns, 10 t
 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V
 Transceive frames from someone at the radio, a load the tuner matches and one
 beyond its range (the window stays silent), listening windows (a high-SWR lockout
-cleared by the next window's tune), and radio faults (SWR rising after the tune,
+cleared by the next window's tune), listening all the time (a re-tune before a reply
+once the last tune is old, a high-SWR lockout cleared by it, split or ∂TX switched
+on at the radio, the dial and mode changed while the node is idle, band noise and
+other stations calling, and a call after a long quiet spell answered the first
+time), and radio faults (SWR rising after the tune,
 fold-back, stuck transmit or key, also on the last over, a transmitter that will
 not unkey, one that only the watchdog gets off transmit, refused status commands,
 NG and lost or late CI-V replies, a readout the radio refuses, a tuner that never
@@ -255,8 +259,7 @@ white, so real band conditions and real fists are tested only on the air. In a
 time-scaled run the CI-V reply timeout, the watchdog tick and the forced-receive
 retry pause stay in real time, so they take `scale` times longer in radio time;
 `hfnode selftest --scale 1` runs everything at its real speed, real-time margins
-included (about 17 minutes with one job per scenario, `--jobs 100`: the longest
-scenario, two listening windows 15 minutes apart, takes that long).
+included (about 23 minutes with one job per scenario, `--jobs 100`).
 
 **Sweep: where it stops working.** The scenarios check one point each and all
 pass, so they cannot show where the node breaks. `hfnode selftest --sweep` runs a
@@ -368,11 +371,15 @@ command that has started writing to the radio stop its keyer and confirm receive
 before it exits. On Windows, closing the window, logging off or a restart ends it
 without that; check receive afterwards (`hfnode radio --config C rx`).
 
+A running node owns the radio: stop it before using the radio yourself. Listening
+all the time, it puts its frequency, mode, power and keyer settings back every
+`schedule.check_minutes` (10) while idle, and before every transmission.
+
 The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `wx_last.json`
 (the last weather place each field callsign confirmed), `rx.log` (every decoded
 transmission), `health.csv` (every tune and SWR reading, including the one from the
-station ID after each window's tune, and any `tx-status` fault) and, if it has
-stopped transmitting, `tx-inhibited`.
+station ID after the tune when the node starts listening, and any `tx-status` or
+`check` fault) and, if it has stopped transmitting, `tx-inhibited`.
 
 ## Documentation
 

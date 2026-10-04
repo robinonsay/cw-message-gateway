@@ -199,9 +199,10 @@ without its own stop (see section 8) and leaves it stopped until you log on agai
 Set "Active hours" (Settings > Windows Update > Advanced options) to cover the
 hours the node should run.
 
-**Clock.** Listening windows are computed from UTC, so keep "Set time
-automatically" on (Settings > Time & language > Date & time) and press "Sync now"
-once.
+**Clock.** If you set the node to listen in windows (`schedule.always = false`),
+they are computed from UTC, so keep "Set time automatically" on (Settings > Time &
+language > Date & time) and press "Sync now" once. Listening all the time, the
+default, does not depend on the clock.
 
 ## 8. Stopping, updating, and the transmit inhibit
 
@@ -226,6 +227,10 @@ it. To remove the task: `Unregister-ScheduledTask -TaskName hfnode`.
 
 **Looking at `state\health.csv`.** Open a copy, not the file itself: Excel locks a
 file it has open, and the node could not add to it meanwhile.
+
+**Using the radio yourself.** Stop the node first, and start it again when you
+are done. While it runs, it puts its frequency, mode, power and keyer settings back
+every `schedule.check_minutes` (10) and before every transmission.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive, it stops transmitting and writes `tx-inhibited` in

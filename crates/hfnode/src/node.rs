@@ -1,4 +1,15 @@
 //! The running node: audio in, decode, session, transmit, on a listening schedule.
+//!
+//! By default the node listens all the time ([`crate::config::Schedule`]). It tunes
+//! when it starts listening, at start-up or at the top of a window, and identifies
+//! that tune with `DE <call>` if it matched. It tunes again before a reply once
+//! that tune is older than `retune_minutes`, and the reply identifies it, so a node
+//! that listens all day puts out no carriers of its own until there is something
+//! to send. While it hears nothing it sets the radio up again and checks it every
+//! `check_minutes`, without transmitting, and the station does the same before
+//! every transmission. The decoder also goes back to its starting speed after a
+//! quiet minute, so hours of band noise do not garble the next caller's first
+//! words.
 
 use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
@@ -207,6 +218,12 @@ fn decoder_for(cfg: &Config) -> Decoder {
 /// first block read afterwards that was captured before.
 const RX_RECOVERY_MS: u64 = 250;
 
+/// Audio, in ms, after which an idle decoder goes back to its initial speed
+/// estimate ([`Decoder::reset_speed`]). Minutes of band noise teach it a speed no
+/// sender is using, which garbles the start of the next call; a minute of noise is
+/// too little to do that.
+const SPEED_REFRESH_MS: u64 = 60_000;
+
 /// Discards audio captured while the node was transmitting or tuning.
 #[derive(Debug, Default)]
 struct TxGuard {
@@ -308,6 +325,12 @@ fn held_for<R: Rig + 'static>(
     }
 }
 
+/// Seconds from `since` to `now` on the node's clock. A clock set back (a time
+/// sync after boot) counts as a long time, so that what is due is not put off.
+fn secs_since(since: u64, now: u64) -> u64 {
+    now.checked_sub(since).unwrap_or(u64::MAX)
+}
+
 fn log_rx(rx_log: &Path, text: &str) {
     let _ = OpenOptions::new()
         .create(true)
@@ -356,6 +379,15 @@ pub fn run_with_clock<R: Rig + 'static>(
     let mut was_scheduled = false;
     // What the node listens for past the end of its window, as last logged.
     let mut overtime: Option<&str> = None;
+    let check_secs = u64::from(cfg.schedule.check_minutes) * 60;
+    let retune_secs = u64::from(cfg.schedule.retune_minutes) * 60;
+    // Clock times of the last tune (whatever came of it, once the tuner started)
+    // and of the last time the radio was set up and checked.
+    let mut tuned_at: Option<u64> = None;
+    let mut checked_at = 0;
+    // Audio since the decoder last started from its initial speed, or last heard
+    // the node transmit (the reply that follows keeps the sender's speed).
+    let mut speed_age_ms: u64 = 0;
     loop {
         let block = match audio.recv_timeout(Duration::from_secs(5)) {
             Ok(b) => b,
@@ -395,6 +427,8 @@ pub fn run_with_clock<R: Rig + 'static>(
                     log::warn!("window start, not handled: {text}");
                     log_rx(&rx_log, &text);
                 }
+            } else if cfg.schedule.always {
+                log::info!("listening");
             } else {
                 log::info!("listening window open");
             }
@@ -402,8 +436,10 @@ pub fn run_with_clock<R: Rig + 'static>(
             if let Err(e) = station.open_window() {
                 log::error!("{e}");
             }
+            (tuned_at, checked_at) = (station.tuner_ran().then(clock), clock());
             guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
+            speed_age_ms = 0;
             events.clear();
             over = None;
             was_open = true;
@@ -427,9 +463,29 @@ pub fn run_with_clock<R: Rig + 'static>(
             continue;
         }
 
+        // Nothing being received or waited for: a moment to see that the radio is
+        // still on the node's frequency and mode, in case someone at the front panel,
+        // another program or a power cycle has changed it. Nothing is transmitted,
+        // and no audio is dropped.
+        let idle = !decoder.key_down()
+            && !decoder.has_partial()
+            && events.is_empty()
+            && !session.has_pending(now);
+        if idle && secs_since(checked_at, clock()) >= check_secs {
+            if let Err(e) = station.check() {
+                log::error!("radio check failed: {e}");
+            }
+            checked_at = clock();
+        }
+        if idle && speed_age_ms >= SPEED_REFRESH_MS {
+            decoder.reset_speed();
+            speed_age_ms = 0;
+        }
+
         let before = events.len();
         events.extend(decoder.push(&block.samples));
         let block_ms = block.samples.len() as u64 * 1000 / sample_rate;
+        speed_age_ms += block_ms;
         // The silence before the words just decoded: short if they follow the last
         // ones at the sender's rhythm.
         let gap = max_idle;
@@ -473,7 +529,24 @@ pub fn run_with_clock<R: Rig + 'static>(
             match session.handle(&text, Instant::now(), svc) {
                 Outcome::Silent(why) => log::info!("no reply: {why}"),
                 Outcome::Transmit(t) => {
+                    if tuned_at.is_none_or(|at| secs_since(at, clock()) >= retune_secs) {
+                        // The last tune is too old to trust, and any lockout since it
+                        // is due to end: tune again first. Doing it here rather than on
+                        // a timer puts the tuner's carrier where the frequency is in
+                        // use, just before a transmission that identifies the node.
+                        log::info!(
+                            "last tune over {} minutes ago: tuning before the reply",
+                            cfg.schedule.retune_minutes
+                        );
+                        if let Err(e) = station.start_window() {
+                            log::error!("tune before the reply failed: {e}");
+                        }
+                        // A tune that never started is tried again before the next.
+                        tuned_at = station.tuner_ran().then(clock);
+                    }
                     log::info!("sending: {}", t.text());
+                    // Sets the radio up and checks it before keying.
+                    checked_at = clock();
                     match station.transmit(&t) {
                         // Only messages that actually went out are marked read.
                         Ok(()) if !t.read_ids.is_empty() => svc.mark_read(&t.read_ids),
@@ -485,6 +558,7 @@ pub fn run_with_clock<R: Rig + 'static>(
                     // follows at once.
                     guard.ended(Instant::now(), recovery);
                     decoder.reset_levels();
+                    speed_age_ms = 0;
                 }
             }
         }
@@ -582,7 +656,9 @@ mod tests {
             address = "mom@example.com"
             "#,
             schedule = match opts.window_ends_ms {
-                Some(_) => "every_minutes = 60\n            window_minutes = 10",
+                Some(_) => {
+                    "always = false\n            every_minutes = 60\n            window_minutes = 10"
+                }
                 None => "always = true",
             },
         ))
@@ -681,8 +757,12 @@ mod tests {
         vec![0.0; 8 * n as usize]
     }
 
-    fn noisy(mut audio: Vec<f32>, k: &Keyer, snr_db: f32) -> Vec<f32> {
-        Noise::new(5).add(
+    fn noisy(audio: Vec<f32>, k: &Keyer, snr_db: f32) -> Vec<f32> {
+        noisy_with(audio, k, snr_db, 5)
+    }
+
+    fn noisy_with(mut audio: Vec<f32>, k: &Keyer, snr_db: f32, seed: u64) -> Vec<f32> {
+        Noise::new(seed).add(
             &mut audio,
             Noise::sigma_for_snr(k.amplitude, snr_db, 8000, 2500.0),
         );
@@ -792,7 +872,7 @@ mod tests {
         audio.extend(ms(8000));
         let h = run_node(noisy(audio, &k, 15.0));
         assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
-        // The window's tune is identified, then the read-back and the result.
+        // The start-up tune is identified, then the read-back and the result.
         assert_eq!(
             h.keyed,
             "DE N0DE R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K"
@@ -903,6 +983,28 @@ mod tests {
     }
 
     #[test]
+    fn a_call_after_minutes_of_band_noise_is_heard() {
+        // Noise that, heard for five minutes, would teach the decoder a speed no
+        // one is sending at, so the call's first words split wrongly.
+        let mut k = Keyer::new(8000, 610.0, 18.0);
+        k.jitter = 0.03;
+        for seed in [2u64, 4, 5] {
+            let mut audio = ms(302_000);
+            audio.extend(k.render(&format!("W5XXX 42 {} TX MOM HI K", code(42)), 0.0));
+            audio.extend(ms(cw::duration_ms("R 42 TX MOM HI ? DE N0DE K", 18) + 6000));
+            audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+            audio.extend(ms(8000));
+            let h = run_node(noisy_with(audio, &k, 15.0, seed * 7919));
+            assert_eq!(
+                h.sent,
+                [("MOM".into(), "HI".into())],
+                "{seed}: {}",
+                h.rx_log
+            );
+        }
+    }
+
+    #[test]
     fn over_end_finds_the_over_and_ignores_noise_after_it() {
         fn ev(text: &str) -> Vec<DecodeEvent> {
             let mut v = Vec::new();
@@ -931,6 +1033,13 @@ mod tests {
         assert_eq!(over_end(&ev("TX MOM K SEE ")), None);
         assert_eq!(over_end(&ev("TX MOM K * ")), None);
         assert_eq!(over_end(&ev("")), None);
+    }
+
+    #[test]
+    fn a_clock_set_back_makes_checks_due() {
+        assert_eq!(secs_since(1000, 1600), 600);
+        assert_eq!(secs_since(1000, 1000), 0);
+        assert_eq!(secs_since(1000, 400), u64::MAX);
     }
 
     #[test]

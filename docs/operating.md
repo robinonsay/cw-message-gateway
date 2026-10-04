@@ -3,16 +3,17 @@
 How to use the node from the field: what to carry, what to send, and what the node
 sends back. Examples use field callsign `W5XXX` and node callsign `N0CALL`; every
 reply ends with `DE N0CALL K`. The node also sends `DE N0CALL` on its own after its
-tuning carrier (at the start of a listening window) and between two chunks of a long
-readout: that is its station identification.
+tuning carrier when it starts listening (at start-up, or at the start of a
+listening window) and between two chunks of a long readout: that is its station
+identification.
 
 ## Before you leave
 
-- **Frequency and windows.** Know the node's frequency and its listening windows. By
-  default the node listens for the **first 10 minutes of every hour, UTC**
-  (`[schedule]` in the node's config). Outside a window it does not decode or
-  transmit at all, except to finish a transaction you started in one (see
-  [Timing and listening windows](#timing-and-listening-windows)).
+- **Frequency.** Know the node's frequency. By default the node listens **all the
+  time**. If it has been set to listen only in windows (`[schedule] always = false`
+  in the node's config, for example the first 10 minutes of every hour, UTC), know
+  them too: outside a window it does not decode or transmit at all, except to finish
+  a transaction you started in one (see [Timing](#timing)).
 - **Contacts.** Know the contact names configured at home (for example `MOM`,
   `BOB`). You can only send to those names.
 - **Where you will be, for weather.** `WX` gives the forecast for the place you
@@ -277,15 +278,17 @@ The node never answers anything it cannot decode or authenticate. There is no
   or `AGN` sent without one);
 - a contact name, weather preset number or grid square the node does not know or
   that is not valid (check it against your table);
-- you are outside a listening window (past its end the node only listens while it
-  is finishing a transaction you started in it), or not close enough to the node's
-  frequency;
-- the node measured a high SWR, or no output, earlier in this window and has
-  stopped transmitting until the next window. If you heard its tuning carrier but
-  no `DE N0CALL` after it, the tune failed and it may stay silent this window;
-- the node has stopped transmitting after a radio fault: it then stays silent in
-  every window until it is cleared at home (the owner is emailed when this
-  happens, if an alert address is set);
+- you are not close enough to the node's frequency, or outside a listening window
+  if the node uses them (past a window's end it only listens while it is finishing
+  a transaction you started in it);
+- the node measured a high SWR, or no output, or its tuner could not match the
+  antenna, and it has stopped transmitting until it next tunes: within an hour by
+  default (`schedule.retune_minutes`), or at the next window. If you heard its
+  tuning carrier at start-up or at a window's start but no `DE N0CALL` after it, the
+  tune failed;
+- the node has stopped transmitting after a radio fault: it then stays silent until
+  it is cleared at home (the owner is emailed when this happens, if an alert
+  address is set);
 - the node or its radio is down.
 
 **Retries are free.** Send exactly the same transmission again with the same line;
@@ -294,25 +297,31 @@ it costs no new codes:
 - Repeating an open the node already has makes it repeat the same read-back.
 - Repeating an `OK` the node already acted on makes it repeat the same reply
   (`SENT 43` again, or the whole readout), up to 3 times and for 10 minutes after
-  the node acted on it, also after the listening window has ended. The message is
+  the node acted on it, also after a listening window has ended. The message is
   not sent twice and the forecast is not fetched again. Once you open a new
   transaction, the old `OK` gets silence.
 - Repeating a `NO` or `AGN` exactly (same line, code and letter) gets the same
   answer, also free.
 
 So if you sent `OK` and heard nothing, repeat the `OK`, not the open, within 10
-minutes: past the end of the window the node keeps listening for it. If repeated
-tries get no answer, wait for the next window. If you are not sure what the node
-did, skipping to fresh lines is always safe for your codes, but if the node did act
-on your `OK`, the message is sent a second time.
+minutes (with windows, the node keeps listening for it past the end of the
+window). If repeated tries get no answer, try again in an hour (or at the next
+window, if the node uses them). If you are not sure what the node did, skipping to
+fresh lines is always safe for your codes, but if the node did act on your `OK`,
+the message is sent a second time.
 
-## Timing and listening windows
+## Timing
 
-- With the default schedule the node listens from minute 00 to minute 10 of every
-  hour, UTC. At the start of each window it runs its antenna tuner, which transmits
-  a carrier for a few seconds, and then sends `DE N0CALL`. Wait for that before
-  calling. If you hear the carrier but no `DE N0CALL`, the tune failed and the
-  node may stay silent for this window.
+- By default the node listens all the time, so you can call whenever you like.
+  When it starts up it runs its antenna tuner, a carrier of a few seconds, and then
+  sends `DE N0CALL`.
+- When the node last tuned more than an hour ago (`schedule.retune_minutes`), it
+  runs its antenna tuner before its reply: you hear a few seconds of carrier, then
+  the read-back, which identifies it. Otherwise it tunes only when it starts up.
+- If the node is set to listen in windows, it tunes at the start of each window,
+  which transmits a carrier for a few seconds, and then sends `DE N0CALL`: wait for
+  that before calling. If you hear the carrier but no `DE N0CALL`, the tune failed
+  and the node may stay silent until its next tune.
 - Past the end of a window the node keeps listening only to finish a transaction
   you started in it: while it is pending (until you commit, abort, or the 10
   minutes run out), and then for up to 10 minutes after the result, so that a
@@ -320,7 +329,8 @@ on your `OK`, the message is sent a second time.
   or after `R NO`, it is silent until the next window. Start new requests inside a
   window.
 - Wait for the node's reply before sending again. The reply starts a few seconds
-  after you stop (it waits for about 3 seconds of silence first).
+  after you stop (it waits for about 3 seconds of silence first, and a tune adds a
+  few more).
 
 ## Sending tips
 

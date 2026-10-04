@@ -90,6 +90,12 @@ const NAMES: &[&str] = &[
     "transceive",
     "fault-tune-hang",
     "fault-inhibited-at-start",
+    "retune",
+    "fault-high-swr-retune",
+    "front-panel-split",
+    "front-panel-delta-tx",
+    "front-panel-idle",
+    "other-stations",
 ];
 
 macro_rules! scenario_tests {
@@ -178,6 +184,12 @@ scenario_tests! {
     transceive => "transceive",
     fault_tune_hang => "fault-tune-hang",
     fault_inhibited_at_start => "fault-inhibited-at-start",
+    retune => "retune",
+    fault_high_swr_retune => "fault-high-swr-retune",
+    front_panel_split => "front-panel-split",
+    front_panel_delta_tx => "front-panel-delta-tx",
+    front_panel_idle => "front-panel-idle",
+    other_stations => "other-stations",
 }
 
 /// Every test vector decodes to what the manifest says: the clean ones to exactly

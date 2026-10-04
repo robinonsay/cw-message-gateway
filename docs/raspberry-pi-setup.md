@@ -21,11 +21,12 @@ Set the clock to sync (it is on by default with `systemd-timesyncd`) and check:
 timedatectl
 ```
 
-Listening windows are computed from UTC, so a wrong clock means the node listens at
-the wrong time, and tunes (a short carrier, then its callsign) at the wrong time
-too. The Pi has no battery-backed clock; it needs the network at boot to get the
-time. Make the service wait until the clock has actually synchronised, not just
-until the time service has started:
+If you set the node to listen in windows (`schedule.always = false`), they are
+computed from UTC, so a wrong clock means the node listens at the wrong time, and
+tunes (a short carrier, then its callsign) at the wrong time too. Listening all the
+time, the default, does not depend on the clock. The Pi has no battery-backed clock;
+it needs the network at boot to get the time. Make the service wait until the clock
+has actually synchronised, not just until the time service has started:
 
 ```sh
 sudo systemctl enable systemd-time-wait-sync.service
@@ -225,7 +226,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 
 | Item | Set to | Why |
 |---|---|---|
-| Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent for that listening window. |
+| Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent until its next tune. |
 
 **Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
 With it ON the radio streams waveform data to the port the node uses, which slows
@@ -237,10 +238,11 @@ transmit somewhere other than the frequency the node set; the node refuses to
 write to the radio unless both read OFF.
 
 **Power and tuner:** the node sets RF power to `station.power_watts` (30-50 W per
-the design; start bench tests at 10 W) and runs the internal tuner at the start of
-each listening window, not when it starts: started outside a window, it first tunes
-when the next one opens. After a tune that matches, it sends its callsign
-(`DE <node_call>`) in CW to identify the carrier. Leave the tuner switched on.
+the design; start bench tests at 10 W) and runs the internal tuner at start-up, at
+the start of each listening window if it uses them, and before a reply once the last
+tune is over an hour old. After the tune at start-up or at a window's start, if it
+matches, it sends its callsign (`DE <node_call>`) in CW to identify the carrier; a
+tune before a reply is identified by the reply. Leave the tuner switched on.
 
 ## 7. Configuration
 
@@ -333,20 +335,20 @@ journalctl -u hfnode -f
 
 On start you should see `if transmitting is inhibited, you@example.com is emailed`
 (or a warning that it is only logged, without `alert_to`), `last_seq is N`,
-`preflight:` lines (the read-only radio checks), `read-back:` lines and `N0CALL
-listening on 7030000 Hz`. The node tunes only when a listening window opens, so
-`listening window open`, a `health: tune NNNms` line and `health: swr ...` (from
-the `DE N0CALL` after the tune) follow at once if it started inside a window,
-otherwise at the next window (with the default schedule, up to 50 minutes later).
-The unit:
+`preflight:` lines (the read-only radio checks), `read-back:` lines, `N0CALL
+listening on 7030000 Hz`, `listening`, a `health: tune NNNms` line and `health:
+swr ...` (from the `DE N0CALL` after the tune). With listening windows
+(`schedule.always = false`) the node tunes only when a window opens, so
+`listening window open`, the tune and the ID follow at once if it started inside a
+window, otherwise at the next one (up to 50 minutes later with windows of 10
+minutes every hour). The unit:
 
 - runs `/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml` as `hfnode`, with
   `dialout` and `audio` as supplementary groups;
 - loads `/etc/hfnode/env`;
 - restarts on failure after 30 s, and gives up after 3 starts in an hour, so a
-  broken radio connection does not turn into an endless loop of restarts, each of
-  which tunes again (a carrier) if it falls inside a listening window (`sudo
-  systemctl reset-failed hfnode` before starting it again by hand);
+  broken radio connection does not turn into an endless loop of start-up tunes
+  (`sudo systemctl reset-failed hfnode` before starting it again by hand);
 - runs `hfnode radio ... rx` after every stop or crash, to make sure the radio is on
   receive;
 - only allows the process to open USB serial (`ttyUSB`) and ALSA devices, and
@@ -393,6 +395,11 @@ Then clear it as above.
 keyer and confirms receive before it exits, and the unit's stop hook then checks
 receive again. If the node was keying, the radio may first finish the text already
 handed to its keyer (at most 30 characters).
+
+**Using the radio yourself.** Stop the node first, and start it again
+(`sudo systemctl start hfnode`) when you are done. While it runs, it puts its
+frequency, mode, power and keyer settings back every `schedule.check_minutes` (10)
+and before every transmission.
 
 **Updating.** `sudo systemctl stop hfnode`, install the new binary, `sudo systemctl
 start hfnode`. `last_seq` and the inbox are kept in `/var/lib/hfnode`.
