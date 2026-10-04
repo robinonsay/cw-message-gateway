@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the HF CW message gateway node: an alternative to
+  hfnode.command for starting the node at log-in without a Terminal window. See
+  docs/macos-setup.md, "Start at log-in". Install with __HOME__ replaced by your
+  home folder:
+
+    sed "s|__HOME__|$HOME|g" deploy/macos/io.github.robinonsay.hfnode.plist \
+      > ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.robinonsay.hfnode.plist
+
+  hfnode-supervise.sh restarts the node after a failure (at most 3 starts an
+  hour), so launchd does not (KeepAlive false). launchd stops it with SIGTERM,
+  which the script passes on; the node puts the radio on receive before exiting.
+
+  Do not install this until docs/hardware-test-plan.md has been worked through.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.robinonsay.hfnode</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>__HOME__/Library/Application Support/hfnode/hfnode-supervise.sh</string>
+        <string>__HOME__/.cargo/bin/hfnode</string>
+        <string>__HOME__/Library/Application Support/hfnode/hfnode.toml</string>
+        <string>__HOME__/Library/Application Support/hfnode/env</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <!-- Not throttled like a background job: the decoder and keying are timed. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <!-- The script allows the node 20 s to stop, then checks receive. -->
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/hfnode.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/hfnode.log</string>
+</dict>
+</plist>

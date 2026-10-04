@@ -1,18 +1,35 @@
-//! Audio in: the radio's USB codec via ALSA `arecord`, or WAV files for testing.
+//! Audio in: the radio's USB codec, or WAV files for testing.
 //!
-//! `arecord` (alsa-utils, installed on Raspberry Pi OS) is used instead of linking
-//! ALSA directly, which keeps the build free of native dependencies and makes the
-//! capture device easy to check by hand: `arecord -L` lists devices and
-//! `arecord -D <device> -f S16_LE -r 8000 -c 1 test.wav` records a sample.
+//! Live capture has one backend per platform, chosen when the program is built:
+//!
+//! - **Linux** (and other Unix systems): ALSA, through `arecord` (alsa-utils,
+//!   installed on Raspberry Pi OS). Running it instead of linking ALSA keeps the build
+//!   free of native dependencies and makes the capture device easy to check by hand:
+//!   `arecord -L` lists devices and `arecord -D <device> -f S16_LE -r 8000 -c 1
+//!   test.wav` records a sample. ALSA's `plughw` devices deliver the rate asked for.
+//! - **macOS** (Core Audio) and **Windows** (WASAPI), through the cpal crate. The
+//!   device is read in its own format (typically 44.1 or 48 kHz, stereo), so that
+//!   capturing never changes the sound card's settings for anything else, and
+//!   converted to mono at `audio.sample_rate` by [`resample`].
+//!
+//! Either way the node receives mono blocks of about 50 ms at `audio.sample_rate`,
+//! each stamped with when it was captured.
+
+mod resample;
+pub use resample::{mono, Resampler};
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[path = "audio/alsa.rs"]
+mod backend;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[path = "audio/native.rs"]
+mod backend;
 
 use anyhow::{bail, Context, Result};
 use std::collections::VecDeque;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread;
 use std::time::{Duration, Instant};
 
 /// Blocks held for a busy reader: 10 s of 50 ms blocks.
@@ -139,55 +156,157 @@ impl Drop for BlockReceiver {
     }
 }
 
-/// Live capture. Dropping it stops `arecord`.
+/// Live capture from the radio's sound card. Dropping it stops capturing.
 pub struct Capture {
-    child: Child,
     pub samples: BlockReceiver,
+    _source: backend::Source,
 }
 
 impl Capture {
-    /// Start capturing mono 16-bit audio at `sample_rate` from ALSA `device`.
-    /// Samples arrive in blocks of about 50 ms; if they are not taken, only the
-    /// newest 10 s are kept.
+    /// Start capturing from `device` (see [`DEVICE_HINT`]), delivered as mono at
+    /// `sample_rate`. Samples arrive in blocks of about 50 ms; if they are not taken,
+    /// only the newest 10 s are kept.
     pub fn start(device: &str, sample_rate: u32) -> Result<Self> {
-        let mut child = Command::new("arecord")
-            .args([
-                "-q", "-D", device, "-f", "S16_LE", "-c", "1", "-t", "raw", "-r",
-            ])
-            .arg(sample_rate.to_string())
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("starting arecord (is alsa-utils installed?)")?;
-        let mut out = child.stdout.take().expect("piped stdout");
         let (tx, rx) = queue(CAPTURE_BLOCKS);
-        let block = (sample_rate as usize / 20).max(1) * 2;
-        thread::spawn(move || {
-            let mut buf = vec![0u8; block];
-            loop {
-                if out.read_exact(&mut buf).is_err() {
-                    log::error!("audio capture ended");
-                    break;
-                }
-                let at = Instant::now();
-                let samples = buf
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&b| i16::from_le_bytes(b) as f32 / 32768.0)
-                    .collect();
-                if tx.send(Block { at, samples }).is_err() {
-                    break;
-                }
-            }
-        });
-        Ok(Self { child, samples: rx })
+        let source = backend::start(device, sample_rate, Blocker::new(tx, sample_rate, device))?;
+        Ok(Self {
+            samples: rx,
+            _source: source,
+        })
     }
 }
 
-impl Drop for Capture {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+/// What `audio.device` names on this platform.
+pub const DEVICE_HINT: &str = backend::DEVICE_HINT;
+
+/// An audio input this computer offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputDevice {
+    /// What to put in `audio.device`.
+    pub name: String,
+    /// Description, format, whether it is the system default.
+    pub detail: String,
+}
+
+impl InputDevice {
+    /// Whether this looks like the IC-7300's USB codec ("USB Audio CODEC").
+    pub fn looks_like_radio(&self) -> bool {
+        let both = format!("{} {}", self.name, self.detail).to_ascii_lowercase();
+        both.contains("usb audio codec") || both.contains("card=codec")
+    }
+}
+
+/// The audio inputs this computer offers, as `audio.device` would name them.
+pub fn input_devices() -> Result<Vec<InputDevice>> {
+    backend::input_devices()
+}
+
+/// The one of `names` that `wanted` picks: an exact match (ignoring case), or else
+/// the only name containing it. Several matches is an error rather than a guess, so
+/// that the node never decodes the wrong sound card (a built-in microphone, say).
+pub fn pick_device(names: &[String], wanted: &str) -> Result<usize> {
+    let w = wanted.trim().to_lowercase();
+    if w.is_empty() {
+        bail!("audio.device is empty; {DEVICE_HINT}");
+    }
+    if let Some(i) = names.iter().position(|n| n.trim().to_lowercase() == w) {
+        return Ok(i);
+    }
+    let hits: Vec<usize> = (0..names.len())
+        .filter(|&i| names[i].to_lowercase().contains(&w))
+        .collect();
+    let list = |ix: &mut dyn Iterator<Item = usize>| {
+        ix.map(|i| format!("\n  {:?}", names[i]))
+            .collect::<String>()
+    };
+    match hits.as_slice() {
+        [i] => Ok(*i),
+        [] => bail!(
+            "no audio input matches {wanted:?}. Inputs on this computer:{}\n\
+             (is the radio on and its USB cable connected? `hfnode devices` lists them too)",
+            if names.is_empty() {
+                "\n  (none)".to_string()
+            } else {
+                list(&mut (0..names.len()))
+            }
+        ),
+        _ => bail!(
+            "{wanted:?} matches more than one audio input; use more of the name:{}",
+            list(&mut hits.iter().copied())
+        ),
+    }
+}
+
+/// How long the start of a capture is watched for digital silence.
+const SILENCE_CHECK_SECS: usize = 3;
+
+/// Cuts captured mono audio, already at the decoder's rate, into blocks of about
+/// 50 ms for the queue, stamping each with the time it was completed.
+///
+/// Also warns, once, if the first few seconds are exact zeros. A radio's audio always
+/// carries some noise, so that means the audio is not reaching the node: on macOS and
+/// Windows a program not allowed to use the microphone gets silence rather than an
+/// error, and an AF output level of 0 does the same.
+pub(crate) struct Blocker {
+    tx: BlockSender,
+    block: usize,
+    pending: Vec<f32>,
+    device: String,
+    /// Samples left to watch for silence; 0 once done.
+    watch: usize,
+    heard: bool,
+}
+
+impl Blocker {
+    pub(crate) fn new(tx: BlockSender, sample_rate: u32, device: &str) -> Self {
+        Self {
+            tx,
+            block: (sample_rate as usize / 20).max(1),
+            pending: Vec::new(),
+            device: device.to_string(),
+            watch: sample_rate as usize * SILENCE_CHECK_SECS,
+            heard: false,
+        }
+    }
+
+    /// Samples per block.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    pub(crate) fn block_len(&self) -> usize {
+        self.block
+    }
+
+    /// Add captured samples. Returns false once nobody is receiving any more.
+    pub(crate) fn push(&mut self, samples: &[f32]) -> bool {
+        if self.watch > 0 {
+            let n = samples.len().min(self.watch);
+            self.heard |= samples[..n].iter().any(|&s| s != 0.0);
+            self.watch -= n;
+            if self.watch == 0 && !self.heard {
+                log::warn!(
+                    "audio from {:?} has been exact silence for {SILENCE_CHECK_SECS} s: the \
+                     radio's audio is not reaching hfnode. On macOS allow microphone access \
+                     for the program running hfnode (System Settings > Privacy & Security > \
+                     Microphone); on Windows turn on Settings > Privacy & security > \
+                     Microphone > Let desktop apps access your microphone; and check the \
+                     radio's ACC/USB AF output level",
+                    self.device
+                );
+            }
+        }
+        self.pending.extend_from_slice(samples);
+        let mut start = 0;
+        while self.pending.len() - start >= self.block {
+            let block = Block {
+                at: Instant::now(),
+                samples: self.pending[start..start + self.block].to_vec(),
+            };
+            start += self.block;
+            if self.tx.send(block).is_err() {
+                return false;
+            }
+        }
+        self.pending.drain(..start);
+        true
     }
 }
 
@@ -235,6 +354,7 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn wav_round_trip() {
