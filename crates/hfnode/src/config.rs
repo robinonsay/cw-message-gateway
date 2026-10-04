@@ -35,11 +35,16 @@ pub struct Station {
     /// The agreed listening frequency in Hz (dial frequency in CW mode).
     pub frequency_hz: u64,
     pub serial_port: String,
+    /// Must equal the radio's CI-V USB Baud Rate setting.
     #[serde(default = "default_baud")]
     pub baud: u32,
     /// The radio's CI-V address.
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
+    /// The last bring-up stage passed on this radio (docs/first-contact.md). Commands
+    /// that need a later stage are refused.
+    #[serde(default)]
+    pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.
     #[serde(default = "default_power")]
     pub power_watts: u32,
@@ -312,6 +317,9 @@ impl Config {
         if s.field_calls.is_empty() {
             bail!("station.field_calls must list at least one callsign");
         }
+        // Only rates and addresses the radio can be set to (p. 12-10, 12-11).
+        civ::ic7300::check_link_settings(s.baud, s.civ_address)
+            .map_err(|e| anyhow::anyhow!("station.baud / station.civ_address: {e}"))?;
         if !(1..=100).contains(&s.power_watts) {
             bail!("station.power_watts must be 1-100");
         }
@@ -431,6 +439,32 @@ mod tests {
             cfg.station.key_speed_wpm = wpm;
             assert_eq!(cfg.validate().is_ok(), ok, "{wpm} wpm");
         }
+    }
+
+    #[test]
+    fn rejects_link_settings_the_radio_does_not_have() {
+        for (baud, addr, ok) in [
+            (115_200, 0x94, true),
+            (4800, 0x02, true),
+            (19_200, 0xDF, true),
+            (115_201, 0x94, false),
+            (230_400, 0x94, false),
+            (115_200, 0x00, false),
+            (115_200, 0xE0, false),
+        ] {
+            let mut cfg = example();
+            cfg.station.baud = baud;
+            cfg.station.civ_address = addr;
+            assert_eq!(cfg.validate().is_ok(), ok, "{baud} {addr:02X}");
+        }
+    }
+
+    #[test]
+    fn commissioning_defaults_to_nothing_passed() {
+        assert_eq!(
+            example().station.commissioned,
+            crate::commissioning::Stage::None
+        );
     }
 
     #[test]

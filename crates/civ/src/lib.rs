@@ -3,11 +3,13 @@
 //! [`Rig`] is everything the node asks of the radio. [`sim::SimRig`] implements it
 //! in memory for tests and `hfnode sim`; the IC-7300 implementation over CI-V lives
 //! in [`ic7300`], and [`mock`] is a byte-level IC-7300 behind a fake serial port for
-//! testing that implementation and the node above it.
+//! testing that implementation and the node above it. [`preflight`] holds the
+//! read-only checks made before the node writes to a real radio.
 
 pub mod frame;
 pub mod ic7300;
 pub mod mock;
+pub mod preflight;
 pub mod sim;
 
 use std::fmt;
