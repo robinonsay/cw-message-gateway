@@ -169,18 +169,26 @@ None of these affects the bench steps; all need deciding before stage `done`:
   including exact band edges, regardless of licence class. The radio's own
   "ON (User) & TX Limit" band-edge setting (line 1531) could enforce the licensed
   segment.
-- **Tuning carrier.** The node tunes at the top of every listening window, an
-  unidentified carrier of up to 15 s, without first checking the frequency is
-  clear.
+- **Tuning carrier.** Listening all the time (the default since 2026-10-04), the
+  node tunes at start-up and then only just before a reply once the last tune is
+  older than `schedule.retune_minutes` (60): when it has just heard a call it will
+  answer, so the frequency is in use, and normally followed at once by the reply,
+  which identifies the station. A tune the tuner cannot match is followed by
+  nothing, since that locks the reply out. With windows it still tunes at the top
+  of every window. Either way it is an unidentified carrier of up to 15 s, sent
+  without first checking the frequency is clear.
 - **`hfnode radio rx` failing in the service's stop hook** does not write the
   inhibit file.
 - **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated
-  as a lost radio. Off at a window start, the node inhibits itself; switched off
-  and on within one window, it answers the next call without setting the radio up
-  again. A USB device that re-enumerates leaves the node holding a dead port. The
+  as a lost radio. Off at a tune or an idle check (every `schedule.check_minutes`),
+  the node inhibits itself; switched off and on between those, it sets the radio
+  up again before its next transmission (every transmission does, since
+  2026-10-04). A USB device that re-enumerates leaves the node holding a dead port. The
   stop procedure now says to stop `hfnode` before switching the radio back on; the
   node should latch the inhibit and exit after a few consecutive timeouts.
-- **Clock.** Listening windows follow the Pi's clock. `time-sync.target` is reached
+- **Clock.** Listening windows follow the Pi's clock. Listening all the time (the
+  default) does not depend on it: the idle checks and re-tunes only count minutes,
+  and a clock set back makes them due at once rather than late. `time-sync.target` is reached
   when timesyncd starts, not when it has synced, unless
   `systemd-time-wait-sync.service` is enabled (now a step in the Pi guide). Without
   network after a power cut the window-start tunes can still come at unscheduled
@@ -235,3 +243,39 @@ read-back changed. What did:
   inhibit could not be written to `tx-inhibited` and held only for that one
   process. Those commands now create the directory before opening the port, and
   the inhibit creates it too if it is missing.
+
+## Addendum, 2026-10-04: listening all the time
+
+The node now listens all the time by default (`schedule.always = true`); listening
+windows remain an option. Before this change `always = true` already existed, but
+the window-start set-up and checks then ran only once, at start-up, and a lockout
+after a high SWR, no output or a tuner that could not match lasted until a
+restart. No CI-V command was added or changed: the new checks send the same
+commands as a window start (`1C 00` read; `06`, `05`, `14 0A`, `14 0C`, `14 0F`,
+`16 47`; then `0F`, `21 02` and `1C 03` reads). What changed:
+
+- **Before every transmission** the node waits up to 2 s for `1C 00` to read
+  receive, sends the settings again, and checks split and ∂TX are off and `1C 03`
+  reads the configured frequency. If any of that fails nothing is keyed and receive
+  is forced; the next transmission checks again. Before this, split or ∂TX switched
+  on at the front panel after a window started would have been keyed through: the
+  self-test scenarios `front-panel-split` and `front-panel-delta-tx` fail without
+  the check.
+- **While listening and hearing nothing**, every `schedule.check_minutes` (10,
+  1-1440), the node does the same set-up and checks without tuning, so a dial or
+  mode change at the front panel does not leave it deaf (`front-panel-idle`). If a
+  check fails, receive is forced, and transmitting is inhibited if receive cannot
+  be confirmed, as at a window start.
+- **Tuning** happens at start-up, at each window start, and before a reply once
+  the last tune is older than `schedule.retune_minutes` (60, 10-1440). A lockout
+  lasts until that tune (`fault-high-swr-retune`, `retune`), which sets the radio up
+  and checks it first, as a window start does. A tune that stopped before starting
+  the tuner (inhibited, or the radio could not be set up) does not count: the node
+  tries again before its next reply.
+- **Decoder.** Listening for hours, the decoder learned a wrong speed from band
+  noise, which garbled the next caller's first words; it now goes back to its
+  starting speed after a quiet minute (`retune`, `fault-high-swr-retune` and
+  `other-stations` fail without this). Not a CI-V change, noted here because it
+  came with listening all the time.
+- **Unchanged:** the SWR and `1C 00` cross-check on every transmission, the
+  watchdog, the persisted inhibit, the bring-up stages and the 10 W bench cap.

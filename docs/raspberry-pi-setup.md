@@ -21,8 +21,10 @@ Set the clock to sync (it is on by default with `systemd-timesyncd`) and check:
 timedatectl
 ```
 
-Listening windows are computed from UTC, so a wrong clock means the node listens at
-the wrong time, and tunes (a short carrier) at the wrong time too. The Pi has no
+If you set the node to listen in windows (`schedule.always = false`), they are
+computed from UTC, so a wrong clock means the node listens at the wrong time, and
+tunes (a short carrier) at the wrong time too. Listening all the time, the default,
+does not depend on the clock. The Pi has no
 battery-backed clock; it needs the network at boot to get the time. Make the
 service wait until the clock has actually synchronised, not just until the time
 service has started:
@@ -225,7 +227,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 
 | Item | Set to | Why |
 |---|---|---|
-| Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent for that listening window. |
+| Tuner | **Not ticked** (default) | In emergency mode the internal tuner keeps working into an SWR above 3:1. Normally it gives up and bypasses itself, which the node sees and then stays silent until its next tune. |
 
 **Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
 With it ON the radio streams waveform data to the port the node uses, which slows
@@ -237,8 +239,9 @@ transmit somewhere other than the frequency the node set; the node refuses to
 write to the radio unless both read OFF.
 
 **Power and tuner:** the node sets RF power to `station.power_watts` (30-50 W per
-the design; start bench tests at 10 W) and runs the internal tuner at start-up and
-at the start of each listening window. Leave the tuner switched on.
+the design; start bench tests at 10 W) and runs the internal tuner at start-up, at
+the start of each listening window if it uses them, and before a reply once the last
+tune is over an hour old. Leave the tuner switched on.
 
 ## 7. Configuration
 
@@ -353,6 +356,11 @@ after a restart, until that file is removed. Check the radio first.
 keyer and confirms receive before it exits, and the unit's stop hook then checks
 receive again. If the node was keying, the radio may first finish the text already
 handed to its keyer (at most 30 characters).
+
+**Using the radio yourself.** Stop the node first, and start it again
+(`sudo systemctl start hfnode`) when you are done. While it runs, it puts its
+frequency, mode, power and keyer settings back every `schedule.check_minutes` (10)
+and before every transmission.
 
 **Updating.** `sudo systemctl stop hfnode`, install the new binary, `sudo systemctl
 start hfnode`. `last_seq` and the inbox are kept in `/var/lib/hfnode`.

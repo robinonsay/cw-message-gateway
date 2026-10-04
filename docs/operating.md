@@ -6,10 +6,10 @@ always ends with `DE <its callsign> K`.
 
 ## Before you leave
 
-- **Frequency and windows.** Know the node's frequency and its listening windows. By
-  default the node listens for the **first 10 minutes of every hour, UTC**
-  (`[schedule]` in the node's config). Outside a window it does not decode or
-  transmit at all.
+- **Frequency.** Know the node's frequency. By default the node listens **all the
+  time**. If it has been set to listen only in windows (`[schedule] always = false`
+  in the node's config, for example the first 10 minutes of every hour, UTC), know
+  them too: outside a window it does not decode or transmit at all.
 - **Contacts.** Know the contact names configured at home (for example `MOM`,
   `BOB`). You can only send to those names.
 - **Where you will be, for weather.** `WX` gives the forecast for the place you
@@ -207,9 +207,11 @@ The node never answers anything it cannot decode or authenticate. There is no
 - a sequence number or code was wrong, or the line was already used;
 - a contact name, weather preset number or grid square the node does not know or
   that is not valid (check it against your table);
-- you are outside a listening window, or not close enough to the node's frequency;
-- the node measured a high SWR earlier in this window and has stopped transmitting
-  until the next window;
+- you are not close enough to the node's frequency, or outside a listening window
+  if the node uses them;
+- the node measured a high SWR, or its tuner could not match the antenna, and it
+  has stopped transmitting until it next tunes: within an hour by default
+  (`schedule.retune_minutes`), or at the next window;
 - the node or its radio is down.
 
 **Retries are free.** Send exactly the same transmission again with the same line;
@@ -220,18 +222,23 @@ it costs no new codes:
   (`SENT 43` again). The message is not sent twice.
 
 So if you sent `OK` and heard nothing, repeat the `OK`, not the open. If repeated
-tries get no answer, wait for the next window. If you are not sure what the node
-did, skipping to fresh lines is always safe.
+tries get no answer, try again in an hour (or at the next window, if the node uses
+them). If you are not sure what the node did, skipping to fresh lines is always
+safe.
 
-## Timing and listening windows
+## Timing
 
-- With the default schedule the node listens from minute 00 to minute 10 of every
-  hour, UTC. At the start of each window it runs its antenna tuner, which transmits
-  a carrier for a few seconds. Wait until that is done before calling.
-- A transaction that is open when the window ends stays open: the node keeps
+- By default the node listens all the time, so you can call whenever you like.
+- When the node last tuned more than an hour ago (`schedule.retune_minutes`), it
+  runs its antenna tuner before its reply: you hear a few seconds of carrier, then
+  the read-back. Otherwise it tunes only when it starts up.
+- If the node is set to listen in windows, it tunes at the start of each window,
+  which transmits a carrier for a few seconds: wait until that is done before
+  calling. A transaction that is open when a window ends stays open: the node keeps
   listening until you commit, abort, or the 10 minutes run out.
 - Wait for the node's reply before sending again. The reply starts a few seconds
-  after you stop (it waits for about 3 seconds of silence first).
+  after you stop (it waits for about 3 seconds of silence first, and a tune adds a
+  few more).
 
 ## Sending tips
 
