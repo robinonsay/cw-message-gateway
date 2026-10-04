@@ -22,6 +22,9 @@
 //!   next window. If a piece is keyed without one such sample, the node also stops
 //!   and stays silent: the radio's own protection cuts its output into a bad load,
 //!   so missing output is itself a sign of one.
+//!   Each SWR sample also reads the transmit status: if the radio reads receive
+//!   while the Po meter shows output, its status cannot be trusted for the checks
+//!   above, and transmitting is inhibited until restart.
 //! - **Reduced power**, set at start-up.
 //! - **Tuning** at start-up and at the top of each listening window.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
@@ -300,16 +303,13 @@ impl<R: Rig + 'static> Station<R> {
         }
         self.swr_lockout = false;
         self.swr_checked = false;
-        self.with_rig(|r| r.start_tune())?;
         let t0 = Instant::now();
-        while self.with_rig(|r| r.tuner_busy())? {
-            if t0.elapsed() > self.cfg.tune_timeout {
-                self.health("tune", "timeout");
-                self.force_rx()
-                    .map_err(|e| RigError::Protocol(e.to_string()))?;
-                return Err(civ::RigError::Timeout);
-            }
-            thread::sleep(self.cfg.poll);
+        if let Err(e) = self.tune(t0) {
+            // The radio may have taken 1C 01 02 even if its reply was lost, or still
+            // be tuning: make sure it is back on receive before going on.
+            self.force_rx()
+                .map_err(|e| RigError::Protocol(e.to_string()))?;
+            return Err(e);
         }
         if !self.with_rig(|r| r.tuner_matched())? {
             // The tuner bypassed itself: the antenna is beyond its 3:1 range.
@@ -319,6 +319,19 @@ impl<R: Rig + 'static> Station<R> {
             return Err(RigError::Protocol("tuner could not match the load".into()));
         }
         self.health("tune", &format!("{}ms", t0.elapsed().as_millis()));
+        Ok(())
+    }
+
+    /// Start a tuner cycle and wait for it to end, for at most `tune_timeout`.
+    fn tune(&self, t0: Instant) -> civ::Result<()> {
+        self.with_rig(|r| r.start_tune())?;
+        while self.with_rig(|r| r.tuner_busy())? {
+            if t0.elapsed() > self.cfg.tune_timeout {
+                self.health("tune", "timeout");
+                return Err(civ::RigError::Timeout);
+            }
+            thread::sleep(self.cfg.poll);
+        }
         Ok(())
     }
 
@@ -399,11 +412,25 @@ impl<R: Rig + 'static> Station<R> {
             }
             let sample = self.with_rig(|r| {
                 let before = r.read_po()?;
+                let tx = r.is_transmitting()?;
                 let swr = r.read_swr()?;
                 let after = r.read_po()?;
-                Ok((before.min(after) >= min_po).then_some(swr))
+                Ok((before.min(after) >= min_po).then_some((swr, tx)))
             })?;
-            if let Some(swr) = sample {
+            if let Some((_, false)) = sample {
+                // Output on the Po meter while the radio reads receive: its status
+                // does not show keyer transmissions, so no receive confirmation in
+                // this module means anything. (The manual does not say 1C 00 covers
+                // them; this checks it on every window.)
+                self.health("tx-status", "rx-with-output");
+                self.tx_inhibit.store(true, Ordering::SeqCst);
+                log::error!(
+                    "radio reads receive (1C 00) while the Po meter shows output: its \
+                     transmit status cannot be trusted; transmit inhibited until restart"
+                );
+                return Err(TxError::Inhibited);
+            }
+            if let Some((swr, _)) = sample {
                 worst = Some(worst.map_or(swr, |w| w.max(swr)));
                 if swr > self.cfg.swr_limit {
                     self.health("swr", &format!("{swr:.2}"));
@@ -640,6 +667,31 @@ mod tests {
     }
 
     #[test]
+    fn a_radio_whose_status_misses_keying_is_not_trusted() {
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(st.tx_inhibited());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert_eq!(st.rig().lock().unwrap().sim.sent.len(), 1);
+    }
+
+    #[test]
+    fn a_tune_that_errors_forces_receive() {
+        let mut rig = Radio::new(fast_rig());
+        rig.tune_reply_lost = true;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert!(st.start_window().is_err());
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        assert!(r.stops > 0, "receive forced");
+        assert!(!r.is_transmitting().unwrap());
+    }
+
+    #[test]
     fn swr_is_checked_only_with_output_present() {
         let mut st = Station::new(fast_rig(), cfg(), None);
         st.configure().unwrap();
@@ -664,6 +716,12 @@ mod tests {
         /// Time the next stop command spends before reaching the radio, as the
         /// driver's read-until-quiet after a CI-V timeout does.
         stop_lag: Option<Duration>,
+        /// The transmit status reads receive whatever the radio is doing.
+        status_blind: bool,
+        /// The tuner starts, but the reply to the command is lost.
+        tune_reply_lost: bool,
+        /// Stop-CW commands received.
+        stops: u32,
     }
 
     impl Radio {
@@ -674,6 +732,9 @@ mod tests {
                 hang_after_stop: false,
                 hang_until: None,
                 stop_lag: None,
+                status_blind: false,
+                tune_reply_lost: false,
+                stops: 0,
             }
         }
 
@@ -715,7 +776,11 @@ mod tests {
             self.sim.dot_duration()
         }
         fn start_tune(&mut self) -> civ::Result<()> {
-            self.sim.start_tune()
+            self.sim.start_tune()?;
+            if self.tune_reply_lost {
+                return Err(RigError::Timeout);
+            }
+            Ok(())
         }
         fn tuner_busy(&mut self) -> civ::Result<bool> {
             self.sim.tuner_busy()
@@ -739,6 +804,7 @@ mod tests {
             self.sim.send_cw(text)
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
+            self.stops += 1;
             if let Some(lag) = self.stop_lag.take() {
                 thread::sleep(lag);
             }
@@ -746,6 +812,9 @@ mod tests {
             self.sim.stop_cw()
         }
         fn is_transmitting(&mut self) -> civ::Result<bool> {
+            if self.status_blind {
+                return Ok(false);
+            }
             let hanging = self.hang_until.is_some_and(|t| Instant::now() < t);
             Ok(hanging || self.sim.is_transmitting()?)
         }

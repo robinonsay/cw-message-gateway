@@ -317,7 +317,59 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
         ),
     }
 
+    // The node's keying times assume PARIS timing, dash = 3 dots; a longer dash
+    // makes every piece run long and trips the stuck-transmitter check.
+    match r.keyer_ratio() {
+        Ok(ratio) if (ratio - 3.0).abs() < 0.05 => rep.add(
+            "keyer dot/dash ratio",
+            "1A 05 01 61",
+            "1:1:3.0",
+            Level::Pass,
+            "",
+        ),
+        Ok(ratio) => rep.add(
+            "keyer dot/dash ratio",
+            "1A 05 01 61",
+            format!("1:1:{ratio:.1}"),
+            Level::Warn,
+            "the node times keying at 1:1:3.0; set the ratio to 3.0",
+        ),
+        Err(e) => rep.add(
+            "keyer dot/dash ratio",
+            "1A 05 01 61",
+            "-",
+            Level::Warn,
+            unread(&e),
+        ),
+    }
+
+    // Whether peak hold applies to the meters read over CI-V is not documented; if it
+    // does, the Po meter could show output after the key has gone up.
+    match r.meter_peak_hold() {
+        Ok(false) => rep.add("meter peak hold", "1A 05 00 84", "OFF", Level::Pass, ""),
+        Ok(true) => rep.add(
+            "meter peak hold",
+            "1A 05 00 84",
+            "ON",
+            Level::Warn,
+            "set it OFF so the Po meter reads output only while there is output",
+        ),
+        Err(e) => rep.add(
+            "meter peak hold",
+            "1A 05 00 84",
+            "-",
+            Level::Warn,
+            unread(&e),
+        ),
+    }
+
     rep.info("frequency", "03", r.frequency(), |hz| format!("{hz} Hz"));
+    rep.info(
+        "transmit frequency",
+        "1C 03",
+        r.transmit_frequency(),
+        |hz| format!("{hz} Hz"),
+    );
     rep.info("mode", "04", r.read_mode(), |&(m, f)| {
         format!("{} FIL{f}", mode_name(m))
     });
@@ -376,6 +428,23 @@ pub fn verify_setup<P: Port>(r: &mut Ic7300<P>, s: &Setup) -> Report {
             format!("set {} Hz", s.frequency_hz),
         )
     });
+    rep.required(
+        "transmit frequency",
+        "1C 03",
+        r.transmit_frequency(),
+        |&hz| {
+            let level = if hz == s.frequency_hz {
+                Level::Pass
+            } else {
+                Level::Fail
+            };
+            (
+                format!("{hz} Hz"),
+                level,
+                format!("set {} Hz", s.frequency_hz),
+            )
+        },
+    );
     rep.required("mode", "04", r.read_mode(), |&(m, f)| {
         let level = if m == 0x03 { Level::Pass } else { Level::Fail };
         (format!("{} FIL{f}", mode_name(m)), level, "set CW".into())
@@ -521,6 +590,9 @@ mod tests {
             (&[0x1C, 0x01], &[0x01]),
             (&[0x1A, 0x05, 0x00, 0x71], &[0x00]),
             (&[0x1A, 0x05, 0x00, 0x75], &[0x01]),
+            (&[0x1A, 0x05, 0x01, 0x61], &[0x30]),
+            (&[0x1A, 0x05, 0x00, 0x84], &[0x00]),
+            (&[0x1C, 0x03], &[0x00, 0x00, 0x03, 0x07, 0x00]),
         ] {
             t.answers.insert(cmd.to_vec(), data.to_vec());
         }
@@ -554,7 +626,7 @@ mod tests {
         // that sets a value, keys or tunes.
         let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
         let sent = sent_bodies(&r);
-        assert_eq!(sent.len(), 16);
+        assert_eq!(sent.len(), 19);
         for body in sent {
             assert!(reads.contains(&body), "{body:02X?} is not a read");
         }
@@ -609,6 +681,17 @@ mod tests {
     }
 
     #[test]
+    fn keyer_ratio_and_peak_hold_only_warn() {
+        let mut t = good();
+        t.answers.insert(vec![0x1A, 0x05, 0x01, 0x61], vec![0x45]);
+        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x84], vec![0x01]);
+        let rep = preflight(&mut rig(t), true);
+        assert!(rep.passed(), "{rep}");
+        assert_eq!(level_of(&rep, "keyer dot/dash ratio"), Level::Warn);
+        assert_eq!(level_of(&rep, "meter peak hold"), Level::Warn);
+    }
+
+    #[test]
     fn missing_info_items_only_warn() {
         let mut t = good();
         t.answers.remove(&[0x1A, 0x05, 0x00, 0x71][..]);
@@ -643,6 +726,8 @@ mod tests {
             (&[0x14, 0x0F], &[0x00, 0x50]),
             (&[0x16, 0x47], &[0x02]),
             (&[0x0F], &[0x01]),
+            (&[0x1C, 0x03], &[0x00, 0x00, 0x03, 0x07, 0x00, 0x00]),
+            (&[0x1C, 0x03], &[0x00, 0x10, 0x03, 0x07, 0x00]), // ∂TX +1 kHz
         ] {
             let mut t = good();
             t.answers.insert(cmd.to_vec(), data.to_vec());

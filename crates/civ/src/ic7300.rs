@@ -151,6 +151,23 @@ mod cmd {
     pub const USB_KEYING_RTTY: &[u8] = &[0x1A, 0x05, 0x00, 0x80];
     /// 1A 05 01 97: "Inhibit Timer at USB connection (00=OFF, 01=ON)" (p. 19-7).
     pub const USB_INHIBIT_TIMER: &[u8] = &[0x1A, 0x05, 0x01, 0x97];
+    /// 1C 03: "Read transmit frequency" (p. 19-7), in the operating frequency format
+    /// ("Command: 00, 03, 05, 1C 03", p. 19-9).
+    pub const TX_FREQ: &[u8] = &[0x1C, 0x03];
+    /// 1A 05 00 84: "Send/read peak hold set for meter *(00=OFF, 01=ON)" (p. 19-5).
+    pub const METER_PEAK_HOLD: &[u8] = &[0x1A, 0x05, 0x00, 0x84];
+    /// 1A 05 01 61: "Send/read CW keyer dot/dash ratio (28=1:1:2.8 to 45=1:1:4.5)"
+    /// (p. 19-6).
+    pub const KEYER_RATIO: &[u8] = &[0x1A, 0x05, 0x01, 0x61];
+}
+
+/// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
+/// 100 MHz digits, "0 (Fixed)" (p. 19-9).
+fn parse_frequency(data: &[u8]) -> Result<u64> {
+    match from_bcd_le(data) {
+        Some(hz) if data.len() == 5 && data[4] == 0x00 => Ok(hz),
+        _ => Err(RigError::Protocol(format!("frequency {data:02X?}"))),
+    }
 }
 
 /// A USB control-line setting (1A 05 00 78, 00 79, 00 80): "00=OFF, 01=DTR, 02=RTS"
@@ -329,26 +346,41 @@ impl<P: Port> Ic7300<P> {
     /// Send `body` and return the first reply that `wanted` accepts, or NG. Echoes
     /// of our own frame (USB echo back), frames addressed elsewhere and replies
     /// that do not fit this command (left over from an earlier one) are skipped.
+    ///
+    /// Every frame sent and received is logged at trace level (`RUST_LOG=civ=trace`)
+    /// with the time since the command went out, for checking on the bench what the
+    /// manual leaves open (what 1C 00 and 1C 01 read while keying and tuning, when
+    /// the OK to 17 arrives).
     fn transact(&mut self, body: &[u8], wanted: impl Fn(&Frame) -> bool) -> Result<Frame> {
         let out = Frame::new(self.addr, CONTROLLER, body).encode();
         self.drain()?;
+        // Once anything may have gone out, a failure can leave a reply on its way.
+        self.resync = true;
         self.port.write_all(&out)?;
         self.port.flush()?;
-        let deadline = Instant::now() + self.timeout;
+        let sent = Instant::now();
+        log::trace!("CI-V > {out:02X?}");
+        let deadline = sent + self.timeout;
         let mut chunk = [0u8; 64];
         loop {
             while let Some(f) = take_frame(&mut self.buf) {
+                log::trace!(
+                    "CI-V < {:02X?} after {} ms",
+                    f.encode(),
+                    sent.elapsed().as_millis()
+                );
                 if f.from == self.addr && f.to == CONTROLLER {
                     if f.is_ng() {
+                        self.resync = false;
                         return Err(RigError::Rejected);
                     }
                     if wanted(&f) {
+                        self.resync = false;
                         return Ok(f);
                     }
                 }
             }
             if Instant::now() > deadline {
-                self.resync = true;
                 return Err(RigError::Timeout);
             }
             match self.port.read(&mut chunk) {
@@ -477,6 +509,27 @@ impl<P: Port> Ic7300<P> {
         self.read_byte(cmd::USB_ECHO_BACK, 0x00..=0x01)
     }
 
+    /// 1C 03: the frequency the radio would transmit on, which differs from the
+    /// operating frequency with split or ∂TX on.
+    pub fn transmit_frequency(&mut self) -> Result<u64> {
+        let data = self.read(cmd::TX_FREQ)?;
+        parse_frequency(&data)
+    }
+
+    /// 1A 05 00 84: whether meter peak hold is on.
+    pub fn meter_peak_hold(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::METER_PEAK_HOLD, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 01 61: the keyer's dash length in dots, 2.8 to 4.5 (BCD "28" to "45").
+    pub fn keyer_ratio(&mut self) -> Result<f32> {
+        let v = self.read_byte(cmd::KEYER_RATIO, 0x28..=0x45)?;
+        match from_bcd_be(&[v]) {
+            Some(n) => Ok(n as f32 / 10.0),
+            None => Err(RigError::Protocol(format!("keyer ratio {v:02X}"))),
+        }
+    }
+
     /// 1A 05 00 71: whether CI-V Transceive is on.
     pub fn civ_transceive(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_TRANSCEIVE, 0x00..=0x01)? == 0x01)
@@ -485,13 +538,8 @@ impl<P: Port> Ic7300<P> {
 
 impl<P: Port> Rig for Ic7300<P> {
     fn frequency(&mut self) -> Result<u64> {
-        // Exactly five BCD bytes, the last holding the 1000 MHz and 100 MHz digits,
-        // "0 (Fixed)" (p. 19-9).
         let data = self.read(cmd::READ_FREQ)?;
-        match from_bcd_le(&data) {
-            Some(hz) if data.len() == 5 && data[4] == 0x00 => Ok(hz),
-            _ => Err(RigError::Protocol(format!("frequency {data:02X?}"))),
-        }
+        parse_frequency(&data)
     }
 
     fn set_frequency(&mut self, hz: u64) -> Result<()> {
