@@ -138,7 +138,7 @@ fn field_message_over_the_air_is_sent() {
     let keyed = station.rig().lock().unwrap().sent.join(" ");
     assert_eq!(
         keyed,
-        "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K SENT 43 DE N0DE K"
+        "DE N0DE R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K SENT 43 DE N0DE K"
     );
     assert_eq!(session.last_seq(), 43);
 }

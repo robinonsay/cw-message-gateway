@@ -29,7 +29,14 @@
 //!   while the Po meter shows output, its status cannot be trusted for the checks
 //!   above, and transmitting is inhibited as above.
 //! - **Reduced power**, set at start-up.
-//! - **Tuning** at start-up and at the top of each listening window.
+//! - **Tuning** at the top of each listening window (`hfnode run` does not tune
+//!   when it starts; `hfnode radio tune` tunes once). In `hfnode run` a tune that
+//!   matched is followed by `DE <call>` ([`Station::open_window`]), so its carrier
+//!   is identified.
+//! - **Identification** (47 CFR 97.119(a)). Every transmission the session builds
+//!   ends with `DE <call> K`; inside a long one this layer keys `DE <call>` on its
+//!   own between chunks, so that no more than [`ID_INTERVAL`] passes from the start
+//!   of a transmission, or from its last ID, to the next ID.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
 
@@ -70,7 +77,18 @@ pub struct StationConfig {
     /// Longest a tuner cycle may take before it is abandoned and receive forced.
     pub tune_timeout: Duration,
     pub poll: Duration,
+    /// `DE <node_call>`, keyed on its own after a window's tune and inside long
+    /// transmissions.
+    pub station_id: String,
+    /// Most time from the start of a transmission, or from its last ID, to the end
+    /// of the next ID: [`ID_INTERVAL`] (divided by the time scale in tests).
+    pub id_interval: Duration,
 }
+
+/// Longest stretch of one transmission without the node's callsign: well inside
+/// the 10 minutes of 47 CFR 97.119(a), so that the previous over's `DE <call> K`
+/// (normally seconds before) still falls within 10 minutes of the next ID.
+pub const ID_INTERVAL: Duration = Duration::from_secs(8 * 60);
 
 impl StationConfig {
     pub fn from_config(c: &crate::config::Station) -> Self {
@@ -94,6 +112,8 @@ impl StationConfig {
             // (maximum)" (p. 16-3, manual text line 8119): leave room above that.
             tune_timeout: Duration::from_secs(20),
             poll: Duration::from_millis(100),
+            station_id: format!("DE {}", c.node_call.to_ascii_uppercase()),
+            id_interval: ID_INTERVAL,
         }
     }
 }
@@ -378,10 +398,11 @@ impl<R: Rig + 'static> Station<R> {
         })
     }
 
-    /// Set the radio up again and run the internal tuner. Call at start-up and at
-    /// the top of each listening window; clears any SWR lockout from the last window,
-    /// and locks out transmitting for this one if the radio could not be set up or
-    /// the tuner could not match.
+    /// Set the radio up again and run the internal tuner. `hfnode run` calls it
+    /// through [`Station::open_window`] at the top of each listening window (not
+    /// when it starts), `hfnode radio tune` alone, once; clears any SWR lockout from
+    /// the last window, and locks out transmitting for this one if the radio could
+    /// not be set up or the tuner could not match.
     pub fn start_window(&mut self) -> civ::Result<()> {
         if self.tx_inhibited() {
             // Tuning transmits.
@@ -452,6 +473,22 @@ impl<R: Rig + 'static> Station<R> {
         Ok(())
     }
 
+    /// Start a listening window as `hfnode run` does: [`Station::start_window`]
+    /// (which also checks the transmit frequency and split), then, only if the tune
+    /// matched (no lockout, no inhibit), `DE <call>` to identify its carrier, keyed
+    /// as a transmission of its own with every check of [`Station::transmit`],
+    /// the SWR check included. The bench's `radio tune` uses `start_window` alone.
+    pub fn open_window(&mut self) -> Result<(), String> {
+        self.start_window()
+            .map_err(|e| format!("tune failed at window start: {e}"))?;
+        let id = Transmission {
+            segments: vec![self.cfg.station_id.clone()],
+            read_ids: Vec::new(),
+        };
+        self.transmit(&id)
+            .map_err(|e| format!("station ID after the tune failed: {e}"))
+    }
+
     /// Key a transmission, enforcing every safety rule above.
     pub fn transmit(&mut self, tx: &Transmission) -> Result<(), TxError> {
         if self.tx_inhibited() {
@@ -482,31 +519,106 @@ impl<R: Rig + 'static> Station<R> {
 
     fn transmit_inner(&mut self, tx: &Transmission) -> Result<(), TxError> {
         self.watchdog_fired.store(false, Ordering::SeqCst);
+        // Keyer-sized like any text: 17 takes "Up to 30 characters" (manual text
+        // line 9711), and node_call is not limited in length.
+        let id = split_for_keyer(&self.cfg.station_id);
+        // The start of the transmission, then the start of each ID keyed in it.
+        let mut since_id = Instant::now();
         for (si, segment) in tx.segments.iter().enumerate() {
             if si > 0 {
                 thread::sleep(self.cfg.segment_pause);
             }
-            for piece in split_for_keyer(segment) {
-                self.wait_for_receive(Instant::now() + Duration::from_secs(2))?;
-                // Timed at the speed the radio's keyer is really using.
-                let dot = self.with_rig(|r| r.dot_duration())?;
-                let keying = dot * cw::units(&piece);
-                let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
-                *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-                self.with_rig(|r| r.send_cw(&piece))?;
-                let sent = Instant::now();
-
-                if !self.swr_checked {
-                    self.check_swr(sent, keying + hang)?;
+            let pieces = split_for_keyer(segment);
+            let ends_with_id = si + 1 == tx.segments.len() && self.ends_with_id(segment);
+            for (pi, piece) in pieces.iter().enumerate() {
+                if si > 0 || pi > 0 {
+                    // At a chunk boundary look ahead over the whole chunk, so the ID
+                    // falls between chunks; inside one too long for that, over the
+                    // next keyer piece.
+                    let (ahead, ends) = if pi == 0 {
+                        (&pieces[..], ends_with_id)
+                    } else {
+                        (&pieces[pi..=pi], ends_with_id && pi + 1 == pieces.len())
+                    };
+                    if self.id_due(since_id, ahead, ends, &id)? {
+                        if pi > 0 {
+                            thread::sleep(self.cfg.segment_pause);
+                        }
+                        log::info!("station ID inside a long transmission");
+                        since_id = Instant::now();
+                        for p in &id {
+                            self.key_piece(p)?;
+                        }
+                        thread::sleep(self.cfg.segment_pause);
+                    }
                 }
-                // The radio's status says nothing about the keyer until the whole
-                // piece has had time to go out (it reads receive before semi
-                // break-in has switched over), so wait that long first.
-                self.sleep_until(sent + keying)?;
-                self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin)?;
-                *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                self.key_piece(piece)?;
             }
         }
+        Ok(())
+    }
+
+    /// Whether `text` ends with the station ID as a whole word, as an over does
+    /// (`DE <call> K`, or KN or SK).
+    fn ends_with_id(&self, text: &str) -> bool {
+        let t = text.trim_end();
+        let t = ["K", "KN", "SK"]
+            .iter()
+            .find_map(|o| t.strip_suffix(o).filter(|r| r.ends_with(' ')))
+            .map_or(t, str::trim_end);
+        let id = self.cfg.station_id.as_str();
+        t == id || t.strip_suffix(id).is_some_and(|r| r.ends_with(' '))
+    }
+
+    /// The longest `pieces` may keep the radio on transmit before this module cuts
+    /// them off: their keying time at the radio's speed, the break-in delay and the
+    /// stuck margin, each.
+    fn keying_bound(&self, pieces: &[String], dot: Duration) -> Duration {
+        let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        pieces
+            .iter()
+            .map(|p| dot * cw::units(p) + hang + self.cfg.stuck_margin)
+            .sum()
+    }
+
+    /// Whether to key the ID (`id`, in keyer pieces) before `ahead`: once `ahead`
+    /// has gone out there must still be time for a pause and an ID within
+    /// `id_interval` of `since`, unless `ahead` ends with the ID itself.
+    fn id_due(
+        &self,
+        since: Instant,
+        ahead: &[String],
+        ends_with_id: bool,
+        id: &[String],
+    ) -> Result<bool, TxError> {
+        let dot = self.with_rig(|r| r.dot_duration())?;
+        let mut need = self.keying_bound(ahead, dot);
+        if !ends_with_id {
+            need += self.cfg.segment_pause + self.keying_bound(id, dot);
+        }
+        Ok(since.elapsed() + need > self.cfg.id_interval)
+    }
+
+    /// Key one keyer piece and wait for the radio to be back on receive.
+    fn key_piece(&mut self, piece: &str) -> Result<(), TxError> {
+        self.wait_for_receive(Instant::now() + Duration::from_secs(2))?;
+        // Timed at the speed the radio's keyer is really using.
+        let dot = self.with_rig(|r| r.dot_duration())?;
+        let keying = dot * cw::units(piece);
+        let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        self.with_rig(|r| r.send_cw(piece))?;
+        let sent = Instant::now();
+
+        if !self.swr_checked {
+            self.check_swr(sent, keying + hang)?;
+        }
+        // The radio's status says nothing about the keyer until the whole
+        // piece has had time to go out (it reads receive before semi
+        // break-in has switched over), so wait that long first.
+        self.sleep_until(sent + keying)?;
+        self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin)?;
+        *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -640,6 +752,8 @@ mod tests {
             stuck_margin: Duration::from_millis(300),
             tune_timeout: Duration::from_secs(15),
             poll: Duration::from_millis(2),
+            station_id: "DE N0DE".into(),
+            id_interval: ID_INTERVAL,
         }
     }
 
@@ -948,6 +1062,10 @@ mod tests {
         tune_reply_lost: bool,
         /// Stop-CW commands received.
         stops: u32,
+        /// The tuner reads "tuning" for ever.
+        tuner_stuck: bool,
+        /// When each keyer piece was accepted.
+        sent_at: Vec<(Instant, String)>,
     }
 
     impl Radio {
@@ -961,6 +1079,8 @@ mod tests {
                 status_blind: false,
                 tune_reply_lost: false,
                 stops: 0,
+                tuner_stuck: false,
+                sent_at: Vec::new(),
             }
         }
 
@@ -1009,10 +1129,16 @@ mod tests {
             Ok(())
         }
         fn tuner_busy(&mut self) -> civ::Result<bool> {
-            self.sim.tuner_busy()
+            Ok(self.tuner_stuck || self.sim.tuner_busy()?)
         }
         fn tuner_matched(&mut self) -> civ::Result<bool> {
             self.sim.tuner_matched()
+        }
+        fn transmit_frequency(&mut self) -> civ::Result<u64> {
+            self.sim.transmit_frequency()
+        }
+        fn split_or_delta_tx(&mut self) -> civ::Result<bool> {
+            self.sim.split_or_delta_tx()
         }
         fn read_swr(&mut self) -> civ::Result<f32> {
             self.sim.read_swr()
@@ -1027,7 +1153,9 @@ mod tests {
         }
         fn send_cw(&mut self, text: &str) -> civ::Result<()> {
             self.hang_until = None;
-            self.sim.send_cw(text)
+            self.sim.send_cw(text)?;
+            self.sent_at.push((Instant::now(), text.to_string()));
+            Ok(())
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
             self.stops += 1;
@@ -1265,6 +1393,209 @@ mod tests {
         }
         drop(st);
         assert!(!rig.lock().unwrap().is_transmitting().unwrap());
+    }
+
+    #[test]
+    fn open_window_identifies_a_matched_tune() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("health.csv");
+        let mut st = Station::new(fast_rig(), cfg(), Some(log.clone()));
+        st.configure().unwrap();
+        st.open_window().unwrap();
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            assert_eq!((r.tunes, r.sent.clone()), (1, vec!["DE N0DE".to_string()]));
+            assert!(!r.keyer_busy() && !r.is_transmitting().unwrap());
+        }
+        // The ID is SWR-checked like any transmission, right after the tune.
+        let text = std::fs::read_to_string(&log).unwrap();
+        let events: Vec<&str> = text.lines().map(|l| l.split(',').nth(1).unwrap()).collect();
+        assert_eq!(events, ["tune", "swr"], "{text}");
+        // The bench's `radio tune` (start_window alone) keys nothing.
+        st.start_window().unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.tunes, r.sent.len()), (2, 1));
+    }
+
+    #[test]
+    fn open_window_keys_nothing_unless_the_tune_matched() {
+        let quick = || {
+            let mut c = cfg();
+            c.tune_timeout = Duration::from_millis(100);
+            c
+        };
+        // Not civ::mock::Fault: what each case does to the test radio.
+        type WindowFault = fn(&mut Radio);
+        let cases: [(&str, WindowFault); 5] = [
+            ("no match", |r: &mut Radio| r.sim.tuner_bypassed = true),
+            ("on transmit", |r: &mut Radio| {
+                r.sim.set_transmit(true).unwrap()
+            }),
+            ("split", |r: &mut Radio| r.sim.split_tx_hz = Some(7_040_000)),
+            ("tune reply lost", |r: &mut Radio| r.tune_reply_lost = true),
+            ("tune never ends", |r: &mut Radio| r.tuner_stuck = true),
+        ];
+        for (name, fault) in cases {
+            let mut st = Station::new(Radio::new(fast_rig()), quick(), None);
+            st.configure().unwrap();
+            fault(&mut st.rig().lock().unwrap());
+            assert!(st.open_window().is_err(), "{name}");
+            let rig = st.rig();
+            let r = rig.lock().unwrap();
+            assert!(r.sim.sent.is_empty(), "{name}: keyed {:?}", r.sim.sent);
+        }
+        // Inhibited: no tune and no ID.
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        st.rig().lock().unwrap().status_blind = false;
+        assert!(st.open_window().is_err());
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.sim.tunes, r.sim.sent.len()), (0, 1));
+    }
+
+    #[test]
+    fn a_high_swr_on_the_window_id_locks_out_the_window() {
+        let mut rig = fast_rig();
+        rig.swr = 3.5;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert!(st.open_window().unwrap_err().contains("SWR 3.5"));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        assert_eq!(st.rig().lock().unwrap().sent, ["DE N0DE"]);
+    }
+
+    /// Checks one keyed transmission: the text without the IDs is `segments`, each ID
+    /// is a piece of its own after a chunk's `= <letter>` (or inside a chunk too long
+    /// for that), and no stretch from the start (or an ID) to the next ID's end is
+    /// longer than `interval`.
+    fn check_ids(
+        keyed: &[(Instant, String)],
+        start: Instant,
+        segments: &[String],
+        interval: Duration,
+        dot: Duration,
+    ) -> usize {
+        let text: Vec<&str> = keyed
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .filter(|p| *p != "DE N0DE")
+            .collect();
+        assert_eq!(text.join(" "), segments.join(" "));
+        let mut since = start;
+        let mut ids = 0;
+        for (i, (at, piece)) in keyed.iter().enumerate() {
+            let end = *at + dot * cw::units(piece);
+            let last = i + 1 == keyed.len();
+            if piece == "DE N0DE" || last {
+                // 50 ms for thread scheduling on a busy machine.
+                assert!(
+                    end <= since + interval + Duration::from_millis(50),
+                    "piece {i} {piece:?} ends {:?} after the last ID",
+                    end - since
+                );
+                since = *at;
+            }
+            if piece == "DE N0DE" {
+                ids += 1;
+                assert!(!last && i > 0, "{keyed:?}");
+            }
+        }
+        assert!(keyed.last().unwrap().1.ends_with("DE N0DE K"));
+        ids
+    }
+
+    #[test]
+    fn long_transmissions_identify_between_chunks() {
+        let mut c = cfg();
+        c.id_interval = Duration::from_secs(2);
+        let mut st = Station::new(Radio::new(fast_rig()), c.clone(), None);
+        st.configure().unwrap();
+        let mut segments: Vec<String> = (0..16)
+            .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
+            .collect();
+        segments.last_mut().unwrap().push_str(" DE N0DE K");
+        let t = Transmission {
+            segments: segments.clone(),
+            read_ids: Vec::new(),
+        };
+        let dot = st.rig().lock().unwrap().dot_duration().unwrap();
+        // The whole transmission, then again as AGN repeats it: the same rule.
+        for _ in 0..2 {
+            st.rig().lock().unwrap().sent_at.clear();
+            let start = Instant::now();
+            st.transmit(&t).unwrap();
+            let keyed = st.rig().lock().unwrap().sent_at.clone();
+            let ids = check_ids(&keyed, start, &segments, c.id_interval, dot);
+            assert!(ids >= 1, "{keyed:?}");
+            // Between chunks: after a chunk's letter.
+            for (i, _) in keyed.iter().enumerate().filter(|(_, k)| k.1 == "DE N0DE") {
+                let prev = &keyed[i - 1].1;
+                assert!(
+                    prev.chars().nth_back(1) == Some(' ') && prev.contains(" = "),
+                    "{prev:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_chunk_too_long_for_the_interval_is_split_by_an_id() {
+        let mut c = cfg();
+        c.id_interval = Duration::from_millis(1500);
+        let mut st = Station::new(Radio::new(fast_rig()), c.clone(), None);
+        st.configure().unwrap();
+        let segment = format!("{} DE N0DE K", vec!["TEST"; 40].join(" "));
+        let t = Transmission {
+            segments: vec![segment.clone()],
+            read_ids: Vec::new(),
+        };
+        let dot = st.rig().lock().unwrap().dot_duration().unwrap();
+        let start = Instant::now();
+        st.transmit(&t).unwrap();
+        let keyed = st.rig().lock().unwrap().sent_at.clone();
+        assert!(
+            check_ids(&keyed, start, &[segment], c.id_interval, dot) >= 1,
+            "{keyed:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_too_long_for_one_keyer_command_is_split() {
+        let mut c = cfg();
+        c.id_interval = Duration::from_millis(1500);
+        // 31 characters: the keyer (and the sim) take at most 30.
+        c.station_id = format!("DE {}", "N0DE".repeat(7));
+        let mut st = Station::new(Radio::new(fast_rig()), c.clone(), None);
+        st.configure().unwrap();
+        let segments: Vec<String> = (0..12)
+            .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
+            .collect();
+        st.transmit(&Transmission {
+            segments: segments.clone(),
+            read_ids: Vec::new(),
+        })
+        .unwrap();
+        let text = st.rig().lock().unwrap().sim.sent.join(" ");
+        assert!(text.contains(&c.station_id), "{text}");
+        let id = format!(" {}", c.station_id);
+        assert_eq!(text.replace(&id, ""), segments.join(" "));
+    }
+
+    #[test]
+    fn ends_with_id_needs_the_whole_call() {
+        let st = Station::new(fast_rig(), cfg(), None);
+        for t in ["DE N0DE", "X DE N0DE K", "X DE N0DE KN", "X DE N0DE SK "] {
+            assert!(st.ends_with_id(t), "{t}");
+        }
+        for t in ["CODE N0DE K", "DE N0DE K X", "DE N0DEK", "X DE N0DE K K"] {
+            assert!(!st.ends_with_id(t), "{t}");
+        }
     }
 
     #[test]

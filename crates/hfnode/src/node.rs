@@ -331,8 +331,9 @@ pub fn run_with_clock<R: Rig + 'static>(
         );
         if open && !was_open {
             log::info!("listening window open");
-            if let Err(e) = station.start_window() {
-                log::error!("tune failed at window start: {e}");
+            // Tune, and identify the tune's carrier if it matched.
+            if let Err(e) = station.open_window() {
+                log::error!("{e}");
             }
             guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
@@ -608,9 +609,10 @@ mod tests {
             "{}",
             h.rx_log
         );
+        // After the window's ID.
         assert_eq!(
             h.keyed,
-            "R 42 TX MOM BRING VITAMIN K ? DE N0DE K SENT 43 DE N0DE K"
+            "DE N0DE R 42 TX MOM BRING VITAMIN K ? DE N0DE K SENT 43 DE N0DE K"
         );
     }
 
@@ -640,7 +642,11 @@ mod tests {
                 "{text}: {}",
                 h.rx_log
             );
-            assert!(h.keyed.starts_with(&read_back), "{}", h.keyed);
+            assert!(
+                h.keyed.starts_with(&format!("DE N0DE {read_back}")),
+                "{}",
+                h.keyed
+            );
         }
     }
 
@@ -653,7 +659,11 @@ mod tests {
         audio.extend(ms(8000));
         let h = run_node(noisy(audio, &k, 15.0));
         assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
-        assert_eq!(h.keyed, "R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K");
+        // The window's tune is identified, then the read-back and the result.
+        assert_eq!(
+            h.keyed,
+            "DE N0DE R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K"
+        );
     }
 
     #[test]

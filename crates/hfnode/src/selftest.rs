@@ -176,6 +176,8 @@ pub struct RadioSetup {
     pub echo: bool,
     pub swr: f32,
     pub foldback: Option<Foldback>,
+    /// Faults armed before the node starts, so the window's tune and `DE <call>`
+    /// meet them first; to hit an answer, inject them with [`Step::Inject`].
     pub faults: Vec<Fault>,
     /// Mix the radio's own keying into the receive audio, as sidetone.
     pub sidetone: bool,
@@ -223,7 +225,8 @@ pub enum Step {
     },
     /// The node's next over is lost in QRM: the operator does not copy it.
     MissNext,
-    /// Radio-side changes.
+    /// Radio-side changes, from here on: after the window's tune and ID when it
+    /// comes first in the script.
     Inject(Fault),
     SetSwr(f32),
     /// A hardware PTT timer (or a power cycle) ends a stuck transmit.
@@ -284,6 +287,10 @@ pub struct Expect {
     pub forced_receive: bool,
     /// The node inhibited transmitting until restart.
     pub inhibited: bool,
+    /// `DE <call>` keyed after a window's tune: one per tune that matched.
+    pub ids: u32,
+    /// `DE <call>` keyed on its own inside overs, between chunks.
+    pub mid_ids: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -787,6 +794,38 @@ impl Air {
         Ok(())
     }
 
+    /// Wait for the node to start its next window (after `tunes` tuner cycles):
+    /// its tune and, after a tune that matched, its `DE <call>`. The node takes no
+    /// audio until both are over, so once it has taken a block sent after the tune
+    /// started, it is listening again. Whatever it keyed meanwhile is the window's
+    /// ID, not an answer.
+    fn window_start(&mut self, tunes: u32) -> Result<(), String> {
+        while self.radio.tunes() == tunes {
+            self.tick()?;
+        }
+        self.tick()?;
+        while self.tx.as_ref().is_some_and(|tx| tx.queued() > 0) {
+            if Instant::now() > self.deadline {
+                return Err("scenario took too long".into());
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+        self.wait_quiet()?;
+        let keyed: Vec<String> = self
+            .radio
+            .keyed_from(self.heard)
+            .into_iter()
+            .filter(|k| k.on_air)
+            .map(|k| k.text)
+            .collect();
+        self.heard = self.radio.keyed_from(0).len();
+        match keyed.is_empty() {
+            true => self.note("NODE  (tuning: no ID)"),
+            false => self.note(format!("NODE  (tuning) {}", keyed.join(" "))),
+        }
+        Ok(())
+    }
+
     /// Wait for the node's next over: until it ends with `DE <call> K` and the
     /// frequency is quiet, or stops short, or none starts in time.
     fn listen(&mut self) -> Result<Heard, String> {
@@ -805,9 +844,14 @@ impl Air {
                 .into_iter()
                 .filter(|k| k.on_air)
                 .collect();
+            // A station ID between chunks is not part of the over: the operator
+            // copies around it.
+            let id = format!("DE {NODE_CALL}");
             let text = pieces
                 .iter()
-                .map(|k| if k.complete { &k.text } else { &k.sent })
+                .enumerate()
+                .filter(|(i, k)| k.text != id || i + 1 == pieces.len())
+                .map(|(_, k)| if k.complete { &k.text } else { &k.sent })
                 .filter(|t| !t.is_empty())
                 .cloned()
                 .collect::<Vec<_>>()
@@ -933,11 +977,7 @@ impl Air {
             }
             Step::NextWindow => {
                 let tunes = self.radio.tunes();
-                while self.radio.tunes() == tunes {
-                    self.tick()?;
-                }
-                self.note("NODE  (tuning: the next window)");
-                self.wait_quiet()
+                self.window_start(tunes)
             }
             Step::Exchange(x) => self.exchange(x),
         }
@@ -1006,15 +1046,9 @@ impl Air {
     /// Run the script. The first failed step ends it, as an operator would give up.
     fn operate(&mut self, script: &[Step]) -> Vec<String> {
         let mut failures = Vec::new();
-        // The node tunes at the start of its window; wait it out, as the operating
-        // guide says.
-        let start = (|| {
-            while self.radio.tunes() == 0 {
-                self.tick()?;
-            }
-            self.wait_quiet()
-        })();
-        if let Err(e) = start {
+        // The node tunes at the start of its window and identifies; wait it out,
+        // as the operating guide says.
+        if let Err(e) = self.window_start(0) {
             return vec![e];
         }
         for (i, step) in script.iter().enumerate() {
@@ -1096,6 +1130,7 @@ fn station_config(cfg: &Config, scale: f32) -> StationConfig {
         &mut sc.stuck_margin,
         &mut sc.tune_timeout,
         &mut sc.poll,
+        &mut sc.id_interval,
     ] {
         *d = d.div_f32(scale);
     }
@@ -1362,7 +1397,9 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     out.radio_time = r.now;
 
     let e = &s.expect;
-    let keyed = match_overs(&r.keyed, &e.keyed);
+    let id = format!("DE {NODE_CALL}");
+    let overs: Vec<civ::mock::Keyed> = r.keyed.iter().filter(|k| k.text != id).cloned().collect();
+    let keyed = match_overs(&overs, &e.keyed);
     out.checks.push(check(
         "keyed",
         keyed.is_ok(),
@@ -1371,6 +1408,15 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
             Err(why) => format!("{why}; radio keyed: {}", describe(&r)),
         },
     ));
+
+    let tunes_at: Vec<Duration> = radio
+        .commands()
+        .iter()
+        .filter(|(_, b)| b[..] == [0x1C, 0x01, 0x02])
+        .map(|(t, _)| *t)
+        .collect();
+    out.checks
+        .push(station_id_check(&r.keyed, &tunes_at, e, scale));
 
     out.facts.sent = svc.sent.clone();
     out.facts.read = svc.read.clone();
@@ -1451,6 +1497,67 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
     Ok(())
+}
+
+/// Whether a keyer piece ends with the node's callsign: an ID, or the end of an over.
+fn ends_with_call(text: &str) -> bool {
+    let w: Vec<&str> = text.split_whitespace().collect();
+    match w[..] {
+        [.., c] if c == NODE_CALL => true,
+        [.., c, o] => c == NODE_CALL && ["K", "KN"].contains(&o),
+        _ => false,
+    }
+}
+
+/// The node's station IDs: `DE <call>` as the first piece after each tune that
+/// matched (`tunes_at`, radio time), the expected number inside overs, and never
+/// longer than the station's ID interval from the start of a transmission (or an
+/// ID) to the end of the next ID. A piece cut short by a fault ends the stretch.
+fn station_id_check(
+    keyed: &[civ::mock::Keyed],
+    tunes_at: &[Duration],
+    e: &Expect,
+    scale: f32,
+) -> Check {
+    let id = format!("DE {NODE_CALL}");
+    let on_air: Vec<&civ::mock::Keyed> = keyed.iter().filter(|k| k.on_air).collect();
+    let after_tune = |i: usize| {
+        let next = tunes_at.get(i + 1).copied().unwrap_or(Duration::MAX);
+        on_air
+            .iter()
+            .find(|k| k.accepted >= tunes_at[i] && k.accepted < next)
+            .is_some_and(|k| k.text == id && k.complete)
+    };
+    let ids = (0..tunes_at.len()).filter(|&i| after_tune(i)).count() as u32;
+    let mid_ids = on_air.iter().filter(|k| k.text == id).count() as u32 - ids;
+    let (mut longest, mut from) = (Duration::ZERO, None);
+    for k in &on_air {
+        if !k.complete {
+            from = None;
+            continue;
+        }
+        let start = *from.get_or_insert(k.start);
+        if ends_with_call(&k.text) {
+            longest = longest.max(k.end.saturating_sub(start));
+            from = None;
+        }
+    }
+    let limit = (crate::station::ID_INTERVAL + Duration::from_secs_f32(1.0 + 0.02 * scale))
+        .min(Duration::from_secs(600));
+    let pass = ids == e.ids && mid_ids == e.mid_ids && longest <= limit;
+    check(
+        "station ID",
+        pass,
+        format!(
+            "{ids} after {} tunes (expected {}), {mid_ids} inside overs (expected {}), \
+             at most {:.0} s without one (limit {:.0} s)",
+            tunes_at.len(),
+            e.ids,
+            e.mid_ids,
+            longest.as_secs_f32(),
+            limit.as_secs_f32()
+        ),
+    )
 }
 
 /// The radio as the node left it: on the configured frequency, in CW with FIL1, semi
@@ -1624,6 +1731,8 @@ fn base(name: &str, about: &str) -> Scenario {
             tunes: 1,
             forced_receive: false,
             inhibited: false,
+            ids: 1,
+            mid_ids: 0,
         },
     }
 }
@@ -1821,6 +1930,41 @@ pub fn scenarios() -> Vec<Scenario> {
         s
     });
     v.push({
+        // About 11 minutes of readout at the node's 18 wpm, longer than its 8-minute
+        // ID interval: it identifies once between two chunks.
+        let words = 260;
+        let long = vec!["TEST"; words].join(" ");
+        let mut s = rx(
+            "rx-station-id",
+            "RX readout longer than 8 minutes: DE N0DE on its own between two chunks, \
+             which the operator copies around",
+            &[("MOM", long.as_str())],
+            "1 MSG",
+            "",
+        );
+        let mut chunks = vec![format!("NR 1 FM MOM {}", ["TEST"; 9].join(" "))];
+        let mut left = words - 9;
+        while left > 0 {
+            let n = left.min(12);
+            chunks.push(vec!["TEST"; n].join(" "));
+            left -= n;
+        }
+        let text: Vec<String> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = {}", (b'A' + i as u8) as char))
+            .collect();
+        let result = de(&text.join(" "));
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: Some(result.clone()),
+        };
+        s.expect.keyed[1] = Over::Full(result);
+        s.expect.read = vec![1];
+        s.expect.mid_ids = 1;
+        s
+    });
+    v.push({
         let inbox: Vec<(&str, &str)> = (0..6)
             .map(|i| (if i % 2 == 0 { "MOM" } else { "BOB" }, "HI"))
             .collect();
@@ -1844,16 +1988,20 @@ pub fn scenarios() -> Vec<Scenario> {
             "1 MSG",
             "",
         );
-        s.radio.faults.push(Fault::Reply {
-            cmd: vec![0x17],
-            skip: 1,
-            times: 100,
-            kind: ReplyFault::Ng,
-        });
         s.script[1] = Step::Unanswered {
             text: "OK 43 {43} K".into(),
             tries: 2,
         };
+        // After the window's tune and ID: the read-back gets through.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::Reply {
+                cmd: vec![0x17],
+                skip: 1,
+                times: 100,
+                kind: ReplyFault::Ng,
+            }),
+        );
         s.expect.keyed.truncate(1);
         s.expect.forced_receive = true;
         s
@@ -2447,6 +2595,7 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.sent = sent("MOM", "HOME SUN");
         s.expect.last_seq = 45;
         s.expect.tunes = 2;
+        s.expect.ids = 2;
         s.expect.forced_receive = true;
         s
     });
@@ -2472,15 +2621,20 @@ pub fn scenarios() -> Vec<Scenario> {
             tries: 2,
         }];
         s.expect.last_seq = 42;
+        s.expect.ids = 0;
         s
     });
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
-        s.radio.faults.push(Fault::StickInTx {
-            skip: 0,
-            carrier,
-            recoverable: true,
-        });
+        // After the window's tune and ID: the read-back sticks.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::StickInTx {
+                skip: 0,
+                carrier,
+                recoverable: true,
+            }),
+        );
         s.expect.forced_receive = true;
         s
     };
@@ -2520,16 +2674,19 @@ pub fn scenarios() -> Vec<Scenario> {
             "MOM",
             "HI",
         );
-        s.radio.faults.push(Fault::StickInTx {
-            skip: 0,
-            carrier: false,
-            recoverable: false,
-        });
         s.script[1] = Step::Unanswered {
             text: "OK 43 {43} K".into(),
             tries: 2,
         };
         s.script.push(Step::ClearStuck);
+        s.script.insert(
+            0,
+            Step::Inject(Fault::StickInTx {
+                skip: 0,
+                carrier: false,
+                recoverable: false,
+            }),
+        );
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.sent = Vec::new();
         s.expect.last_seq = 42;
@@ -2589,27 +2746,28 @@ pub fn scenarios() -> Vec<Scenario> {
             "MOM",
             "HI",
         );
-        s.radio.faults.extend([
-            Fault::StickInTx {
+        // After the window's tune and ID, so the node's set-up 1C 00 00 is past.
+        s.script = vec![
+            Step::Inject(Fault::StickInTx {
                 skip: 0,
                 carrier: false,
                 recoverable: true,
-            },
-            Fault::Reply {
+            }),
+            Step::Inject(Fault::Reply {
                 cmd: vec![0x17, 0xFF],
                 skip: 0,
                 times: refused,
                 kind: ReplyFault::Ng,
-            },
-            // The first 1C 00 00 is the node's set-up.
-            Fault::Reply {
+            }),
+            Step::Inject(Fault::Reply {
                 cmd: vec![0x1C, 0x00, 0x00],
-                skip: 1,
+                skip: 0,
                 times: refused,
                 kind: ReplyFault::Ng,
-            },
-        ]);
-        s.script = vec![s.script[0].clone(), Step::WaitReceive];
+            }),
+            s.script[0].clone(),
+            Step::WaitReceive,
+        ];
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.sent = Vec::new();
         s.expect.last_seq = 42;
@@ -2619,12 +2777,16 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
         let mut s = tx(name, about, "MOM", LONG_TEXT);
-        s.radio.faults.push(Fault::Reply {
-            cmd: cmd.to_vec(),
-            skip: 0,
-            times: 1,
-            kind,
-        });
+        // After the window's tune and ID, which read the meters too.
+        s.script.insert(
+            0,
+            Step::Inject(Fault::Reply {
+                cmd: cmd.to_vec(),
+                skip: 0,
+                times: 1,
+                kind,
+            }),
+        );
         if cut {
             s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
         }
@@ -2674,6 +2836,7 @@ pub fn scenarios() -> Vec<Scenario> {
             ),
             |r| r.faults.push(Fault::TuneNeverFinishes),
         );
+        s.expect.ids = 0;
         s.expect.forced_receive = true;
         s
     });
@@ -2713,8 +2876,9 @@ const SWEEP_INBOX: (&str, &str) = ("BOB", "DRIVE SAFE CALL WHEN YOU CAN");
 const SWEEP_RESTARTS: u32 = 1;
 /// The checks whose failure is a hard failure whatever the conditions: the node
 /// broke a safety bound, sent the radio something the manual does not allow, left
-/// it misconfigured, forced receive with no fault, decoded itself or stopped.
-const HARD_CHECKS: [&str; 7] = [
+/// it misconfigured, forced receive with no fault, decoded itself, stopped, or left
+/// a transmission or a tune unidentified.
+const HARD_CHECKS: [&str; 8] = [
     "setup",
     "ended",
     "ci-v",
@@ -2722,6 +2886,7 @@ const HARD_CHECKS: [&str; 7] = [
     "forced receive",
     "safety",
     "self-decode",
+    "station ID",
 ];
 
 /// How the field operator keys.
@@ -3753,6 +3918,43 @@ mod tests {
         assert!(match_overs(&[cut, b, s], &full).is_err());
     }
 
+    #[test]
+    fn station_ids_are_counted_and_bounded() {
+        let s = |secs: u64| Duration::from_secs(secs);
+        let at = |text: &str, from: u64, to: u64| Keyed {
+            accepted: s(from),
+            start: s(from),
+            end: s(to),
+            ..piece(text, text, true)
+        };
+        let mut e = base("ids", "").expect;
+        // A window ID after the tune at 0 s, an over, and a long over with an ID.
+        let mut keyed = vec![
+            at("DE N0DE", 3, 7),
+            at("R 42 1 MSG ? DE N0DE K", 40, 50),
+            at("NR 1 FM MOM TEST = A", 70, 300),
+            at("DE N0DE", 302, 306),
+            at("TEST = B DE N0DE K", 308, 700),
+        ];
+        let tunes = [s(0)];
+        assert!(
+            !station_id_check(&keyed, &tunes, &e, 100.0).pass,
+            "mid ID not expected"
+        );
+        e.mid_ids = 1;
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // No window ID after a tune that matched.
+        assert!(!station_id_check(&keyed[1..], &tunes, &e, 100.0).pass);
+        // Too long without one: 70 s to 700 s.
+        keyed.remove(3);
+        e.mid_ids = 0;
+        let c = station_id_check(&keyed, &tunes, &e, 100.0);
+        assert!(!c.pass && c.detail.contains("630 s"), "{}", c.detail);
+        // An over cut short by a fault ends the stretch.
+        keyed[2].complete = false;
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+    }
+
     /// An outcome whose checks all pass, as a clean sweep run's would.
     fn sweep_outcome(sent: &[(&str, &str)]) -> Outcome {
         let rb = "W5XXX 42 ZWEXVXGQ TX MOM RUNNING LATE HOME SUN K".to_string();
@@ -3848,6 +4050,21 @@ mod tests {
         let r = classify(&cell, 0, 1, false, &out);
         assert!(!r.success && !r.hard_failure() && !r.delivered);
         assert!(verdict(&[r]).ok());
+    }
+
+    #[test]
+    fn a_missing_station_id_is_a_hard_failure() {
+        // Identifying does not depend on decoding: no noise excuses a missing ID.
+        let mut out = sweep_outcome(&[("MOM", SWEEP_TEXT)]);
+        out.checks
+            .push(check("station ID", false, "0 after 1 tunes (expected 1)"));
+        let cell = Cell {
+            snr_db: Some(-6.0),
+            ..CELL
+        };
+        let r = classify(&cell, 0, 1, false, &out);
+        assert!(!r.success && r.hard_failure());
+        assert!(!verdict(&[r]).ok());
     }
 
     #[test]
