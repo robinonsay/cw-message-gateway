@@ -104,6 +104,46 @@ enum Cmd {
         /// Print every check and the transcript of each scenario.
         #[arg(short, long)]
         verbose: bool,
+        /// Sweep complete exchanges over speed x SNR x keying instead, several
+        /// trials per cell, and print success matrices and where things break.
+        /// Exits non-zero on a safety violation, a wrong message delivered, or a
+        /// failure in the should-pass region.
+        #[arg(long, conflicts_with_all = ["scenario", "list"])]
+        sweep: bool,
+        /// Sweep: field operator speeds, comma-separated.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "5,8,10,13,15,18,20,25,30,35",
+            requires = "sweep"
+        )]
+        wpm: Vec<f32>,
+        /// Sweep: SNRs in 2500 Hz, comma-separated; `clean` for no noise.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            allow_hyphen_values = true,
+            default_value = "clean,20,10,6,3,0,-3,-6",
+            requires = "sweep"
+        )]
+        snr: Vec<String>,
+        /// Sweep: keying styles, comma-separated: `machine`, `hand`.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "machine,hand",
+            requires = "sweep"
+        )]
+        keying: Vec<String>,
+        /// Sweep: trials per cell, each with its own noise and keying jitter.
+        #[arg(long, default_value_t = selftest::SWEEP_TRIALS, requires = "sweep")]
+        trials: u32,
+        /// Sweep: follow each TX exchange with an RX exchange reading out a message.
+        #[arg(long, requires = "sweep")]
+        rx: bool,
+        /// Sweep: write one row per run to this CSV file.
+        #[arg(long, requires = "sweep")]
+        csv: Option<PathBuf>,
     },
     /// Write the field side of a test session as WAV files, with a manifest of the
     /// expected decodes and replies. Codes come from a fixed test-only key.
@@ -171,11 +211,40 @@ fn main() -> Result<()> {
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&Config::load(&config)?),
         Cmd::Selftest {
+            sweep: true,
+            scale,
+            jobs,
+            verbose,
+            wpm,
+            snr,
+            keying,
+            trials,
+            rx,
+            csv,
+            ..
+        } => {
+            let spec = selftest::SweepSpec {
+                wpms: wpm,
+                snrs: parse_snrs(&snr)?,
+                keyings: keying
+                    .iter()
+                    .map(|k| {
+                        selftest::Keying::parse(k)
+                            .with_context(|| format!("--keying {k:?}: `machine` or `hand`"))
+                    })
+                    .collect::<Result<_>>()?,
+                trials,
+                rx,
+            };
+            run_sweep(spec, scale, jobs, verbose, csv.as_deref())
+        }
+        Cmd::Selftest {
             scenario,
             scale,
             jobs,
             list,
             verbose,
+            ..
         } => run_selftest(&scenario, scale, jobs, list, verbose),
         Cmd::Testvectors {
             out,
@@ -616,9 +685,9 @@ fn run_selftest(
     Ok(())
 }
 
-fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f32) -> Result<()> {
-    let snrs = snrs
-        .iter()
+/// SNRs as given to `--snr`: numbers, or `clean` for no noise.
+fn parse_snrs(snrs: &[String]) -> Result<Vec<Option<f32>>> {
+    snrs.iter()
         .map(|s| match s.trim() {
             "clean" | "none" => Ok(None),
             v => v
@@ -626,7 +695,116 @@ fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f3
                 .map(Some)
                 .with_context(|| format!("--snr {v:?}: a number or `clean`")),
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+fn run_sweep(
+    spec: selftest::SweepSpec,
+    scale: f32,
+    jobs: Option<usize>,
+    verbose: bool,
+    csv: Option<&Path>,
+) -> Result<()> {
+    if !(1.0..=selftest::MAX_SCALE).contains(&scale) {
+        bail!("--scale must be from 1 to {}", selftest::MAX_SCALE);
+    }
+    if spec.wpms.iter().any(|w| !(5.0..=40.0).contains(w)) {
+        bail!("--wpm must be from 5 to 40");
+    }
+    if spec.trials == 0 || spec.keyings.is_empty() || spec.snrs.is_empty() || spec.wpms.is_empty() {
+        bail!("nothing to sweep");
+    }
+    let spec = spec.normalized();
+    let runs = spec.runs().len();
+    let jobs = jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .clamp(1, runs);
+    println!(
+        "Sweep: {} per run, {} trials per cell, {runs} runs against the mock IC-7300 at \
+         {scale}x real time, {jobs} at once",
+        if spec.rx {
+            "a TX exchange (open, read-back, OK, SENT) and an RX exchange"
+        } else {
+            "a TX exchange (open, read-back, OK, SENT)"
+        },
+        spec.trials
+    );
+    println!(
+        "Message: TX {} {}{}. The operator repeats a transmission that gets no answer up \
+         to 3 times, answers a wrong read-back NO and starts over once on fresh lines.",
+        selftest::SWEEP_DEST,
+        selftest::SWEEP_TEXT,
+        if spec.rx {
+            "; then RX of one waiting message"
+        } else {
+            ""
+        }
+    );
+    println!();
+    let t0 = Instant::now();
+    let step = (runs / 10).max(1);
+    let each = |done: usize, r: &selftest::TrialResult, out: &selftest::Outcome| {
+        if r.hard_failure() {
+            println!(
+                "!!! HARD FAILURE: {} trial {}: {}\n{}",
+                r.cell,
+                r.trial + 1,
+                r.why,
+                out.render()
+            );
+        } else if verbose {
+            println!(
+                "{:<28} trial {} {:<4} {:>2} tx {:>5.1} s  {}",
+                r.cell.to_string(),
+                r.trial + 1,
+                if r.success { "ok" } else { "FAIL" },
+                r.transmissions,
+                r.wall.as_secs_f32(),
+                if r.success { "" } else { r.why.as_str() }
+            );
+            if !r.success {
+                print!("{}", out.render());
+            }
+        }
+        if done.is_multiple_of(step) || done == runs {
+            eprintln!(
+                "sweep: {done}/{runs} runs done, {:.0} s",
+                t0.elapsed().as_secs_f32()
+            );
+        }
+    };
+    let results = selftest::sweep(&spec, scale, jobs, &each);
+    let wall = t0.elapsed();
+    if verbose {
+        println!();
+    }
+    print!("{}", selftest::render_sweep(&spec, &results));
+    let radio: f32 = results.iter().map(|r| r.radio_time.as_secs_f32()).sum();
+    println!(
+        "\n{runs} runs in {:.0} s ({:.0} s of radio time in all, {:.1} s per run on \
+         average, {jobs} at once)",
+        wall.as_secs_f32(),
+        radio,
+        results.iter().map(|r| r.wall.as_secs_f32()).sum::<f32>() / runs as f32
+    );
+    if let Some(path) = csv {
+        std::fs::write(path, selftest::sweep_csv(&results))
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("raw results: {}", path.display());
+    }
+    let v = selftest::verdict(&results);
+    if !v.ok() {
+        bail!(
+            "{} hard failure(s), {} should-pass trial(s) failed",
+            v.hard.len(),
+            v.region_failures.len()
+        );
+    }
+    Ok(())
+}
+
+fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f32) -> Result<()> {
+    let snrs = parse_snrs(snrs)?;
     if wpms.iter().any(|w| !(5.0..=40.0).contains(w)) {
         bail!("--wpm must be from 5 to 40");
     }

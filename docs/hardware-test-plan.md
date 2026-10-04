@@ -180,6 +180,7 @@ the node's logic end to end before any step below can transmit.
 hfnode selftest              # every scenario; prints a PASS/FAIL table
 hfnode selftest --list       # what each scenario covers
 hfnode selftest --scenario fault- -v   # one group (or one name), with transcripts
+hfnode selftest --sweep --csv ~/sweep.csv   # where decoding breaks: speed x SNR x keying
 ```
 
 Each scenario runs the whole node (`node::run`: decoder, parser, session, station
@@ -216,6 +217,47 @@ laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must
 depend on it (any scale from 1 to 200). `--scale 1` runs everything at real speed, including the CI-V reply
 timeout, the watchdog and the forced-receive retries, which stay in real time in a
 time-scaled run (about 17 minutes with `--jobs 64`).
+
+**Sweep: where it breaks.** `hfnode selftest --sweep` runs a complete TX exchange
+(open, read-back, `OK`, `SENT`; `--rx` adds an RX readout) for every combination of
+field operator speed (5, 8, 10, 13, 15, 18, 20, 25, 30, 35 wpm), SNR in 2500 Hz
+(clean, 20, 10, 6, 3, 0, -3, -6 dB) and keying (machine-keyed, and hand-keyed with
+12% jitter, stretched gaps and 25 Hz off pitch), 3 trials each (`--trials`; the
+grid with `--wpm`, `--snr`, `--keying`). The operator repeats unanswered
+transmissions up to 3 times and answers a wrong read-back `NO`, then starts over
+once on fresh lines. A run succeeds only if exactly the intended message reached
+the gateway, once, and `SENT` was keyed; a wrong message delivered is counted
+separately (`W!`) and, like any safety violation (`S!`), is a hard failure at any
+SNR. It prints a successes/trials matrix per keying, the share of transmissions the
+node decoded exactly, and the edges, and `--csv` writes every run. It exits
+non-zero on a hard failure or a failed trial in the should-pass region
+(machine-keyed 10-30 wpm at 6 dB and above, hand-keyed 10-25 wpm at 10 dB and
+above). About 3.5 minutes on a 4-core laptop; on a Pi 4 estimate 4 to 6 minutes at
+the default scale, about 17 minutes at `--scale 20`.
+
+Edges measured on 2026-10-04 (default grid, 3 trials per cell, 4 at once; the
+same success counts in five sweeps but for one trial, machine-keyed 5 wpm at 10 dB):
+
+| | Every trial passes down to | Fails | At 10 dB |
+|---|---|---|---|
+| Machine-keyed | -3 dB at 8-35 wpm; 5 wpm: clean, 6 to -3 dB (1 of 3 failed at 20 and 10 dB) | -6 dB at every speed (1 of 30 got through) | 8-35 wpm |
+| Hand-keyed | -3 dB at 8-30 wpm (20 wpm: 0 dB); 35 wpm: 0 dB; 5 wpm: 3 dB | -6 dB at every speed | 5-35 wpm |
+
+Repeats start at 20 dB at most speeds (0.3 to 0.7 extra transmissions per
+exchange); hand-keyed, some exchanges need one even on a clean signal. 15 of 480
+read-backs were garbled text that still parsed (hand-keyed even when clean): the
+operator's read-back check caught them all, and no wrong message was delivered.
+No run broke a safety bound. These are synthetic signals in white noise: they say
+where the node's own decoding and protocol give out, not how a real band behaves.
+A trial's seed (`audio_seed` in the CSV) fixes its audio, not its outcome: the node
+and the mock radio run on the wall clock, so a re-run, especially under a different
+load or `--jobs`, can turn a trial at an edge either way and changes the extra
+transmissions a little. Compare a Pi's matrices with these give or take one trial
+per cell at the edges.
+
+**Pass (sweep):** `verdict: PASS`, with no `W!` or `S!` anywhere in the matrices.
+Compare the edges with the table above after a software update; an edge that moves
+by more than a step is worth a look even when the verdict passes.
 
 **Test vectors for later steps.** Write the field operator's side of a session as
 WAV files, with a manifest of what each should decode to and what the node should
