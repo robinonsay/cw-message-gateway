@@ -243,13 +243,15 @@ sudo nano /etc/hfnode/hfnode.toml
 
 At minimum set `station.node_call`, `station.field_calls`, `station.frequency_hz`,
 `station.serial_port`, `audio.device`, the `[[contacts]]`, `[email]` and
-`[weather]`. The file is checked on load; unknown keys are errors, and
+`[weather]`, with a `[[weather.presets]]` entry for each place you often key from
+(`WX 1`, `WX 2`, ...). The file is checked on load; unknown keys are errors, and
 `power_watts` (1-100), `max_key_seconds` (1-120) and `swr_limit` (1.1-3.0) are range
 checked.
 
 Keep `state_dir = "/var/lib/hfnode"` and `key_file = "/etc/hfnode/node.key"` to match
-the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log` and
-`health.csv` in `state_dir`.
+the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log`,
+`health.csv` and `wx_last.json` (the last weather place each field callsign
+confirmed, used for `WX` alone) in `state_dir`.
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
 

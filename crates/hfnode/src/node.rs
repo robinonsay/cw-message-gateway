@@ -4,6 +4,7 @@ use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
 use crate::gateway::{self, filter, LiveServices};
 use crate::inbox::Inbox;
+use crate::places::LastPlaces;
 use crate::session::{Outcome, Services, Session, SessionConfig};
 use crate::station::Station;
 use anyhow::{Context, Result};
@@ -38,6 +39,11 @@ pub fn session_config(cfg: &Config) -> SessionConfig {
         chunk_chars: cfg.station.chunk_chars,
         max_rx_messages: 5,
         again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
+        wx_default_grid: cfg
+            .weather
+            .as_ref()
+            .map(|w| w.default_grid.to_ascii_uppercase()),
+        wx_presets: cfg.weather_presets(),
     }
 }
 
@@ -61,9 +67,11 @@ pub fn build_session_with(cfg: &Config, sc: SessionConfig) -> Result<Session> {
                 .map(|c| c.to_ascii_uppercase())
                 .collect(),
             contacts: cfg.contact_names(),
+            presets: cfg.weather_presets().into_iter().map(|(n, _)| n).collect(),
         },
         Verifier::new(book, last),
         store,
+        LastPlaces::open(cfg.state_dir.join("wx_last.json")),
     ))
 }
 
@@ -424,6 +432,7 @@ mod tests {
     use super::*;
     use crate::audio;
     use crate::inbox::Message;
+    use crate::session::WxError;
     use crate::station::StationConfig;
     use civ::sim::SimRig;
     use cw::{Keyer, Noise};
@@ -442,7 +451,7 @@ mod tests {
             Vec::new()
         }
         fn mark_read(&mut self, _: &[u64]) {}
-        fn weather(&mut self, _: Option<&str>) -> Result<String, String> {
+        fn weather(&mut self, _: &str) -> Result<String, WxError> {
             Ok("SUNNY".into())
         }
     }
