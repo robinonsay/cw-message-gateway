@@ -1,14 +1,23 @@
-# Example configuration for hfnode. Copy to /etc/hfnode/hfnode.toml and edit.
+# Example configuration for hfnode. Copy to /etc/hfnode/hfnode.toml on a Pi or Linux
+# machine (docs/raspberry-pi-setup.md), to ~/Library/Application Support/hfnode/ on a
+# Mac (docs/macos-setup.md) or to %LOCALAPPDATA%\hfnode\ on Windows
+# (docs/windows-setup.md), and edit.
 # Secrets (email password, API key) come from environment variables, never this file.
+#
+# Paths may start with ~ (your home folder). On Windows write paths in single quotes,
+# which TOML takes literally: '~\AppData\Local\hfnode\state'. In double quotes a
+# backslash starts an escape.
 
-state_dir = "/var/lib/hfnode"
+state_dir = "/var/lib/hfnode"     # Mac: "~/Library/Application Support/hfnode/state"
 pending_timeout_secs = 600
 
 [station]
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
-serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port
+serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port; `hfnode devices`
+                                  # lists them. Mac: "/dev/cu.usbserial-..." (cu, not tty).
+                                  # Windows: "COM3" (the number Device Manager shows).
 baud = 115200                     # must match the radio's CI-V USB baud rate setting
 civ_address = 0x94                # IC-7300 default CI-V address
 # Last bring-up stage passed on this radio (docs/hardware-test-plan.md, "Bring-up
@@ -23,7 +32,11 @@ chunk_chars = 60
 chunk_pause_ms = 2000
 
 [audio]
-device = "plughw:CARD=CODEC,DEV=0"  # the IC-7300's USB audio codec (see `arecord -L`)
+# The IC-7300's USB audio codec; `hfnode devices` lists the inputs. Left out, it is
+# "plughw:CARD=CODEC,DEV=0" on Linux and "USB Audio CODEC" (part of the input's name)
+# on Mac and Windows, which find the radio's codec on each. Set it only if yours is
+# named differently or there are two.
+# device = "plughw:CARD=CODEC,DEV=0"
 sample_rate = 8000
 pitch_hz = 600                    # the radio's CW pitch setting
 end_of_message_ms = 3000
@@ -31,6 +44,7 @@ bandwidth_hz = 150
 
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
+                                  # Mac: "~/Library/Application Support/hfnode/node.key"
 # The letters codes are made of, in this order: at least 16 different uppercase
 # letters, all 26 when left out. Changing it, even only the order, changes every
 # code: print a new table and destroy the old one.
@@ -94,8 +108,14 @@ number = 2
 grid = "DL89ME"
 name = "Rio Grande Village"
 
+# Screens replies before they are keyed on air. See docs/reply-filter.md.
 [filter]
 enabled = true
-api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-opus-5-5"
+provider = "claude"               # "claude" (Anthropic API, paid) or "ollama" (local model, free)
+api_key_env = "ANTHROPIC_API_KEY" # Claude only
+# model = "claude-opus-5-5"       # the Claude default; for Ollama required: a model you have pulled, as `ollama list` shows it
+# base_url = "http://localhost:11434"  # Ollama on another machine: http://<its address>:11434
+# threads = 2                     # Ollama only: CPU threads; on a Pi leave cores for the decoder
+# think = false                   # Ollama only: skip the model's reasoning (faster; some models ignore it); recheck with `hfnode filter test`
+# timeout_secs = 600              # default 120 for Claude, 600 for Ollama
 extra_policy = ""

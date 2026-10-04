@@ -12,11 +12,12 @@
 //!   and the radio switched to receive, then receive is confirmed by reading the
 //!   radio's status, allowing for the break-in delay. If it cannot be confirmed,
 //!   transmitting is inhibited. With a state directory the inhibit is also written
-//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd restarts the
-//!   service after a crash); only removing the file, once the radio has been
-//!   checked, does. Whoever registered with [`Station::notify_inhibit`] gets one
-//!   [`InhibitNotice`] when it latches, or at once if it already has (the file was
-//!   there at start-up): `hfnode run` emails it to the owner (see `alert`).
+//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd or the
+//!   start-up scripts in `deploy/` restart the node after a crash); only removing
+//!   the file, once the radio has been checked, does. Whoever registered with
+//!   [`Station::notify_inhibit`] gets one [`InhibitNotice`] when it latches, or at
+//!   once if it already has (the file was there at start-up): `hfnode run` emails
+//!   it to the owner (see `alert`).
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
 //!   receive is confirmed. It backs up, and does not replace, the hardware transmit
@@ -300,7 +301,13 @@ impl Inhibit {
         let at = crate::gateway::unix_now();
         let mut written = None;
         if let Some(f) = &self.file {
-            match std::fs::write(f, format!("{at} {why}\n")) {
+            // The state directory may not exist yet (a bench command run before the
+            // node ever has); the inhibit must still reach the disk.
+            let saved = f
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(f, format!("{at} {why}\n")));
+            match saved {
                 Ok(()) => {
                     log::error!(
                         "wrote {}: nothing is transmitted, also after a restart, until it is removed \
@@ -848,7 +855,7 @@ mod tests {
 
     fn fast_rig() -> SimRig {
         let mut r = SimRig::new();
-        r.time_scale = 50.0;
+        r.time_scale = 10.0;
         r
     }
 
@@ -1228,6 +1235,21 @@ mod tests {
             (None, "1791120363".into())
         );
         assert_eq!(parse_inhibit_file(""), (None, String::new()));
+    }
+
+    #[test]
+    fn an_inhibit_is_written_even_without_a_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("not-yet/state");
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), Some(state.join("health.csv")));
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        drop(st);
+        assert!(state.join(INHIBIT_FILE).exists());
+        let st = Station::new(fast_rig(), cfg(), Some(state.join("health.csv")));
+        assert!(st.tx_inhibited());
     }
 
     /// A [`SimRig`] with two things a real radio may do: fold its output back to a
@@ -1780,7 +1802,8 @@ mod tests {
     #[test]
     fn a_chunk_too_long_for_the_interval_is_split_by_an_id() {
         let mut c = cfg();
-        c.id_interval = Duration::from_millis(1500);
+        // fast_rig runs ten times real speed: a 30-character piece still takes about 1.1 s.
+        c.id_interval = Duration::from_millis(7500);
         let mut st = Station::new(Radio::new(fast_rig()), c.clone(), None);
         st.configure().unwrap();
         let segment = format!("{} DE N0DE K", vec!["TEST"; 40].join(" "));
@@ -1801,7 +1824,8 @@ mod tests {
     #[test]
     fn a_call_too_long_for_one_keyer_command_is_split() {
         let mut c = cfg();
-        c.id_interval = Duration::from_millis(1500);
+        // fast_rig runs ten times real speed: a 30-character piece still takes about 1.1 s.
+        c.id_interval = Duration::from_millis(7500);
         // 31 characters: the keyer (and the sim) take at most 30.
         c.station_id = format!("DE {}", "N0DE".repeat(7));
         let mut st = Station::new(Radio::new(fast_rig()), c.clone(), None);

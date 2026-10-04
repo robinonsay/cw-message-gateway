@@ -13,7 +13,8 @@ use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(version, about = "HF CW message gateway node for the IC-7300")]
@@ -74,6 +75,18 @@ enum Cmd {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Record the radio's audio to a WAV file, as the node hears it. Never transmits.
+    Record {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        seconds: u32,
+    },
+    /// List this computer's serial ports and audio inputs, to find the radio's. Opens
+    /// nothing, so sends nothing to any radio. No config needed.
+    Devices,
     /// Talk to the radio directly, for bench testing.
     Radio {
         #[arg(long)]
@@ -85,6 +98,14 @@ enum Cmd {
     Run {
         #[arg(long)]
         config: PathBuf,
+    },
+    /// Try the inbound filter configured in `[filter]` (Claude or Ollama) without
+    /// the radio. Nothing is transmitted or stored.
+    Filter {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: FilterCmd,
     },
     /// Run the closed-loop scenarios against a mock IC-7300: no radio, sound card,
     /// network or config needed. Exits non-zero if any fails.
@@ -165,6 +186,21 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum FilterCmd {
+    /// Screen a set of built-in sample replies (ordinary messages, spam, profanity,
+    /// code groups) and show each verdict. Exits non-zero unless all come out as
+    /// expected. With Claude this makes one paid API call per sample.
+    Test,
+    /// Screen one message and show what would be keyed.
+    Screen {
+        text: String,
+        /// Contact name the message is from.
+        #[arg(long, default_value = "TEST")]
+        from: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum RadioCmd {
     /// Read the frequency (receive only, safe).
     Status,
@@ -190,6 +226,9 @@ fn main() -> Result<()> {
         "info"
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+    ctrlc::set_handler(on_stop_signal).context("installing the stop-signal handler")?;
+    // For tests/stop_signal.rs, which waits for this before sending a signal.
+    log::debug!(target: "hfnode::signal", "stop-signal handler installed");
     match cli.cmd {
         Cmd::Keygen { out } => keygen(&out),
         Cmd::Codes {
@@ -208,8 +247,15 @@ fn main() -> Result<()> {
             jitter,
         } => synth(&text, &out, wpm, pitch, snr, jitter),
         Cmd::Listen { config } => listen(&Config::load(&config)?),
+        Cmd::Record {
+            config,
+            out,
+            seconds,
+        } => record(&Config::load(&config)?, &out, seconds),
+        Cmd::Devices => devices(),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&config, &Config::load(&config)?),
+        Cmd::Filter { config, action } => filter_cmd(&Config::load(&config)?, action),
         Cmd::Selftest {
             sweep: true,
             scale,
@@ -254,6 +300,52 @@ fn main() -> Result<()> {
             pitch,
         } => testvectors(&out, &wpm, &snr, jitter, pitch),
     }
+}
+
+type DynRig = dyn civ::Rig + 'static;
+type Radio = Arc<Mutex<DynRig>>;
+
+/// The radio, once a command has passed the preflight and may write to it.
+static RADIO: Mutex<Option<Radio>> = Mutex::new(None);
+
+/// From here on a stop signal puts `radio` back on receive before the program exits.
+fn guard_radio(radio: Radio) {
+    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some(radio);
+}
+
+/// Ctrl-C, or a stop from systemd or launchd (SIGINT, SIGTERM, SIGHUP, or on Windows
+/// a console Ctrl-C or Ctrl-Break): with a radio in use, put it back on receive
+/// first (see [`stop_radio`]) and exit while still holding it, so that nothing else
+/// can key it in between. Exits 0 once receive is confirmed (a clean stop, so
+/// neither systemd nor the start-up scripts in `deploy/` restart the node), 1 if
+/// receive is not confirmed, and 130 if no radio was in use (interrupted, as without
+/// this handler).
+fn on_stop_signal() {
+    let radio = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(radio) = radio else {
+        std::process::exit(130);
+    };
+    let (_held, code) = stop_radio(&radio);
+    std::process::exit(code);
+}
+
+/// Take the radio, stop the keyer and confirm receive. The radio may first finish
+/// the text already in its keyer (at most 30 characters). Returns the radio, still
+/// held, and the exit code.
+fn stop_radio(radio: &Mutex<DynRig>) -> (MutexGuard<'_, DynRig>, i32) {
+    log::warn!("stop requested: stopping the keyer and forcing receive");
+    let mut rig = radio.lock().unwrap_or_else(|e| e.into_inner());
+    let code = match hfnode::station::force_receive(&mut *rig) {
+        Ok(()) => {
+            log::info!("radio confirmed on receive; exiting");
+            0
+        }
+        Err(e) => {
+            log::error!("radio NOT confirmed on receive ({e}); check it before restarting");
+            1
+        }
+    };
+    (rig, code)
 }
 
 fn keygen(out: &Path) -> Result<()> {
@@ -487,7 +579,102 @@ fn listen(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn record(cfg: &Config, out: &Path, seconds: u32) -> Result<()> {
+    if !(1..=3600).contains(&seconds) {
+        bail!("--seconds must be 1-3600");
+    }
+    let rate = cfg.audio.sample_rate;
+    let cap = audio::Capture::start(&cfg.audio.device, rate)?;
+    println!("recording {seconds} s from {}", cfg.audio.device);
+    let want = rate as usize * seconds as usize;
+    let mut samples = Vec::with_capacity(want);
+    let deadline = Instant::now() + Duration::from_secs(u64::from(seconds) + 10);
+    while samples.len() < want {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match cap.samples.recv_timeout(left) {
+            Ok(b) => samples.extend_from_slice(&b.samples),
+            Err(_) => bail!(
+                "audio stopped after {:.1} s",
+                samples.len() as f32 / rate as f32
+            ),
+        }
+    }
+    samples.truncate(want);
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    audio::write_wav(out, &samples, rate)?;
+    println!(
+        "wrote {} ({rate} Hz mono); peak level {:.0}% of full scale{}",
+        out.display(),
+        peak * 100.0,
+        if peak >= 0.99 {
+            ": clipping, turn the radio's ACC/USB AF output level down"
+        } else if peak == 0.0 {
+            ": silence, no audio is reaching hfnode"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn devices() -> Result<()> {
+    use civ::ports::Match;
+    println!("Serial ports (station.serial_port):");
+    let ports = civ::ports::list().unwrap_or_else(|e| {
+        println!("  could not list serial ports: {e}");
+        Vec::new()
+    });
+    if ports.is_empty() {
+        println!("  none found; is the radio on and its USB cable connected?");
+    }
+    for p in &ports {
+        let usb = p.usb.as_ref().map_or(String::new(), |u| {
+            let parts: Vec<&str> = [&u.manufacturer, &u.product, &u.serial_number]
+                .into_iter()
+                .filter_map(|s| s.as_deref())
+                .collect();
+            format!("  USB {:04X}:{:04X} {}", u.vid, u.pid, parts.join(", "))
+        });
+        let note = match p.radio_match() {
+            Match::Ic7300 => "  <- the IC-7300",
+            Match::Cp210x => "  <- a CP210x bridge, as in the IC-7300",
+            Match::No => "",
+        };
+        println!("  {}{usb}{note}", p.path);
+        if let Some(stable) = &p.stable_path {
+            println!("      same port, a name that does not change: {stable}");
+        }
+    }
+    println!();
+    println!("Audio inputs (audio.device; {}):", audio::DEVICE_HINT);
+    match audio::input_devices() {
+        Ok(inputs) if inputs.is_empty() => println!("  none found"),
+        Ok(inputs) => {
+            for d in &inputs {
+                println!(
+                    "  {:?}  {}{}",
+                    d.name,
+                    d.detail,
+                    if d.looks_like_radio() {
+                        "  <- the IC-7300's USB codec"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        Err(e) => println!("  could not list audio inputs: {e}"),
+    }
+    Ok(())
+}
+
 fn open_radio(cfg: &Config) -> Result<civ::ic7300::Ic7300> {
+    if cfg!(target_os = "macos") && civ::ports::is_macos_dialin(&cfg.station.serial_port) {
+        log::warn!(
+            "station.serial_port {} is a dial-in device; use the /dev/cu. one",
+            cfg.station.serial_port
+        );
+    }
     civ::ic7300::Ic7300::open(
         &cfg.station.serial_port,
         cfg.station.baud,
@@ -575,12 +762,16 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 RadioCmd::Tune => Action::Tune,
                 _ => Action::Cw,
             };
+            // The health log and any transmit inhibit are written there.
+            std::fs::create_dir_all(&cfg.state_dir)
+                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
             let rig = open_for(cfg, needs)?;
             let mut st = Station::new(
                 rig,
                 StationConfig::from_config(&cfg.station),
                 Some(cfg.state_dir.join("health.csv")),
             );
+            guard_radio(st.rig());
             st.configure()?;
             verify_setup(cfg, &st)?;
             println!(
@@ -604,8 +795,69 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     Ok(())
 }
 
+fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
+    use gateway::filter::{self, Screener};
+    let screener = Screener::new(&cfg.filter)?;
+    println!("{}", screener.describe());
+    if !cfg.filter.enabled {
+        println!("note: filter.enabled is false, so the node does not use this filter");
+    }
+    match action {
+        FilterCmd::Screen { text, from } => {
+            let on_air = sanitize(&text);
+            let v = screener.screen(&from.to_ascii_uppercase(), &on_air)?;
+            println!("{:?}: {}", v.action, v.reason);
+            println!("would key: {}", filter::apply(&on_air, &v));
+            Ok(())
+        }
+        FilterCmd::Test => {
+            let mut passed = 0;
+            for (i, s) in filter::SAMPLES.iter().enumerate() {
+                let start = Instant::now();
+                let result = screener.screen(s.from, s.text);
+                let secs = start.elapsed().as_secs_f32();
+                println!("{:>2}. {}", i + 1, s.text);
+                match result {
+                    Ok(v) => {
+                        let keyed = filter::apply(s.text, &v);
+                        let ok = s.expect.met(s.text, &keyed);
+                        passed += ok as usize;
+                        println!(
+                            "    {} {:?} in {secs:.1} s ({})",
+                            if ok { "ok  " } else { "FAIL" },
+                            v.action,
+                            v.reason
+                        );
+                        if keyed != s.text {
+                            println!("    would key: {keyed}");
+                        }
+                        if !ok {
+                            println!("    expected: {:?}", s.expect);
+                        }
+                    }
+                    Err(e) => {
+                        println!("    FAIL filter unavailable after {secs:.1} s: {e:#}");
+                        if filter::timed_out(&e) && cfg.filter.think != Some(false) {
+                            println!(
+                                "    a model that thinks may not finish in time: see filter.think"
+                            );
+                        }
+                    }
+                }
+            }
+            let total = filter::SAMPLES.len();
+            println!("{passed} of {total} as expected");
+            if passed < total {
+                bail!("{} sample(s) not as expected", total - passed);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn run(config: &Path, cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)?;
+    std::fs::create_dir_all(&cfg.state_dir)
+        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     let alerts = alert::Alerts::start(cfg, config);
     let result = run_node(cfg, &alerts);
     // The station is gone: dropping it forced receive, which can still latch the
@@ -625,6 +877,7 @@ fn run_node(cfg: &Config, alerts: &alert::Alerts) -> Result<()> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
+    guard_radio(station.rig());
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -882,6 +1135,35 @@ fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use civ::Rig;
+
+    fn keying() -> civ::sim::SimRig {
+        let mut sim = civ::sim::SimRig::new();
+        sim.set_mode_cw().unwrap();
+        sim.set_break_in(true).unwrap();
+        sim.stuck_key = true;
+        sim.send_cw("TEST TEST TEST").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(sim.is_transmitting().unwrap());
+        sim
+    }
+
+    #[test]
+    fn a_stop_signal_puts_the_radio_on_receive() {
+        let radio: Radio = Arc::new(Mutex::new(keying()));
+        let (held, code) = stop_radio(&radio);
+        assert_eq!(code, 0);
+        drop(held);
+        assert!(!radio.lock().unwrap().is_transmitting().unwrap());
+    }
+
+    #[test]
+    fn a_stop_signal_reports_a_radio_stuck_on_transmit() {
+        let mut sim = keying();
+        sim.tx_jammed = true;
+        let radio: Radio = Arc::new(Mutex::new(sim));
+        assert_eq!(stop_radio(&radio).1, 1);
+    }
 
     #[test]
     fn sim_messages_added_in_the_same_second_are_all_kept() {

@@ -84,10 +84,7 @@ fn save(path: &Path, grids: &BTreeMap<String, String>) -> Result<()> {
             f.write_all(serde_json::to_string_pretty(grids)?.as_bytes())?;
             f.sync_all()?;
         }
-        fs::rename(&tmp, path)?;
-        #[cfg(unix)]
-        fs::File::open(dir)?.sync_all()?;
-        Ok(())
+        auth::replace_file(&tmp, path)
     };
     write().with_context(|| format!("saving {}", path.display()))
 }

@@ -35,10 +35,32 @@
 //! The USB serial port has two control lines, DTR and RTS, that the radio can be
 //! set to treat as a transmit (USB SEND) or CW key (USB Keying (CW)) line: "DTR:
 //! Uses the DTR terminal on the CI-V (PC) side" (USB SEND and USB Keying items,
-//! p. 12-11; manual text lines 6895-6927). Linux and macOS raise both lines when a
-//! serial port is opened, so [`Ic7300::open`] drops them again straight away and
-//! fails if it cannot. [`crate::preflight`] also reads those settings and refuses
-//! to go on unless they are OFF.
+//! p. 12-11; manual text lines 6895-6927). Opening a serial port can raise both
+//! lines, so [`Ic7300::open`] drops them again straight away and fails if it cannot.
+//! [`crate::preflight`] also reads those settings and refuses to go on unless they
+//! are OFF. What each system does at open:
+//!
+//! - **Linux**: the tty layer raises DTR and RTS on open (the `cp210x` driver's
+//!   `dtr_rts` hook), and lowers them on close (HUPCL).
+//! - **macOS**: the first open of a port raises DTR and RTS (Apple's IOSerialFamily,
+//!   `IOSerialBSDClient::initSession`, which creates the `/dev/cu.*` and `/dev/tty.*`
+//!   files for a serial driver), and close lowers them (HUPCL). Read in Apple's
+//!   published source; that Apple's and Silicon Labs' current CP210x drivers go
+//!   through it is understood but not checked, and none of it has been measured on
+//!   an IC-7300.
+//! - **Windows**: the port is opened, then its line settings are applied with DTR
+//!   and RTS control disabled (serialport's `SetCommState`), then both are cleared.
+//!   Microsoft's sample serial driver brings the lines up on open as its saved
+//!   settings say (enabled by default); whether Silicon Labs' CP210x driver does the
+//!   same before the settings arrive is not documented.
+//!
+//! So on every system the lines may be up for the moment between the port opening
+//! and the settings being applied. The radio's "Inhibit Timer at USB Connection"
+//! (default ON) is meant for that moment: it holds off a SEND or keying signal for
+//! a few seconds when "a virtual serial port communication is established" (manual
+//! text lines 6928-6945). It only delays a line that stays up, though; what makes
+//! the lines harmless is USB SEND and USB Keying set to OFF, which the preflight
+//! requires before anything is written.
 
 use crate::frame::{bcd_be, bcd_le, from_bcd_be, from_bcd_le, take_frame, Frame, CONTROLLER};
 use crate::{Result, Rig, RigError, MAX_CW_CHARS};
@@ -286,22 +308,25 @@ impl Ic7300 {
     /// DTR and RTS are dropped as soon as the port is open, and the port is not used
     /// if that fails: with USB SEND or USB Keying (CW) set to DTR or RTS, a raised
     /// line would key the transmitter for as long as the port stays open (pp. 12-11;
-    /// manual text lines 6895-6927). The kernel still raises them for a moment while
-    /// opening; the radio's "Inhibit Timer at USB Connection" (default ON, line 6928)
-    /// covers that moment, and [`crate::preflight`] checks the settings themselves.
+    /// manual text lines 6895-6927). The system may still raise them for a moment
+    /// while opening (see the module notes for Linux, macOS and Windows); the radio's
+    /// "Inhibit Timer at USB Connection" (default ON, line 6928) delays a signal
+    /// then by a few seconds, and [`crate::preflight`] refuses the radio unless the
+    /// settings themselves are OFF, which is what makes the lines harmless.
     pub fn open(path: &str, baud: u32, addr: u8) -> Result<Self> {
         check_link_settings(baud, addr)?;
         let io = |e: serialport::Error| RigError::Io(std::io::Error::other(e));
-        let mut port = serialport::new(path, baud)
+        let builder = serialport::new(path, baud)
             .data_bits(serialport::DataBits::Eight)
             .parity(serialport::Parity::None)
             .stop_bits(serialport::StopBits::One)
             .flow_control(serialport::FlowControl::None)
-            .exclusive(true)
             .dtr_on_open(false)
-            .timeout(Duration::from_millis(50))
-            .open()
-            .map_err(io)?;
+            .timeout(Duration::from_millis(50));
+        // Windows opens a COM port for one handle only (share mode 0) by itself.
+        #[cfg(unix)]
+        let builder = builder.exclusive(true);
+        let mut port = builder.open().map_err(io)?;
         port.write_data_terminal_ready(false).map_err(io)?;
         port.write_request_to_send(false).map_err(io)?;
         Ok(Self::with_port(port, addr))
@@ -928,16 +953,18 @@ mod tests {
 
     #[test]
     fn late_reply_after_a_pause_is_not_taken_as_the_next_one() {
+        // The driver's own timeout, so that a slow test machine has the same margins
+        // as the driver: hundreds of milliseconds.
         let mut r = radio(&[], false);
-        r.timeout = Duration::from_millis(100);
-        // The OK to stop_cw arrives 160 ms after it was sent: after the timeout and
-        // after more than one quiet serial read.
+        r.timeout = Duration::from_millis(500);
+        // The OK to stop_cw arrives 800 ms after it was sent: after the timeout and
+        // after many quiet serial reads.
         r.port
             .timed
-            .push_back((Instant::now() + Duration::from_millis(160), reply(OK)));
+            .push_back((Instant::now() + Duration::from_millis(800), reply(OK)));
         assert!(matches!(r.stop_cw(), Err(RigError::Timeout)));
         // The radio answers the next command NG, slowly.
-        r.port.reply_delay = Some(Duration::from_millis(80));
+        r.port.reply_delay = Some(Duration::from_millis(150));
         r.port.replies.push_back(reply(&[0xFA]));
         assert!(matches!(r.set_transmit(false), Err(RigError::Rejected)));
     }

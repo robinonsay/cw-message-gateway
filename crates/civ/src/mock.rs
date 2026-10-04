@@ -1515,18 +1515,28 @@ mod tests {
 
     #[test]
     fn stop_cuts_the_message_and_the_break_in_delay_follows() {
-        let (m, mut r) = radio(50.0);
+        // 30 E's take 7.2 s of radio time at 20 wpm, 0.7 s here: plenty of time to
+        // stop them part-way however slowly this machine schedules the test.
+        let (m, mut r) = radio(10.0);
         setup(&mut r);
         r.send_cw("EEEEEEEEEEEEEEEEEEEEEEEEEEEEEE").unwrap();
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(60));
         r.stop_cw().unwrap();
-        // Still on transmit for the break-in delay after the key went up.
-        assert!(r.is_transmitting().unwrap());
         wait_idle(&m);
-        let k = &m.report().keyed[0];
+        let rep = m.report();
+        let k = &rep.keyed[0];
         assert!(!k.complete);
         assert!(!k.sent.is_empty() && k.sent.len() < 30, "{}", k.sent);
         assert!(k.sent.chars().all(|c| c == 'E'));
+        // Still on transmit for the break-in delay (10 dots, 600 ms) after the last
+        // key-up, in radio time. The stop may come in the gap after an E (up to 4
+        // dots, 240 ms), and `end` is the stop.
+        let tx = &rep.transmissions[0];
+        let after_stop = tx.end.expect("back on receive") - k.end;
+        assert!(
+            (Duration::from_millis(350)..=Duration::from_millis(610)).contains(&after_stop),
+            "{after_stop:?}"
+        );
     }
 
     #[test]
