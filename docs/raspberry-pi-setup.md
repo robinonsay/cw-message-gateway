@@ -1,7 +1,10 @@
 # Raspberry Pi setup
 
 This sets up a Raspberry Pi as the node: the `hfnode` binary, the radio's serial
-port and USB audio, the IC-7300 menu settings, secrets, and a systemd service.
+port and USB audio, the IC-7300 menu settings, secrets, and a systemd service. Other
+Linux machines work the same way. For a Mac see [macos-setup.md](macos-setup.md),
+for Windows [windows-setup.md](windows-setup.md); both refer back here for the
+radio's menu settings (section 6).
 
 Before putting the node on the air, work through the
 [hardware test plan](hardware-test-plan.md). Enable the service only after it passes.
@@ -101,6 +104,7 @@ Silicon Labs CP210x USB-to-serial bridge, which Linux drives with the built-in
 ```sh
 sudo dmesg | grep -i cp210x          # "cp210x converter now attached to ttyUSB0"
 ls -l /dev/ttyUSB* /dev/serial/by-id/
+hfnode devices                       # marks the radio's port, and its by-id name
 ```
 
 `/dev/ttyUSB0` is fine while it is the only USB serial device, but the number can
@@ -142,8 +146,8 @@ arecord -l     # card numbers and names; look for "USB Audio CODEC"
 arecord -L     # ALSA device names; look for plughw:CARD=CODEC,DEV=0
 ```
 
-The example config uses `plughw:CARD=CODEC,DEV=0`, which names the card instead of
-its number, so it survives reboots and other USB audio devices. If your card has a
+`audio.device` defaults to `plughw:CARD=CODEC,DEV=0`, which names the card instead
+of its number, so it survives reboots and other USB audio devices. If your card has a
 different name, use the `plughw:CARD=...,DEV=0` line that `arecord -L` prints for
 it. Record a few seconds to check (tune the radio to a CW signal or to band noise
 first):
@@ -153,7 +157,10 @@ arecord -D plughw:CARD=CODEC,DEV=0 -f S16_LE -r 8000 -c 1 -d 10 /tmp/test.wav
 hfnode decode /tmp/test.wav --pitch 600
 ```
 
-Put the device name in `audio.device`.
+If it differs from the default, put the device name in `audio.device` (the line
+is commented out in the example config). Once the config is in place,
+`hfnode record --config <file> --out /tmp/test.wav` records the same way, as the
+node hears it, and prints the peak level.
 
 ## 6. IC-7300 settings
 
@@ -345,9 +352,10 @@ receive, it stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with th
 time and reason. It keeps running (and keeps logging) but transmits nothing, also
 after a restart, until that file is removed. Check the radio first.
 
-**Stopping the node.** `sudo systemctl stop hfnode`. If the node was keying when it
-was stopped, the radio may finish the text already handed to its keyer (at most 30
-characters) before the stop hook forces receive.
+**Stopping the node.** `sudo systemctl stop hfnode`. The node stops the radio's
+keyer and confirms receive before it exits, and the unit's stop hook then checks
+receive again. If the node was keying, the radio may first finish the text already
+handed to its keyer (at most 30 characters).
 
 **Using the radio yourself.** Stop the node first, and start it again
 (`sudo systemctl start hfnode`) when you are done. While it runs, it puts its

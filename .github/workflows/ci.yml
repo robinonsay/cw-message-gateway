@@ -29,6 +29,61 @@ jobs:
       - name: cargo test
         run: cargo test --all
 
+  # The node also runs on macOS (Core Audio) and Windows (WASAPI); see
+  # docs/macos-setup.md and docs/windows-setup.md. No radio or sound card here: the
+  # tests and the self-test drive the mock IC-7300, and `hfnode devices` checks the
+  # binary starts and can ask the system for serial ports and audio inputs.
+  test-other-os:
+    name: clippy, test, selftest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub's macOS runners wake sleeping threads late by a few ms, which at
+          # 100x real time is a few hundred ms of radio time; run the mock radio
+          # 20x real time there, as on any slow or busy machine.
+          - os: macos-latest
+            scale: 20
+          - os: windows-latest
+            scale: 100
+    runs-on: ${{ matrix.os }}
+    env:
+      HFNODE_E2E_SCALE: ${{ matrix.scale }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all
+
+      - name: build hfnode (release)
+        run: cargo build --release -p hfnode
+
+      - name: hfnode selftest
+        run: cargo run --release -p hfnode -- selftest --scale ${{ matrix.scale }}
+
+      - name: hfnode devices
+        run: cargo run --release -p hfnode -- devices
+
+      - name: Windows start-up script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./deploy/windows/test-supervise.ps1 -Hfnode "$PWD\target\release\hfnode.exe"
+
+      - name: cargo check (x86_64-apple-darwin, Intel Macs)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo check --target x86_64-apple-darwin --all-targets
+
   check-pi:
     name: check aarch64 (Raspberry Pi)
     runs-on: ubuntu-latest

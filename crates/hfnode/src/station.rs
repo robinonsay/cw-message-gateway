@@ -12,9 +12,9 @@
 //!   and the radio switched to receive, then receive is confirmed by reading the
 //!   radio's status, allowing for the break-in delay. If it cannot be confirmed,
 //!   transmitting is inhibited. With a state directory the inhibit is also written
-//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd restarts the
-//!   service after a crash); only removing the file, once the radio has been
-//!   checked, does.
+//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd or the
+//!   start-up scripts in `deploy/` restart the node after a crash); only removing
+//!   the file, once the radio has been checked, does.
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
 //!   receive is confirmed. It backs up, and does not replace, the hardware transmit
@@ -248,7 +248,13 @@ impl Inhibit {
         log::error!("{why}: transmit inhibited");
         if let Some(f) = &self.file {
             let line = format!("{} {why}\n", crate::gateway::unix_now());
-            match std::fs::write(f, line) {
+            // The state directory may not exist yet (a bench command run before the
+            // node ever has); the inhibit must still reach the disk.
+            let written = f
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(f, line));
+            match written {
                 Ok(()) => log::error!(
                     "wrote {}: nothing is transmitted, also after a restart, until it is removed",
                     f.display()
@@ -704,7 +710,7 @@ mod tests {
 
     fn fast_rig() -> SimRig {
         let mut r = SimRig::new();
-        r.time_scale = 50.0;
+        r.time_scale = 10.0;
         r
     }
 
@@ -1126,6 +1132,21 @@ mod tests {
         assert!(!st.tx_inhibited());
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
+    fn an_inhibit_is_written_even_without_a_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("not-yet/state");
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), Some(state.join("health.csv")));
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        drop(st);
+        assert!(state.join(INHIBIT_FILE).exists());
+        let st = Station::new(fast_rig(), cfg(), Some(state.join("health.csv")));
+        assert!(st.tx_inhibited());
     }
 
     /// A [`SimRig`] with two things a real radio may do: fold its output back to a
