@@ -19,8 +19,14 @@ timedatectl
 ```
 
 Listening windows are computed from UTC, so a wrong clock means the node listens at
-the wrong time. The Pi has no battery-backed clock; it needs the network at boot to
-get the time.
+the wrong time, and tunes (a short carrier) at the wrong time too. The Pi has no
+battery-backed clock; it needs the network at boot to get the time. Make the
+service wait until the clock has actually synchronised, not just until the time
+service has started:
+
+```sh
+sudo systemctl enable systemd-time-wait-sync.service
+```
 
 Update and install the audio tools (`hfnode` runs `arecord` for capture):
 

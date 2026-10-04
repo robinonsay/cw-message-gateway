@@ -180,7 +180,8 @@ None of these affects the bench steps; all need deciding before stage `done`:
   again. A USB device that re-enumerates leaves the node holding a dead port. The
   stop procedure now says to stop `hfnode` before switching the radio back on; the
   node should latch the inhibit and exit after a few consecutive timeouts.
-- **Clock.** Listening windows follow the Pi's clock, and the service does not wait
-  for it to be synchronised (`time-sync.target` is reached when timesyncd starts,
-  not when it has synced). After a power cut the window-start tunes can come at
-  unscheduled times until NTP corrects it.
+- **Clock.** Listening windows follow the Pi's clock. `time-sync.target` is reached
+  when timesyncd starts, not when it has synced, unless
+  `systemd-time-wait-sync.service` is enabled (now a step in the Pi guide). Without
+  network after a power cut the window-start tunes can still come at unscheduled
+  times; the node does not check that the clock is synchronised itself.
