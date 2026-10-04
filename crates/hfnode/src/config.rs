@@ -188,23 +188,117 @@ pub struct Filter {
     /// third-party text is transmitted unreviewed.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Which model screens messages: the Claude API, or a model served by Ollama.
+    #[serde(default)]
+    pub provider: Provider,
+    /// Claude only: environment variable holding the API key.
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
-    #[serde(default = "default_model")]
-    pub model: String,
+    /// Model name. Defaults to `claude-opus-5-5` for Claude; required for Ollama.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Where the model is served. Defaults to `https://api.anthropic.com` for Claude
+    /// and `http://localhost:11434` for Ollama.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Ollama only: CPU threads the model may use (unset: Ollama decides). On a
+    /// Raspberry Pi, leave cores free for the CW decoder.
+    #[serde(default)]
+    pub threads: Option<u32>,
+    /// How long one screening may take before the filter counts as unavailable
+    /// (the message is held and tried again). Defaults to 120 s for Claude and
+    /// 600 s for Ollama, which may first have to load the model.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     /// Extra policy text appended to the built-in instructions.
     #[serde(default)]
     pub extra_policy: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Claude,
+    Ollama,
 }
 
 impl Default for Filter {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: Provider::default(),
             api_key_env: default_api_key_env(),
-            model: default_model(),
+            model: None,
+            base_url: None,
+            threads: None,
+            timeout_secs: None,
             extra_policy: String::new(),
         }
+    }
+}
+
+impl Filter {
+    /// The model to ask, with the provider's default filled in.
+    pub fn model(&self) -> Option<&str> {
+        match (&self.model, self.provider) {
+            (Some(m), _) => Some(m.as_str()),
+            (None, Provider::Claude) => Some("claude-opus-5-5"),
+            (None, Provider::Ollama) => None,
+        }
+    }
+
+    /// The service address, without a trailing `/`.
+    pub fn base_url(&self) -> String {
+        let default = match self.provider {
+            Provider::Claude => "https://api.anthropic.com",
+            Provider::Ollama => "http://localhost:11434",
+        };
+        self.base_url
+            .as_deref()
+            .unwrap_or(default)
+            .trim_end_matches('/')
+            .to_string()
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(match self.provider {
+            Provider::Claude => 120,
+            Provider::Ollama => 600,
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let model = self.model.as_deref().map(str::trim);
+        if model == Some("") {
+            bail!("filter.model is empty");
+        }
+        if self.provider == Provider::Ollama && model.is_none() {
+            bail!(
+                "filter.model is required with provider = \"ollama\": the name of a model \
+                 you have pulled, as `ollama list` shows it"
+            );
+        }
+        if let Some(url) = &self.base_url {
+            let rest = url
+                .strip_prefix("http://")
+                .or_else(|| url.strip_prefix("https://"));
+            if rest.is_none_or(|r| r.trim_end_matches('/').is_empty()) {
+                bail!("filter.base_url {url:?} must start with http:// or https://");
+            }
+        }
+        if let Some(t) = self.threads {
+            if self.provider != Provider::Ollama {
+                bail!("filter.threads only applies with provider = \"ollama\"");
+            }
+            if !(1..=256).contains(&t) {
+                bail!("filter.threads must be 1-256");
+            }
+        }
+        if self.timeout_secs.is_some_and(|t| !(1..=3600).contains(&t)) {
+            bail!("filter.timeout_secs must be 1-3600");
+        }
+        Ok(())
     }
 }
 
@@ -276,9 +370,6 @@ fn default_periods() -> usize {
 }
 fn default_api_key_env() -> String {
     "ANTHROPIC_API_KEY".into()
-}
-fn default_model() -> String {
-    "claude-opus-5-5".into()
 }
 
 /// The IC-7300's transmitter frequency coverage in Hz, inclusive, from the manual's
@@ -398,6 +489,7 @@ impl Config {
                 bail!("weather.periods must be 1-6");
             }
         }
+        self.filter.validate()?;
         if self.schedule.window_minutes > self.schedule.every_minutes {
             bail!("schedule.window_minutes is longer than schedule.every_minutes");
         }
@@ -540,6 +632,56 @@ mod tests {
             let mut cfg = example();
             cfg.weather.as_mut().unwrap().periods = periods;
             assert_eq!(cfg.validate().is_ok(), ok, "{periods} periods");
+        }
+    }
+
+    #[test]
+    fn filter_providers() {
+        let parse = |filter: &str| -> Result<Config> {
+            let text = include_str!("../../../hfnode.example.toml")
+                .split("[filter]")
+                .next()
+                .unwrap()
+                .to_string()
+                + filter;
+            let cfg: Config = toml::from_str(&text)?;
+            cfg.validate()?;
+            Ok(cfg)
+        };
+        // Omitted entirely: Claude, with its defaults.
+        let f = parse("").unwrap().filter;
+        assert!(f.enabled);
+        assert_eq!(f.provider, Provider::Claude);
+        assert_eq!(f.model(), Some("claude-opus-5-5"));
+        assert_eq!(f.base_url(), "https://api.anthropic.com");
+        assert_eq!(f.timeout_secs(), 120);
+        // Ollama: local by default, and the model must be named.
+        let f = parse("[filter]\nprovider = \"ollama\"\nmodel = \"gemma3:4b\"\n")
+            .unwrap()
+            .filter;
+        assert_eq!(f.provider, Provider::Ollama);
+        assert_eq!(f.model(), Some("gemma3:4b"));
+        assert_eq!(f.base_url(), "http://localhost:11434");
+        assert_eq!(f.timeout_secs(), 600);
+        let f = parse(
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"http://mac.local:11434/\"\nthreads = 2\ntimeout_secs = 900\n",
+        )
+        .unwrap()
+        .filter;
+        assert_eq!(f.base_url(), "http://mac.local:11434");
+        assert_eq!((f.threads, f.timeout_secs()), (Some(2), 900));
+        for bad in [
+            "[filter]\nprovider = \"ollama\"\n",
+            "[filter]\nprovider = \"ollama\"\nmodel = \" \"\n",
+            "[filter]\nprovider = \"openai\"\n",
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"localhost:11434\"\n",
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"http://\"\n",
+            "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nthreads = 0\n",
+            "[filter]\nthreads = 2\n",
+            "[filter]\ntimeout_secs = 0\n",
+            "[filter]\nmodel = \"\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
         }
     }
 

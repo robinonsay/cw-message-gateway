@@ -86,6 +86,14 @@ enum Cmd {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Try the inbound filter configured in `[filter]` (Claude or Ollama) without
+    /// the radio. Nothing is transmitted or stored.
+    Filter {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: FilterCmd,
+    },
     /// Run the closed-loop scenarios against a mock IC-7300: no radio, sound card,
     /// network or config needed. Exits non-zero if any fails.
     Selftest {
@@ -165,6 +173,21 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum FilterCmd {
+    /// Screen a set of built-in sample replies (ordinary messages, spam, profanity,
+    /// code groups) and show each verdict. Exits non-zero unless all come out as
+    /// expected. With Claude this makes one paid API call per sample.
+    Test,
+    /// Screen one message and show what would be keyed.
+    Screen {
+        text: String,
+        /// Contact name the message is from.
+        #[arg(long, default_value = "TEST")]
+        from: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum RadioCmd {
     /// Read the frequency (receive only, safe).
     Status,
@@ -210,6 +233,7 @@ fn main() -> Result<()> {
         Cmd::Listen { config } => listen(&Config::load(&config)?),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&Config::load(&config)?),
+        Cmd::Filter { config, action } => filter_cmd(&Config::load(&config)?, action),
         Cmd::Selftest {
             sweep: true,
             scale,
@@ -553,6 +577,59 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
+    use gateway::filter::{self, Screener};
+    let screener = Screener::new(&cfg.filter)?;
+    println!("{}", screener.describe());
+    if !cfg.filter.enabled {
+        println!("note: filter.enabled is false, so the node does not use this filter");
+    }
+    match action {
+        FilterCmd::Screen { text, from } => {
+            let on_air = sanitize(&text);
+            let v = screener.screen(&from.to_ascii_uppercase(), &on_air)?;
+            println!("{:?}: {}", v.action, v.reason);
+            println!("would key: {}", filter::apply(&on_air, &v));
+            Ok(())
+        }
+        FilterCmd::Test => {
+            let mut passed = 0;
+            for (i, s) in filter::SAMPLES.iter().enumerate() {
+                let start = Instant::now();
+                let result = screener.screen(s.from, s.text);
+                let secs = start.elapsed().as_secs_f32();
+                println!("{:>2}. {}", i + 1, s.text);
+                match result {
+                    Ok(v) => {
+                        let keyed = filter::apply(s.text, &v);
+                        let ok = s.expect.met(s.text, &keyed);
+                        passed += ok as usize;
+                        println!(
+                            "    {} {:?} in {secs:.1} s ({})",
+                            if ok { "ok  " } else { "FAIL" },
+                            v.action,
+                            v.reason
+                        );
+                        if keyed != s.text {
+                            println!("    would key: {keyed}");
+                        }
+                        if !ok {
+                            println!("    expected: {:?}", s.expect);
+                        }
+                    }
+                    Err(e) => println!("    FAIL filter unavailable after {secs:.1} s: {e:#}"),
+                }
+            }
+            let total = filter::SAMPLES.len();
+            println!("{passed} of {total} as expected");
+            if passed < total {
+                bail!("{} sample(s) not as expected", total - passed);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn run(cfg: &Config) -> Result<()> {

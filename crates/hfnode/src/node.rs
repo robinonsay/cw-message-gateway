@@ -75,11 +75,7 @@ pub fn open_inbox(cfg: &Config) -> Result<Arc<Mutex<Inbox>>> {
 
 /// Screen every unscreened message. Messages stay unscreened (and are never keyed)
 /// if the filter cannot be reached.
-pub fn screen_inbox(
-    cfg: &Config,
-    inbox: &Arc<Mutex<Inbox>>,
-    filter: Option<&filter::ClaudeFilter>,
-) {
+pub fn screen_inbox(cfg: &Config, inbox: &Arc<Mutex<Inbox>>, filter: Option<&filter::Screener>) {
     let pending = inbox.lock().map(|i| i.unscreened()).unwrap_or_default();
     for m in pending {
         let on_air = sanitize(&m.raw);
@@ -120,8 +116,11 @@ pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
     };
     thread::spawn(move || {
         let filter = if cfg.filter.enabled {
-            match filter::ClaudeFilter::new(&cfg.filter) {
-                Ok(f) => Some(f),
+            match filter::Screener::new(&cfg.filter) {
+                Ok(f) => {
+                    log::info!("inbound filter: {}", f.describe());
+                    Some(f)
+                }
                 Err(e) => {
                     log::error!(
                         "inbound filter not available, inbound messages will be held: {e:#}"
