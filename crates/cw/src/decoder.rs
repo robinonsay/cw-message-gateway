@@ -219,6 +219,19 @@ impl Decoder {
         };
     }
 
+    /// Go back to the initial speed estimate (dit length, mark history and
+    /// character-gap stretch), keeping the levels and anything being received. For
+    /// a decoder that has listened to band noise or other stations for minutes:
+    /// noise words of three or more marks teach it a speed no sender is using, and
+    /// the next caller's first words would then be split wrongly.
+    pub fn reset_speed(&mut self) {
+        let dit_ms = 1200.0 / self.cfg.initial_wpm;
+        self.dit_ms = dit_ms;
+        self.char_gap_ms = 3.0 * dit_ms;
+        self.marks.clear();
+        self.working = (0, dit_ms);
+    }
+
     /// Whether something is being received that has not been returned yet: the key
     /// is down, or a word is buffered awaiting its word gap (see [`Decoder::flush`]).
     pub fn has_partial(&self) -> bool {
@@ -894,6 +907,42 @@ mod tests {
             SHORT,
             "fresh decoder should split it"
         );
+    }
+
+    #[test]
+    fn reset_speed_forgets_what_noise_taught() {
+        const CALL: &str = "W5XXX 44 WMYDPUDR TX BOB CALL ME K";
+        let sigma = Noise::sigma_for_snr(0.5, 15.0, SR, 2500.0);
+        let mut k = Keyer::new(SR, 600.0, 18.0);
+        k.jitter = 0.03;
+        // Five minutes of band noise, then a call heard through the same noise.
+        let quiet = SR as usize * 302;
+        let mut garbled = 0;
+        // Seeds whose noise taught the decoder a wrong speed when this was written.
+        for seed in [2u64, 4, 5] {
+            let mut audio = vec![0.0; quiet];
+            audio.extend(k.render(CALL, 0.0));
+            audio.extend(vec![0.0; SR as usize * 4]);
+            Noise::new(seed * 7919).add(&mut audio, sigma);
+            let heard = |reset: bool| {
+                let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+                let mut events = Vec::new();
+                for (i, b) in audio.chunks(400).enumerate() {
+                    if reset && i * 400 == SR as usize * 300 && !d.has_partial() {
+                        d.reset_speed();
+                        assert_eq!(d.wpm(), 15.0);
+                    }
+                    events.extend(d.push(b));
+                }
+                events.extend(d.flush());
+                events_to_text(&events)
+            };
+            garbled += usize::from(!heard(false).contains(CALL));
+            let after_reset = heard(true);
+            assert!(after_reset.contains(CALL), "seed {seed}: {after_reset}");
+        }
+        // Without the reset the noise does harm, or this test shows nothing.
+        assert!(garbled > 0);
     }
 
     #[test]

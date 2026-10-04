@@ -189,9 +189,10 @@ garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, 
 echo off, CI-V Transceive frames from someone at the radio, a load the tuner matches
 and one beyond its range (the window stays silent), listening windows (a high-SWR
 lockout cleared by the next window's tune), listening all the time (a re-tune before
-a reply once the last tune is old, a high-SWR lockout cleared by it, split switched
-on at the radio, the dial and mode changed while the node is idle, band noise and
-other stations calling), and radio faults (SWR rising after the
+a reply once the last tune is old, a high-SWR lockout cleared by it, split or ∂TX
+switched on at the radio, the dial and mode changed while the node is idle, band
+noise and other stations calling, and a call after a long quiet spell answered the
+first time), and radio faults (SWR rising after the
 tune, fold-back, stuck transmit or key, also on the last over, a transmitter that
 will not unkey, one that only the watchdog gets off transmit, refused status
 commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner
@@ -319,6 +320,10 @@ the air.
 | `hfnode run --config C` | **yes** | Run the node. |
 
 Logging goes to stderr; set `RUST_LOG=debug` for more detail.
+
+A running node owns the radio: stop it before using the radio yourself. Listening
+all the time, it puts its frequency, mode, power and keyer settings back every
+`schedule.check_minutes` (10) while idle, and before every transmission.
 
 The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
 decoded transmission) and `health.csv` (every tune and SWR reading).

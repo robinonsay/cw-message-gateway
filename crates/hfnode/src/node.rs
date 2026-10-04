@@ -6,7 +6,9 @@
 //! listens all day puts out no carriers of its own until there is something to
 //! send. While it hears nothing it sets the radio up again and checks it every
 //! `check_minutes`, without transmitting, and the station does the same before
-//! every transmission.
+//! every transmission. The decoder also goes back to its starting speed after a
+//! quiet minute, so hours of band noise do not garble the next caller's first
+//! words.
 
 use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
@@ -193,6 +195,12 @@ fn decoder_for(cfg: &Config) -> Decoder {
 /// first block read afterwards that was captured before.
 const RX_RECOVERY_MS: u64 = 250;
 
+/// Audio, in ms, after which an idle decoder goes back to its initial speed
+/// estimate ([`Decoder::reset_speed`]). Minutes of band noise teach it a speed no
+/// sender is using, which garbles the start of the next call; a minute of noise is
+/// too little to do that.
+const SPEED_REFRESH_MS: u64 = 60_000;
+
 /// Discards audio captured while the node was transmitting or tuning.
 #[derive(Debug, Default)]
 struct TxGuard {
@@ -329,10 +337,13 @@ pub fn run_with_clock<R: Rig + 'static>(
     let mut was_open = false;
     let check_secs = u64::from(cfg.schedule.check_minutes) * 60;
     let retune_secs = u64::from(cfg.schedule.retune_minutes) * 60;
-    // Clock times of the last tune (or try at one) and of the last time the radio
-    // was set up and checked.
+    // Clock times of the last tune (whatever came of it, once the tuner started)
+    // and of the last time the radio was set up and checked.
     let mut tuned_at: Option<u64> = None;
     let mut checked_at = 0;
+    // Audio since the decoder last started from its initial speed, or last heard
+    // the node transmit (the reply that follows keeps the sender's speed).
+    let mut speed_age_ms: u64 = 0;
     loop {
         let block = match audio.recv_timeout(Duration::from_secs(5)) {
             Ok(b) => b,
@@ -365,9 +376,10 @@ pub fn run_with_clock<R: Rig + 'static>(
             if let Err(e) = station.start_window() {
                 log::error!("tune failed at window start: {e}");
             }
-            (tuned_at, checked_at) = (Some(clock()), clock());
+            (tuned_at, checked_at) = (station.tuner_ran().then(clock), clock());
             guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
+            speed_age_ms = 0;
             events.clear();
             over = None;
             was_open = true;
@@ -405,10 +417,15 @@ pub fn run_with_clock<R: Rig + 'static>(
             }
             checked_at = clock();
         }
+        if idle && speed_age_ms >= SPEED_REFRESH_MS {
+            decoder.reset_speed();
+            speed_age_ms = 0;
+        }
 
         let before = events.len();
         events.extend(decoder.push(&block.samples));
         let block_ms = block.samples.len() as u64 * 1000 / sample_rate;
+        speed_age_ms += block_ms;
         // The silence before the words just decoded: short if they follow the last
         // ones at the sender's rhythm.
         let gap = max_idle;
@@ -464,7 +481,8 @@ pub fn run_with_clock<R: Rig + 'static>(
                         if let Err(e) = station.start_window() {
                             log::error!("tune before the reply failed: {e}");
                         }
-                        tuned_at = Some(clock());
+                        // A tune that never started is tried again before the next.
+                        tuned_at = station.tuner_ran().then(clock);
                     }
                     log::info!("sending: {}", t.text());
                     // Sets the radio up and checks it before keying.
@@ -480,6 +498,7 @@ pub fn run_with_clock<R: Rig + 'static>(
                     // follows at once.
                     guard.ended(Instant::now(), recovery);
                     decoder.reset_levels();
+                    speed_age_ms = 0;
                 }
             }
         }
@@ -610,8 +629,12 @@ mod tests {
         vec![0.0; 8 * n as usize]
     }
 
-    fn noisy(mut audio: Vec<f32>, k: &Keyer, snr_db: f32) -> Vec<f32> {
-        Noise::new(5).add(
+    fn noisy(audio: Vec<f32>, k: &Keyer, snr_db: f32) -> Vec<f32> {
+        noisy_with(audio, k, snr_db, 5)
+    }
+
+    fn noisy_with(mut audio: Vec<f32>, k: &Keyer, snr_db: f32, seed: u64) -> Vec<f32> {
+        Noise::new(seed).add(
             &mut audio,
             Noise::sigma_for_snr(k.amplitude, snr_db, 8000, 2500.0),
         );
@@ -684,6 +707,28 @@ mod tests {
         let h = run_node(noisy(audio, &k, 15.0));
         assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
         assert_eq!(h.keyed, "R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K");
+    }
+
+    #[test]
+    fn a_call_after_minutes_of_band_noise_is_heard() {
+        // Noise that, heard for five minutes, would teach the decoder a speed no
+        // one is sending at, so the call's first words split wrongly.
+        let mut k = Keyer::new(8000, 610.0, 18.0);
+        k.jitter = 0.03;
+        for seed in [2u64, 4, 5] {
+            let mut audio = ms(302_000);
+            audio.extend(k.render(&format!("W5XXX 42 {} TX MOM HI K", code(42)), 0.0));
+            audio.extend(ms(cw::duration_ms("R 42 TX MOM HI ? DE N0DE K", 18) + 6000));
+            audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+            audio.extend(ms(8000));
+            let h = run_node(noisy_with(audio, &k, 15.0, seed * 7919));
+            assert_eq!(
+                h.sent,
+                [("MOM".into(), "HI".into())],
+                "{seed}: {}",
+                h.rx_log
+            );
+        }
     }
 
     #[test]

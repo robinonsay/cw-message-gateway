@@ -347,5 +347,10 @@ after a restart, until that file is removed. Check the radio first.
 was stopped, the radio may finish the text already handed to its keyer (at most 30
 characters) before the stop hook forces receive.
 
+**Using the radio yourself.** Stop the node first, and start it again
+(`sudo systemctl start hfnode`) when you are done. While it runs, it puts its
+frequency, mode, power and keyer settings back every `schedule.check_minutes` (10)
+and before every transmission.
+
 **Updating.** `sudo systemctl stop hfnode`, install the new binary, `sudo systemctl
 start hfnode`. `last_seq` and the inbox are kept in `/var/lib/hfnode`.

@@ -171,11 +171,12 @@ None of these affects the bench steps; all need deciding before stage `done`:
   segment.
 - **Tuning carrier.** Listening all the time (the default since 2026-10-04), the
   node tunes at start-up and then only just before a reply once the last tune is
-  older than `schedule.retune_minutes` (60): right after an authenticated call,
-  with the frequency in use, and followed at once by a reply that identifies the
-  station. With windows it still tunes at the top of every window. Either way it is
-  an unidentified carrier of up to 15 s, sent without first checking the frequency
-  is clear.
+  older than `schedule.retune_minutes` (60): when it has just heard a call it will
+  answer, so the frequency is in use, and normally followed at once by the reply,
+  which identifies the station. A tune the tuner cannot match is followed by
+  nothing, since that locks the reply out. With windows it still tunes at the top
+  of every window. Either way it is an unidentified carrier of up to 15 s, sent
+  without first checking the frequency is clear.
 - **`hfnode radio rx` failing in the service's stop hook** does not write the
   inhibit file.
 - **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated
@@ -208,7 +209,8 @@ commands as a window start (`1C 00` read; `06`, `05`, `14 0A`, `14 0C`, `14 0F`,
   reads the configured frequency. If any of that fails nothing is keyed and receive
   is forced; the next transmission checks again. Before this, split or ∂TX switched
   on at the front panel after a window started would have been keyed through: the
-  self-test scenario `front-panel-split` fails without the check.
+  self-test scenarios `front-panel-split` and `front-panel-delta-tx` fail without
+  the check.
 - **While listening and hearing nothing**, every `schedule.check_minutes` (10,
   1-1440), the node does the same set-up and checks without tuning, so a dial or
   mode change at the front panel does not leave it deaf (`front-panel-idle`). If a
@@ -217,6 +219,13 @@ commands as a window start (`1C 00` read; `06`, `05`, `14 0A`, `14 0C`, `14 0F`,
 - **Tuning** happens at start-up, at each window start, and before a reply once
   the last tune is older than `schedule.retune_minutes` (60, 10-1440). A lockout
   lasts until that tune (`fault-high-swr-retune`, `retune`), which sets the radio up
-  and checks it first, as a window start does.
+  and checks it first, as a window start does. A tune that stopped before starting
+  the tuner (inhibited, or the radio could not be set up) does not count: the node
+  tries again before its next reply.
+- **Decoder.** Listening for hours, the decoder learned a wrong speed from band
+  noise, which garbled the next caller's first words; it now goes back to its
+  starting speed after a quiet minute (`retune`, `fault-high-swr-retune` and
+  `other-stations` fail without this). Not a CI-V change, noted here because it
+  came with listening all the time.
 - **Unchanged:** the SWR and `1C 00` cross-check on every transmission, the
   watchdog, the persisted inhibit, the bring-up stages and the 10 W bench cap.

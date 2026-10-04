@@ -33,6 +33,7 @@ bandwidth_hz = 150
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
 
 [schedule]
+# While it runs the node owns the radio: stop it before using the radio yourself.
 always = true                     # listen all the time
 check_minutes = 10                # while idle, set the radio up again this often (no transmit)
 retune_minutes = 60               # tune before a reply if the last tune is older than this

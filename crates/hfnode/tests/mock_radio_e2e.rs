@@ -85,6 +85,7 @@ const NAMES: &[&str] = &[
     "retune",
     "fault-high-swr-retune",
     "front-panel-split",
+    "front-panel-delta-tx",
     "front-panel-idle",
     "other-stations",
 ];
@@ -170,6 +171,7 @@ scenario_tests! {
     retune => "retune",
     fault_high_swr_retune => "fault-high-swr-retune",
     front_panel_split => "front-panel-split",
+    front_panel_delta_tx => "front-panel-delta-tx",
     front_panel_idle => "front-panel-idle",
     other_stations => "other-stations",
 }

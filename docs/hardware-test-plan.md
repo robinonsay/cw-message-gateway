@@ -138,8 +138,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 
 After option 1, also stop `hfnode` (option 2 or 3) **before** switching the radio
 back on. A running node does not take the radio being off as a reason to stop: if
-it was off at the start of a listening window the node inhibits transmitting, but
-if it comes back within the same window the node answers the next call it hears.
+it finds the radio off (at start-up, a window start, a tune or its idle check every
+`schedule.check_minutes`) it inhibits transmitting, but if the radio comes back on
+before then, the node answers the next call it hears.
 
 ## Before you start
 
@@ -228,8 +229,9 @@ key, the radio's sidetone in the receive audio, USB echo off, CI-V Transceive fr
 from someone at the radio, a load the tuner matches and one beyond its range (the
 window stays silent), listening windows (a high-SWR lockout cleared by the next
 window's tune), listening all the time (a re-tune before a reply once the last tune
-is old, a high-SWR lockout cleared by it, split switched on at the radio, the dial
-and mode changed while the node is idle, band noise and other stations calling),
+is old, a high-SWR lockout cleared by it, split or ∂TX switched on at the radio, the
+dial and mode changed while the node is idle, band noise and other stations calling,
+and a call after a long quiet spell answered the first time),
 and radio faults: SWR rising after the tune, power fold-back, stuck
 transmit or key (also after the last over), a transmitter that will not unkey, one
 that only the watchdog gets off transmit, refused status commands, NG and lost or
@@ -768,9 +770,10 @@ Then, with the node still running and idle, check the idle radio check without
 transmitting: at the radio turn the dial off the node's frequency and select USB.
 **Pass:** within about a minute (`check_minutes = 1`) the display is back on the
 node's frequency in CW, and nothing transmitted. Then switch SPLIT on and send an
-open: **Pass:** nothing is keyed and the node logs `radio not ready to transmit`.
-Switch SPLIT off, repeat the same open, and expect the read-back. Set
-`check_minutes` back to 10 afterwards.
+open: **Pass:** nothing is keyed and the node logs `radio not ready to transmit`
+(or, if a re-tune was due, `could not set the radio up` and no tune). Switch SPLIT
+off, repeat the same open, and expect the read-back (after a tune in the second
+case). Set `check_minutes` back to 10 afterwards.
 
 ## Step 12: on the air, low power, with a second station
 
@@ -831,7 +834,7 @@ Work through:
 9. Leave the node idle for longer than `schedule.retune_minutes` (set it to 10 for
    this session), then open a transaction: expect a few seconds of tuner carrier
    just before the read-back, a new `tune` line in `health.csv`, and no tune before
-   the `SENT` that follows.
+   the `SENT` that follows. Set `retune_minutes` back to 60 afterwards.
 
 **Look for:** in the log, `heard:`, `opened transaction`, `committed transaction`,
 `sending:`, and `no reply:` with a reason for each silent case. In `state_dir`:

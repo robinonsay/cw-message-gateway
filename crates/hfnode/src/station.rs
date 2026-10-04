@@ -105,8 +105,9 @@ impl StationConfig {
 
 #[derive(Debug, PartialEq)]
 pub enum TxError {
-    /// SWR was too high, or the tuner could not match, since the last tune;
-    /// transmitting is suspended until the next one.
+    /// Since the last tune, SWR was too high, the tuner could not match, or the
+    /// radio could not be set up for the tune; transmitting is suspended until the
+    /// next one.
     SwrLockout,
     /// SWR was too high just now; the transmission was cut off.
     HighSwr(f32),
@@ -127,7 +128,11 @@ pub enum TxError {
 impl std::fmt::Display for TxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SwrLockout => write!(f, "transmit locked out after high SWR"),
+            Self::SwrLockout => write!(
+                f,
+                "transmit locked out until the node next tunes (high SWR, no tuner \
+                 match, or the radio could not be set up)"
+            ),
             Self::HighSwr(s) => write!(f, "SWR {s:.1} above limit"),
             Self::NoOutput => write!(f, "no output while keying: SWR not measured"),
             Self::Stuck => write!(f, "transmitter did not return to receive"),
@@ -264,6 +269,8 @@ pub struct Station<R: Rig + 'static> {
     tx_inhibit: Arc<Inhibit>,
     stop: Arc<AtomicBool>,
     swr_lockout: bool,
+    /// The last [`Station::start_window`] got as far as starting the tuner.
+    tuner_ran: bool,
     /// SWR has been measured on the current transmission.
     swr_checked: bool,
     health_log: Option<PathBuf>,
@@ -284,6 +291,7 @@ impl<R: Rig + 'static> Station<R> {
             tx_inhibit: Arc::new(Inhibit::new(inhibit_file)),
             stop: Arc::new(AtomicBool::new(false)),
             swr_lockout: false,
+            tuner_ran: false,
             swr_checked: false,
             health_log,
         };
@@ -406,9 +414,10 @@ impl<R: Rig + 'static> Station<R> {
     /// Set the radio up again and check it, as at a window start but without the
     /// tune: while the node listens for hours, the front panel, another program or a
     /// power cycle may change it, and leave the node deaf on another frequency or
-    /// mode. Transmits nothing. If it fails, receive is forced; transmitting is not
-    /// locked out, since every transmission sets the radio up and checks it again
-    /// first.
+    /// mode. Transmits nothing. If it fails, receive is forced, and transmitting is
+    /// inhibited if receive cannot be confirmed, as anywhere else; otherwise
+    /// transmitting is not locked out, since every transmission sets the radio up
+    /// and checks it again first.
     pub fn check(&self) -> civ::Result<()> {
         if let Err(e) = self.prepare() {
             self.health("check", "failed");
@@ -426,6 +435,7 @@ impl<R: Rig + 'static> Station<R> {
     /// until the next call if the radio could not be set up or the tuner could not
     /// match.
     pub fn start_window(&mut self) -> civ::Result<()> {
+        self.tuner_ran = false;
         if self.tx_inhibited() {
             // Tuning transmits.
             return Err(RigError::Protocol(TxError::Inhibited.to_string()));
@@ -442,6 +452,7 @@ impl<R: Rig + 'static> Station<R> {
             return Err(e);
         }
         let t0 = Instant::now();
+        self.tuner_ran = true;
         if let Err(e) = self.tune(t0) {
             // The radio may have taken 1C 01 02 even if its reply was lost, or still
             // be tuning: make sure it is back on receive before going on.
@@ -458,6 +469,13 @@ impl<R: Rig + 'static> Station<R> {
         }
         self.health("tune", &format!("{}ms", t0.elapsed().as_millis()));
         Ok(())
+    }
+
+    /// Whether the last [`Station::start_window`] started the tuner, whatever came
+    /// of it; one that stopped before (inhibited, or the radio could not be set up)
+    /// did not, and is worth trying again before the next reply.
+    pub fn tuner_ran(&self) -> bool {
+        self.tuner_ran
     }
 
     /// Start a tuner cycle and wait for it to end, for at most `tune_timeout`.
@@ -969,6 +987,54 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_keyed_while_the_radio_would_transmit_elsewhere() {
+        let rig = Switchable {
+            on: true,
+            rig: fast_rig(),
+            tx_hz: None,
+        };
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        // Split and ∂TX read off, but the transmit frequency (1C 03) does not match.
+        st.rig().lock().unwrap().tx_hz = Some(7_031_000);
+        assert!(st.check().is_err());
+        assert!(matches!(
+            st.transmit(&tx(&["TEST"])),
+            Err(TxError::NotReady(_))
+        ));
+        assert!(
+            st.rig().lock().unwrap().rig.sent.is_empty(),
+            "nothing keyed"
+        );
+        st.rig().lock().unwrap().tx_hz = None;
+        st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
+    fn a_tune_that_never_started_is_not_counted() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        assert!(st.tuner_ran());
+        // The radio cannot be set up for the tune: no tune, and locked out until
+        // one runs.
+        st.rig().lock().unwrap().split_tx_hz = Some(7_040_000);
+        assert!(st.start_window().is_err());
+        assert!(!st.tuner_ran());
+        st.rig().lock().unwrap().split_tx_hz = None;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        st.start_window().unwrap();
+        assert!(st.tuner_ran());
+        st.transmit(&tx(&["TEST"])).unwrap();
+        // A tuner that could not match ran all the same.
+        st.rig().lock().unwrap().tuner_bypassed = true;
+        assert!(st.start_window().is_err());
+        assert!(st.tuner_ran());
+        assert_eq!(st.rig().lock().unwrap().tunes, 3);
+    }
+
+    #[test]
     fn a_check_sets_the_radio_up_again_without_transmitting() {
         let mut st = Station::new(fast_rig(), cfg(), None);
         st.configure().unwrap();
@@ -1004,6 +1070,7 @@ mod tests {
         let rig = Switchable {
             on: true,
             rig: fast_rig(),
+            tx_hz: None,
         };
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
@@ -1255,10 +1322,12 @@ mod tests {
     }
 
     /// A radio switched off: no command gets a reply. Wraps a SimRig so it can be
-    /// switched back on.
+    /// switched back on. With `tx_hz`, its transmit frequency (1C 03) reads that
+    /// although split and ∂TX are off.
     struct Switchable {
         on: bool,
         rig: SimRig,
+        tx_hz: Option<u64>,
     }
 
     impl Switchable {
@@ -1319,6 +1388,14 @@ mod tests {
         fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
             self.rig()?.set_transmit(tx)
         }
+        fn transmit_frequency(&mut self) -> civ::Result<u64> {
+            let tx_hz = self.tx_hz;
+            let rig = self.rig()?;
+            tx_hz.map_or_else(|| rig.transmit_frequency(), Ok)
+        }
+        fn split_or_delta_tx(&mut self) -> civ::Result<bool> {
+            self.rig()?.split_or_delta_tx()
+        }
     }
 
     #[test]
@@ -1326,6 +1403,7 @@ mod tests {
         let rig = Switchable {
             on: true,
             rig: fast_rig(),
+            tx_hz: None,
         };
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
