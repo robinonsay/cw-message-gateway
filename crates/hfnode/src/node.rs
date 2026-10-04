@@ -4,6 +4,7 @@ use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
 use crate::gateway::{self, filter, LiveServices};
 use crate::inbox::Inbox;
+use crate::places::LastPlaces;
 use crate::session::{Outcome, Services, Session, SessionConfig};
 use crate::station::Station;
 use anyhow::{Context, Result};
@@ -70,6 +71,7 @@ pub fn build_session_with(cfg: &Config, sc: SessionConfig) -> Result<Session> {
         },
         Verifier::new(book, last),
         store,
+        LastPlaces::open(cfg.state_dir.join("wx_last.json")),
     ))
 }
 

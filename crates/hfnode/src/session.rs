@@ -24,6 +24,7 @@
 //! it can be driven by typed text in tests and in `hfnode sim`.
 
 use crate::inbox::Message;
+use crate::places::LastPlaces;
 use auth::{SeqStore, Verifier};
 use protocol::{
     chunk, chunk_count, parse, sanitize, Chunk, Command, FieldMsg, Place, Reply, Vocabulary,
@@ -116,6 +117,8 @@ const CUT_MARKER: &str = "TRUNCATED";
 
 #[derive(Debug, Clone)]
 struct Pending {
+    /// The field callsign that opened it.
+    call: String,
     open_seq: u64,
     open_code: String,
     cmd: Command,
@@ -141,18 +144,27 @@ pub struct Session {
     vocab: Vocabulary,
     verifier: Verifier,
     store: SeqStore,
+    /// Where each field callsign last asked for the weather, for `WX` alone.
+    places: LastPlaces,
     pending: Option<Pending>,
     last_commit: Option<LastCommit>,
     last_tx: Option<(Instant, Transmission, Vec<Chunk>)>,
 }
 
 impl Session {
-    pub fn new(cfg: SessionConfig, vocab: Vocabulary, verifier: Verifier, store: SeqStore) -> Self {
+    pub fn new(
+        cfg: SessionConfig,
+        vocab: Vocabulary,
+        verifier: Verifier,
+        store: SeqStore,
+        places: LastPlaces,
+    ) -> Self {
         Self {
             cfg,
             vocab,
             verifier,
             store,
+            places,
             pending: None,
             last_commit: None,
             last_tx: None,
@@ -267,7 +279,7 @@ impl Session {
                 count: svc.ready_messages().len(),
             },
             Command::Wx { place } => {
-                let (preset, grid) = self.wx_place(place.as_ref());
+                let (preset, grid) = self.wx_place(call, place.as_ref());
                 wx_grid = grid.clone();
                 Reply::ReadBackWx { seq, preset, grid }
             }
@@ -275,6 +287,7 @@ impl Session {
         let read_back = Transmission::single(reply.render(&self.cfg.node_call));
         log::info!("opened transaction {seq} from {call}: {cmd:?}");
         self.pending = Some(Pending {
+            call: call.to_string(),
             open_seq: seq,
             open_code: code.to_string(),
             cmd,
@@ -353,7 +366,14 @@ impl Session {
                     (t, chunks)
                 }
             }
-            Command::Wx { .. } => {
+            Command::Wx { place } => {
+                // The operator confirmed the place they named: `WX` alone means it
+                // from now on. Only a convenience, so a failed save is just logged.
+                if let (Some(_), Some(grid)) = (&place, &p.wx_grid) {
+                    if let Err(e) = self.places.set(&p.call, grid) {
+                        log::warn!("cannot remember {grid} for {}: {e:#}", p.call);
+                    }
+                }
                 let result = match &p.wx_grid {
                     Some(grid) => svc.weather(grid),
                     None => Err(WxError::Unavailable("no grid square to forecast".into())),
@@ -390,9 +410,11 @@ impl Session {
         Outcome::Transmit(transmission)
     }
 
-    /// The preset number (if one was sent) and the grid square a `WX` is for. The
-    /// read-back names both, so the operator hears which place the forecast is for.
-    fn wx_place(&self, place: Option<&Place>) -> (Option<u32>, Option<String>) {
+    /// The preset number (if one was sent) and the grid square a `WX` from `call`
+    /// is for. `WX` alone is the last place this callsign confirmed, or the default
+    /// until there is one. The read-back names the grid square (and the preset), so
+    /// the operator hears which place the forecast is for.
+    fn wx_place(&self, call: &str, place: Option<&Place>) -> (Option<u32>, Option<String>) {
         match place {
             Some(Place::Grid(g)) => (None, Some(g.clone())),
             Some(Place::Preset(n)) => (
@@ -403,7 +425,13 @@ impl Session {
                     .find(|(p, _)| p == n)
                     .map(|(_, g)| g.clone()),
             ),
-            None => (None, self.cfg.wx_default_grid.clone()),
+            None => (
+                None,
+                self.places
+                    .get(call)
+                    .map(str::to_string)
+                    .or_else(|| self.cfg.wx_default_grid.clone()),
+            ),
         }
     }
 
@@ -599,6 +627,7 @@ mod tests {
                 },
                 Verifier::new(book.clone(), store.load().unwrap()),
                 store,
+                LastPlaces::open(dir.path().join("wx_last.json")),
             );
             Self {
                 session,
@@ -611,7 +640,7 @@ mod tests {
 
         fn send(&mut self, secs: u64, text: &str) -> Outcome {
             let mut text = text.to_string();
-            for n in 42..=47 {
+            for n in 42..=55 {
                 text = text.replace(&format!("{{{n}}}"), &self.book.code(n));
             }
             self.session
@@ -818,6 +847,47 @@ mod tests {
         );
         tx(&r.send(60, "OK 47 {47} K"));
         assert_eq!(r.svc.weather_calls, ["EM10", "DL89ME", "DL89IG"]);
+    }
+
+    #[test]
+    fn weather_alone_is_the_last_place_confirmed() {
+        let mut r = Rig::new();
+        // Nothing sent yet: the configured grid.
+        assert_eq!(
+            tx(&r.send(0, "W5XXX 42 {42} WX K")),
+            "R 42 WX EM10 ? DE N0DE K"
+        );
+        tx(&r.send(10, "OK 43 {43} K"));
+        // A grid that is read back and refused with NO is not remembered.
+        tx(&r.send(20, "W5XXX 44 {44} WX DL88 K"));
+        tx(&r.send(30, "NO K"));
+        assert_eq!(
+            tx(&r.send(40, "W5XXX 46 {46} WX K")),
+            "R 46 WX EM10 ? DE N0DE K"
+        );
+        tx(&r.send(50, "NO K"));
+        // A confirmed preset is.
+        tx(&r.send(60, "W5XXX 48 {48} WX 2 K"));
+        tx(&r.send(70, "OK 49 {49} K"));
+        assert_eq!(
+            tx(&r.send(80, "W5XXX 50 {50} WX K")),
+            "R 50 WX DL89ME ? DE N0DE K"
+        );
+        assert!(tx(&r.send(90, "OK 51 {51} K")).starts_with("WX DL89ME TODAY"));
+        // So is a confirmed grid, even when its forecast then fails.
+        r.svc.weather_error = Some(WxError::NoCoverage);
+        tx(&r.send(100, "W5XXX 52 {52} WX IO91 K"));
+        tx(&r.send(110, "OK 53 {53} K"));
+        r.svc.weather_error = None;
+        assert_eq!(
+            tx(&r.send(120, "W5XXX 54 {54} WX K")),
+            "R 54 WX IO91 ? DE N0DE K"
+        );
+        assert_eq!(r.svc.weather_calls, ["EM10", "DL89ME", "DL89ME", "IO91"]);
+
+        // It survives a restart.
+        let places = LastPlaces::open(r._dir.path().join("wx_last.json"));
+        assert_eq!(places.get("W5XXX"), Some("IO91"));
     }
 
     #[test]

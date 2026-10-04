@@ -182,15 +182,15 @@ read-back, answers `OK`, `NO` or `AGN`, and repeats an open or an `OK` that got 
 answer. While the mock radio is on transmit the node hears nothing of the operator.
 Scenarios cover the grammar (TX, RX up to the five-message cap and truncation, WX
 with 4- and 6-character grids, a grid sent as two words, known and unknown presets,
-`FAIL` replies including `WX NO COVERAGE`, NO, AGN, codes in two groups, an
-open on fresh lines replacing a pending one, the 10-minute pending and `AGN`
-windows), lost read-backs and results, replayed and wrong codes, garbled callsigns,
-10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V
-Transceive frames from someone at the radio, a load the tuner matches and one beyond
-its range (the window stays silent), listening windows (a high-SWR lockout cleared
-by the next window's tune), and radio faults (SWR rising after the tune, fold-back,
-stuck transmit or key, also on the last over, a transmitter
-that will not unkey, one that only the watchdog gets off transmit, refused status
+WX alone reusing the last place, `FAIL` replies including `WX NO COVERAGE`, NO, AGN,
+codes in two groups, an open on fresh lines replacing a pending one, the 10-minute
+pending and `AGN` windows), lost read-backs and results, replayed and wrong codes,
+garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB
+echo off, CI-V Transceive frames from someone at the radio, a load the tuner matches
+and one beyond its range (the window stays silent), listening windows (a high-SWR
+lockout cleared by the next window's tune), and radio faults (SWR rising after the
+tune, fold-back, stuck transmit or key, also on the last over, a transmitter that
+will not unkey, one that only the watchdog gets off transmit, refused status
 commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner
 that never finishes). Each one checks the exact text keyed, what the gateway did
 (messages sent, inbox marked read only once keyed), `last_seq`, that the node sent
@@ -199,8 +199,8 @@ nothing the manual does not allow (any unknown, malformed or disallowed CI-V fra
 radio's settings as the node left them (frequency, CW, power, keyer speed, break-in
 and its delay), that the node forced receive after a fault and never otherwise, and
 safety bounds: key-down and transmit lengths, no transmit past the break-in delay
-plus the 3 s stuck margin, duty cycle, the radio on receive when the node stops,
-and the tuner cycles expected.
+plus the 3 s stuck margin, duty cycle, the radio on receive when the node stops, and
+the tuner cycles expected.
 
 The mock answers every command the driver uses with the bytes Section 19 of the
 manual gives, keys `17` text at the set key speed (time-scaled), models semi

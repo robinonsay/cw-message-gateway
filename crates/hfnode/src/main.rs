@@ -308,13 +308,14 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
     let presets = preset_lines(cfg);
     if !presets.is_empty() {
         println!();
-        println!(
-            "Weather presets (WX <number>; WX alone is {}):",
-            default_wx(cfg)
-        );
+        println!("Weather presets: send WX <number>.");
         for line in presets {
             println!("{line}");
         }
+        println!(
+            "WX alone: the last place you confirmed, {} until then.",
+            default_wx(cfg)
+        );
     }
     Ok(())
 }

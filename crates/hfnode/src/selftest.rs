@@ -1879,6 +1879,37 @@ pub fn scenarios() -> Vec<Scenario> {
     ));
     v.push({
         let mut s = base(
+            "wx-last",
+            "WX alone after a preset: the last place confirmed, named in the read-back",
+        );
+        let rb1 = de("R 42 WX 2 DL89ME ?");
+        let rb2 = de("R 44 WX DL89ME ?");
+        let result = de(&format!("WX {} = A", FakeServices::forecast("DL89ME")));
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} WX 2 K"),
+                read_back: rb1.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(result.clone()),
+            },
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} WX K"),
+                read_back: rb2.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(result.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb1, &result, &rb2, &result]);
+        s.expect.weather = vec!["DL89ME".into(), "DL89ME".into()];
+        s.expect.last_seq = 45;
+        s
+    });
+    v.push({
+        let mut s = base(
             "wx-unknown-preset",
             "WX for a preset the node does not have: silence, then the same line works",
         );

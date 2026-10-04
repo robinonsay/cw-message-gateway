@@ -79,7 +79,7 @@ silence, so do not pause longer than that in the middle of one.
 | `W5XXX 44 <code> RX K` | Open: read new messages | `R 44 3 MSGS ? DE N0CALL K` (`1 MSG`, `0 MSGS`) |
 | `W5XXX 46 <code> WX DL89IG K` | Open: forecast for a grid square (4 or 6 characters) | `R 46 WX DL89IG ? DE N0CALL K` |
 | `W5XXX 46 <code> WX 1 K` | Open: forecast for preset 1 | `R 46 WX 1 DL89IG ? DE N0CALL K` |
-| `W5XXX 46 <code> WX K` | Open: forecast for the node's default grid square | `R 46 WX DL89 ? DE N0CALL K` |
+| `W5XXX 46 <code> WX K` | Open: forecast for the last place you confirmed (at first the node's default) | `R 46 WX DL89IG ? DE N0CALL K` |
 | `OK 43 WBNFHJGC K` | Commit the pending transaction | depends on the request, see below |
 | `NO K` | Abort the pending transaction | `R NO DE N0CALL K` |
 | `AGN K` | Repeat the node's last transmission | the last transmission again |
@@ -154,8 +154,11 @@ Name the place you want the forecast for after `WX`:
 - **A preset**, such as `WX 1`. Presets are the node's numbered places
   (`[[weather.presets]]` in its config), printed under the code table. Send the
   digits in full, not as cut numbers.
-- **Nothing**: `WX` alone gives the forecast for the node's default grid square
-  (`weather.default_grid`).
+- **Nothing**: `WX` alone gives the forecast for the last place you asked for and
+  confirmed with `OK` (a grid square or a preset), which the node keeps across
+  restarts. Until you have done that once, it is the node's default grid square
+  (`weather.default_grid`). So once you have sent `WX DL89IG` from camp, a plain
+  `WX` gets camp's weather; after you move, name the new place once.
 
 **Check the read-back.** It always names the grid square the forecast will be for,
 after the preset number if you sent one. If it is not the place you meant, send

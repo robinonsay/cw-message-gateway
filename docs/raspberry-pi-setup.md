@@ -249,8 +249,9 @@ At minimum set `station.node_call`, `station.field_calls`, `station.frequency_hz
 checked.
 
 Keep `state_dir = "/var/lib/hfnode"` and `key_file = "/etc/hfnode/node.key"` to match
-the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log` and
-`health.csv` in `state_dir`.
+the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log`,
+`health.csv` and `wx_last.json` (the last weather place each field callsign
+confirmed, used for `WX` alone) in `state_dir`.
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
 
