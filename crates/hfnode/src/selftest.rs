@@ -36,7 +36,7 @@ use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
 use crate::session::{Services, WxError};
-use crate::station::{Station, StationConfig};
+use crate::station::{InhibitNotice, Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
 use civ::ic7300::Ic7300;
@@ -155,6 +155,9 @@ pub struct NodeSetup {
     /// Listening windows as (`every_minutes`, `window_minutes`), from the top of
     /// the hour at radio time zero; `None` listens all the time.
     pub schedule: Option<(u32, u32)>,
+    /// The node starts with [`crate::station::INHIBIT_FILE`] already in its state
+    /// directory, left by a fault before a restart.
+    pub inhibited_at_start: bool,
 }
 
 impl Default for NodeSetup {
@@ -166,6 +169,7 @@ impl Default for NodeSetup {
             weather_error: None,
             inbox: Vec::new(),
             schedule: None,
+            inhibited_at_start: false,
         }
     }
 }
@@ -652,6 +656,9 @@ struct Air {
     restarts: u32,
     /// Transmissions in exchanges beyond the first open and the first `OK`.
     extra: u32,
+    /// The node tunes at the start of its first window (not if it starts with
+    /// transmitting inhibited): the operator waits for that before calling.
+    tune_at_start: bool,
 }
 
 impl Air {
@@ -1047,8 +1054,12 @@ impl Air {
     fn operate(&mut self, script: &[Step]) -> Vec<String> {
         let mut failures = Vec::new();
         // The node tunes at the start of its window and identifies; wait it out,
-        // as the operating guide says.
-        if let Err(e) = self.window_start(0) {
+        // as the operating guide says. A node that starts inhibited does neither.
+        let start = match self.tune_at_start {
+            true => self.window_start(0),
+            false => Ok(()),
+        };
+        if let Err(e) = start {
             return vec![e];
         }
         for (i, step) in script.iter().enumerate() {
@@ -1280,11 +1291,20 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         inner: Ic7300::with_port(radio.port(), cfg.station.civ_address),
         scale,
     };
+    if s.node.inhibited_at_start {
+        std::fs::write(
+            cfg.state_dir.join(crate::station::INHIBIT_FILE),
+            format!("{CLOCK_START} radio not confirmed on receive (no reply from radio)\n"),
+        )?;
+    }
     let station = Station::new(
         rig,
         station_config(&cfg, scale),
         Some(cfg.state_dir.join("health.csv")),
     );
+    // As `hfnode run` registers its email alerts.
+    let (alert_tx, alerts) = mpsc::channel();
+    station.notify_inhibit(alert_tx);
     station.configure().context("configuring the mock radio")?;
     let mut sc = node::session_config(&cfg);
     sc.pending_timeout = sc.pending_timeout.div_f32(scale);
@@ -1338,6 +1358,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         wrong_read_backs: 0,
         restarts: 0,
         extra: 0,
+        tune_at_start: !s.node.inhibited_at_start,
     };
     let failures = air.operate(&s.script);
     // Closing the audio ends node::run.
@@ -1393,6 +1414,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         .filter(|(_, body)| body[..] == [0x17, 0xFF])
         .count();
     drop(station);
+    let notices: Vec<_> = alerts.try_iter().collect();
     let r = radio.report();
     out.radio_time = r.now;
 
@@ -1475,6 +1497,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     ));
     out.checks
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
+    out.checks.push(alert_check(e, &s.node, &notices));
 
     let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
     // `<unix time>,<text>`.
@@ -1603,6 +1626,48 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
     } else {
         check("settings", false, format!("{}; {detail}", bad.join("; ")))
     }
+}
+
+/// The owner is told of an inhibit exactly once: when it latches, or at start-up
+/// if the node started inhibited; and never without one.
+fn alert_check(e: &Expect, node: &NodeSetup, notices: &[InhibitNotice]) -> Check {
+    let pass = match notices {
+        [] => !e.inhibited,
+        [n] => e.inhibited && n.from_file == node.inhibited_at_start && !n.reason.is_empty(),
+        _ => false,
+    };
+    let seen: Vec<String> = notices
+        .iter()
+        .map(|n| {
+            format!(
+                "{}: {}",
+                if n.from_file {
+                    "at start-up"
+                } else {
+                    "latched"
+                },
+                n.reason
+            )
+        })
+        .collect();
+    check(
+        "alert",
+        pass,
+        format!(
+            "{} inhibit notice(s){}, expected {}",
+            notices.len(),
+            if seen.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", seen.join("; "))
+            },
+            match (e.inhibited, node.inhibited_at_start) {
+                (false, _) => "none",
+                (true, false) => "one, when it latches",
+                (true, true) => "one, at start-up",
+            }
+        ),
+    )
 }
 
 /// Bounds that hold whatever the scenario: transmit runs, duty, receive at the end
@@ -2881,6 +2946,23 @@ pub fn scenarios() -> Vec<Scenario> {
         );
         s.expect.ids = 0;
         s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-inhibited-at-start",
+            "the node starts with tx-inhibited left by an earlier fault: it does not tune or key, \
+             and tells the owner once",
+        );
+        s.node.inhibited_at_start = true;
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HI K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s.expect.tunes = 0;
+        s.expect.ids = 0;
+        s.expect.inhibited = true;
         s
     });
     v

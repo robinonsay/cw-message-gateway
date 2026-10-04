@@ -89,6 +89,7 @@ const NAMES: &[&str] = &[
     "fault-civ-late-reply",
     "transceive",
     "fault-tune-hang",
+    "fault-inhibited-at-start",
 ];
 
 macro_rules! scenario_tests {
@@ -176,6 +177,7 @@ scenario_tests! {
     fault_civ_late_reply => "fault-civ-late-reply",
     transceive => "transceive",
     fault_tune_hang => "fault-tune-hang",
+    fault_inhibited_at_start => "fault-inhibited-at-start",
 }
 
 /// Every test vector decodes to what the manifest says: the clean ones to exactly

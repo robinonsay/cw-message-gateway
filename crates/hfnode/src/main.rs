@@ -9,7 +9,7 @@ use hfnode::gateway::OfflineServices;
 use hfnode::inbox::Inbox;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
-use hfnode::{audio, gateway, node, selftest};
+use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
         } => synth(&text, &out, wpm, pitch, snr, jitter),
         Cmd::Listen { config } => listen(&Config::load(&config)?),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
-        Cmd::Run { config } => run(&Config::load(&config)?),
+        Cmd::Run { config } => run(&config, &Config::load(&config)?),
         Cmd::Selftest {
             sweep: true,
             scale,
@@ -604,8 +604,17 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     Ok(())
 }
 
-fn run(cfg: &Config) -> Result<()> {
+fn run(config: &Path, cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
+    let alerts = alert::Alerts::start(cfg, config);
+    let result = run_node(cfg, &alerts);
+    // The station is gone: dropping it forced receive, which can still latch the
+    // inhibit. Let an alert already queued go out before the process exits.
+    alerts.finish(alert::EXIT_GRACE);
+    result
+}
+
+fn run_node(cfg: &Config, alerts: &alert::Alerts) -> Result<()> {
     let inbox = node::open_inbox(cfg)?;
     let mut session = node::build_session(cfg)?;
     let mut svc = node::live_services(cfg, inbox.clone())?;
@@ -616,6 +625,9 @@ fn run(cfg: &Config) -> Result<()> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
+    // Email the owner when transmitting is inhibited: now, if tx-inhibited was
+    // already there, or when it latches.
+    station.notify_inhibit(alerts.sender());
     station.configure()?;
     verify_setup(cfg, &station)?;
     let cap = audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?;

@@ -51,6 +51,11 @@ poll_secs = 300
 # in your mail server's Authentication-Results header. Name that server here (the
 # first word of its header) if it does not add the topmost one.
 # authserv_id = "mx.example.com"
+# Emailed once if the node stops transmitting after a radio fault (it writes
+# state_dir/tx-inhibited), and again at each start while that file is there. Use
+# an address you read often, not the node's own mailbox; a phone's email-to-SMS
+# address gets only the start of it. Leave it out to only log it.
+alert_to = "you@example.com"
 
 # Contacts the field operator can name in TX. For SMS use the carrier's
 # email-to-SMS address; replies from the phone come back by email.

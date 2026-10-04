@@ -14,7 +14,9 @@
 //!   transmitting is inhibited. With a state directory the inhibit is also written
 //!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd restarts the
 //!   service after a crash); only removing the file, once the radio has been
-//!   checked, does.
+//!   checked, does. Whoever registered with [`Station::notify_inhibit`] gets one
+//!   [`InhibitNotice`] when it latches, or at once if it already has (the file was
+//!   there at start-up): `hfnode run` emails it to the owner (see `alert`).
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
 //!   receive is confirmed. It backs up, and does not replace, the hardware transmit
@@ -46,6 +48,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -219,26 +222,69 @@ fn force_receive_or_inhibit<R: Rig>(rig: &Mutex<R>, inhibit: &Inhibit) -> Result
 /// inhibited; while it exists, nothing is transmitted, across restarts.
 pub const INHIBIT_FILE: &str = "tx-inhibited";
 
+/// Transmitting has been inhibited: why and when, for telling the owner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InhibitNotice {
+    /// Unix time it latched, as written in [`INHIBIT_FILE`]; `None` if a file left
+    /// from before does not start with one (for example, written by hand).
+    pub at: Option<u64>,
+    /// Why, as logged and written in the file.
+    pub reason: String,
+    /// It was already in [`INHIBIT_FILE`] when this process started.
+    pub from_file: bool,
+    /// The file that keeps it across restarts; `None` without a state directory, or
+    /// if it could not be written (a restart then clears the inhibit).
+    pub file: Option<PathBuf>,
+}
+
+/// `<unix time> <reason>`, as [`Inhibit::latch`] writes it, as (time, reason); any
+/// other text is all reason.
+fn parse_inhibit_file(text: &str) -> (Option<u64>, String) {
+    let text = text.trim();
+    match text.split_once(' ').map(|(t, why)| (t.parse::<u64>(), why)) {
+        Some((Ok(t), why)) => (Some(t), why.trim().to_string()),
+        _ => (None, text.to_string()),
+    }
+}
+
 /// The latch that stops all transmitting, in memory and in [`INHIBIT_FILE`].
 struct Inhibit {
     set: AtomicBool,
     file: Option<PathBuf>,
+    /// What latched it and who to tell, under one lock so that each registration
+    /// hears of it exactly once, whichever comes first.
+    notice: Mutex<Notify>,
+}
+
+struct Notify {
+    latched: Option<InhibitNotice>,
+    to: Option<Sender<InhibitNotice>>,
 }
 
 impl Inhibit {
     fn new(file: Option<PathBuf>) -> Self {
         let on_disk = file.as_deref().filter(|f| f.exists());
+        let mut latched = None;
         if let Some(f) = on_disk {
             let why = std::fs::read_to_string(f).unwrap_or_default();
             log::error!(
-                "transmit inhibited by {} ({}): remove it once the radio has been checked",
+                "transmit inhibited by {} ({}): once the radio has been checked, stop the node, \
+                 remove the file and start it again",
                 f.display(),
                 why.trim()
             );
+            let (at, reason) = parse_inhibit_file(&why);
+            latched = Some(InhibitNotice {
+                at,
+                reason,
+                from_file: true,
+                file: Some(f.to_path_buf()),
+            });
         }
         Self {
             set: AtomicBool::new(on_disk.is_some()),
             file,
+            notice: Mutex::new(Notify { latched, to: None }),
         }
     }
 
@@ -251,16 +297,42 @@ impl Inhibit {
             return;
         }
         log::error!("{why}: transmit inhibited");
+        let at = crate::gateway::unix_now();
+        let mut written = None;
         if let Some(f) = &self.file {
-            let line = format!("{} {why}\n", crate::gateway::unix_now());
-            match std::fs::write(f, line) {
-                Ok(()) => log::error!(
-                    "wrote {}: nothing is transmitted, also after a restart, until it is removed",
-                    f.display()
-                ),
+            match std::fs::write(f, format!("{at} {why}\n")) {
+                Ok(()) => {
+                    log::error!(
+                        "wrote {}: nothing is transmitted, also after a restart, until it is removed \
+                         with the node stopped",
+                        f.display()
+                    );
+                    written = Some(f.clone());
+                }
                 Err(e) => log::error!("cannot write {}: {e}", f.display()),
             }
         }
+        let notice = InhibitNotice {
+            at: Some(at),
+            reason: why.to_string(),
+            from_file: false,
+            file: written,
+        };
+        // Only a channel send here: this can run on the watchdog thread, with the
+        // radio locked.
+        let mut n = self.notice.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(to) = &n.to {
+            let _ = to.send(notice.clone());
+        }
+        n.latched = Some(notice);
+    }
+
+    fn notify(&self, to: Sender<InhibitNotice>) {
+        let mut n = self.notice.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(latched) = &n.latched {
+            let _ = to.send(latched.clone());
+        }
+        n.to = Some(to);
     }
 }
 
@@ -316,6 +388,14 @@ impl<R: Rig + 'static> Station<R> {
     /// Reads no CI-V.
     pub fn can_transmit(&self) -> bool {
         !self.tx_inhibited() && !self.swr_lockout
+    }
+
+    /// Send one [`InhibitNotice`] to `to` when transmitting is inhibited: now if it
+    /// already is (by [`INHIBIT_FILE`] at start-up, or an earlier latch), otherwise
+    /// when it latches, from whichever thread latches it. Registering again replaces
+    /// `to` (and tells the new one of an inhibit already latched).
+    pub fn notify_inhibit(&self, to: Sender<InhibitNotice>) {
+        self.tx_inhibit.notify(to);
     }
 
     fn spawn_watchdog(&self) {
@@ -744,6 +824,7 @@ impl<R: Rig + 'static> Drop for Station<R> {
 mod tests {
     use super::*;
     use civ::sim::SimRig;
+    use std::sync::mpsc;
 
     fn cfg() -> StationConfig {
         StationConfig {
@@ -1027,22 +1108,46 @@ mod tests {
     fn an_inhibit_survives_a_restart_until_its_file_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let health = dir.path().join("health.csv");
+        let file = dir.path().join(INHIBIT_FILE);
         let mut rig = Radio::new(fast_rig());
         rig.status_blind = true;
         let mut st = Station::new(rig, cfg(), Some(health.clone()));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
         st.configure().unwrap();
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        let latched = notices.try_recv().expect("notice when it latches");
+        assert!(
+            !latched.from_file && latched.reason.contains("1C 00"),
+            "{latched:?}"
+        );
+        assert_eq!(latched.file.as_deref(), Some(file.as_path()));
         drop(st);
-        let file = dir.path().join(INHIBIT_FILE);
+        assert!(notices.try_recv().is_err(), "once per latch");
         let why = std::fs::read_to_string(&file).unwrap();
         assert!(why.contains("1C 00"), "{why}");
+        assert_eq!(
+            why.split(' ').next(),
+            latched.at.map(|t| t.to_string()).as_deref()
+        );
         // A restart, with a radio that now behaves: still nothing is transmitted.
         let mut st = Station::new(fast_rig(), cfg(), Some(health.clone()));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        let at_start = notices.try_recv().expect("notice at start-up");
+        assert_eq!(
+            at_start,
+            InhibitNotice {
+                from_file: true,
+                ..latched
+            }
+        );
         st.configure().unwrap();
         assert!(st.tx_inhibited());
         assert!(!st.can_transmit());
         assert!(st.start_window().is_err());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(notices.try_recv().is_err(), "once per start");
         {
             let rig = st.rig();
             let r = rig.lock().unwrap();
@@ -1052,10 +1157,77 @@ mod tests {
         drop(st);
         std::fs::remove_file(&file).unwrap();
         let mut st = Station::new(fast_rig(), cfg(), Some(health));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
         st.configure().unwrap();
         assert!(!st.tx_inhibited());
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
+        drop(st);
+        assert!(notices.try_recv().is_err(), "no inhibit, no notice");
+    }
+
+    #[test]
+    fn a_notice_registered_after_the_latch_still_comes_once() {
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        let n = notices.try_recv().unwrap();
+        assert!(!n.from_file && n.at.is_some() && n.file.is_none(), "{n:?}");
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[test]
+    fn lockouts_and_recovered_faults_send_no_notice() {
+        let mut rig = Radio::new(fast_rig());
+        rig.tune_reply_lost = true;
+        let mut st = Station::new(rig, cfg(), None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        st.configure().unwrap();
+        // A tuner error, high SWR and a stuck key: receive is confirmed each time.
+        assert!(st.start_window().is_err());
+        st.rig().lock().unwrap().sim.swr = 3.5;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.tune_reply_lost = false;
+            r.sim.swr = 1.2;
+            r.sim.stuck_key = true;
+        }
+        st.start_window().unwrap();
+        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Stuck));
+        assert!(!st.tx_inhibited());
+        drop(st);
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[test]
+    fn inhibit_file_is_read_as_time_and_reason() {
+        assert_eq!(
+            parse_inhibit_file("1791120363 radio not confirmed on receive (no reply from radio)\n"),
+            (
+                Some(1_791_120_363),
+                "radio not confirmed on receive (no reply from radio)".to_string()
+            )
+        );
+        // Written by hand, or damaged.
+        assert_eq!(
+            parse_inhibit_file("checking the radio\n"),
+            (None, "checking the radio".into())
+        );
+        assert_eq!(
+            parse_inhibit_file("1791120363"),
+            (None, "1791120363".into())
+        );
+        assert_eq!(parse_inhibit_file(""), (None, String::new()));
     }
 
     /// A [`SimRig`] with two things a real radio may do: fold its output back to a
@@ -1339,15 +1511,23 @@ mod tests {
             rig: fast_rig(),
         };
         let mut st = Station::new(rig, cfg(), None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
         st.configure().unwrap();
         st.start_window().unwrap();
         st.rig().lock().unwrap().on = false;
         assert!(st.start_window().is_err());
         assert!(st.tx_inhibited());
+        let n = notices.try_recv().unwrap();
+        assert_eq!(
+            n.reason,
+            "radio not confirmed on receive (no reply from radio)"
+        );
         // Switched back on, it still keys nothing and does not tune.
         st.rig().lock().unwrap().on = true;
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
         assert!(st.start_window().is_err());
+        assert!(notices.try_recv().is_err(), "once per latch");
         let rig = st.rig();
         let r = rig.lock().unwrap();
         assert_eq!((r.rig.tunes, r.rig.sent.len()), (1, 0));
@@ -1356,12 +1536,18 @@ mod tests {
     #[test]
     fn unconfirmed_receive_inhibits_transmit() {
         let mut st = Station::new(fast_rig(), cfg(), None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
         st.configure().unwrap();
         // Stuck on transmit before anything is keyed: nothing is sent, and forcing
         // receive fails.
         st.rig().lock().unwrap().tx_jammed = true;
         assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
         assert!(st.tx_inhibited());
+        assert_eq!(
+            notices.try_recv().unwrap().reason,
+            "radio not confirmed on receive (unexpected reply: radio still reports transmit)"
+        );
         assert!(
             st.keying_since.lock().unwrap().is_some(),
             "watchdog retries"
@@ -1381,8 +1567,13 @@ mod tests {
         let mut c = cfg();
         c.max_key = Duration::from_millis(1);
         let st = Station::new(fast_rig(), c, None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
         st.rig().lock().unwrap().tx_jammed = true;
         *st.keying_since.lock().unwrap() = Some(Instant::now());
+        // Latched on the watchdog's thread.
+        let n = notices.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(n.reason.contains("still reports transmit"), "{n:?}");
         thread::sleep(Duration::from_millis(1500));
         assert!(st.tx_inhibited());
         assert!(st.keying_since.lock().unwrap().is_some());
@@ -1393,6 +1584,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(st.tx_inhibited(), "inhibit stays latched");
+        assert!(notices.try_recv().is_err(), "once per latch");
     }
 
     #[test]
@@ -1481,6 +1673,34 @@ mod tests {
         assert!(st.open_window().unwrap_err().contains("SWR 3.5"));
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
         assert_eq!(st.rig().lock().unwrap().sent, ["DE N0DE"]);
+    }
+
+    #[test]
+    fn a_status_blind_radio_on_the_window_id_inhibits_and_tells_the_owner() {
+        // The window ID's SWR check reads receive (1C 00) with the Po meter showing
+        // output: the first keyed piece of the window latches the inhibit.
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        st.configure().unwrap();
+        let e = st.open_window().unwrap_err();
+        assert!(e.contains("station ID"), "{e}");
+        assert!(st.tx_inhibited());
+        let n = notices.try_recv().expect("notice when it latches");
+        assert!(!n.from_file && n.reason.contains("1C 00"), "{n:?}");
+        // Nothing more is keyed or tuned, and nobody is told twice.
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(st.open_window().is_err());
+        let rig = st.rig();
+        drop(st);
+        assert!(notices.try_recv().is_err(), "once per latch");
+        let r = rig.lock().unwrap();
+        assert_eq!(
+            (r.sim.tunes, r.sim.sent.clone()),
+            (1, vec!["DE N0DE".into()])
+        );
     }
 
     /// Checks one keyed transmission: the text without the IDs is `segments`, each ID
