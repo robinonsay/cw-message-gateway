@@ -728,6 +728,9 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 RadioCmd::Tune => Action::Tune,
                 _ => Action::Cw,
             };
+            // The health log and any transmit inhibit are written there.
+            std::fs::create_dir_all(&cfg.state_dir)
+                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
             let rig = open_for(cfg, needs)?;
             let mut st = Station::new(
                 rig,
@@ -759,7 +762,8 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
 }
 
 fn run(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)?;
+    std::fs::create_dir_all(&cfg.state_dir)
+        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     let inbox = node::open_inbox(cfg)?;
     let mut session = node::build_session(cfg)?;
     let mut svc = node::live_services(cfg, inbox.clone())?;

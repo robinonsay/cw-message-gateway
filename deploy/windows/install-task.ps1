@@ -4,8 +4,9 @@ Starts hfnode-supervise.ps1 at log-on with Task Scheduler. See docs/windows-setu
 
 .DESCRIPTION
 Registers a scheduled task, "hfnode", for the current user that runs the supervisor
-in a console window when that user logs on. It runs in the user's session so that
-it can use the radio's USB sound card (a Windows service could not).
+in a console window when that user logs on. It runs in the user's session, the way
+Windows' microphone permission (which covers the radio's USB sound card) expects;
+running hfnode as a Windows service is not supported.
 
 To stop the node, press Ctrl-C in that window, or run stop-hfnode.ps1. To remove
 the task: Unregister-ScheduledTask -TaskName hfnode.

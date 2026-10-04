@@ -185,3 +185,44 @@ None of these affects the bench steps; all need deciding before stage `done`:
   `systemd-time-wait-sync.service` is enabled (now a step in the Pi guide). Without
   network after a power cut the window-start tunes can still come at unscheduled
   times; the node does not check that the clock is synchronised itself.
+
+## Addendum, 2026-10-04: macOS and Windows
+
+Added when `hfnode` was made to run on macOS and Windows as well as Linux (branch
+`claude/cross-platform-43shz2`). No CI-V byte, stage gate, preflight read or
+read-back changed. What did:
+
+- **Opening the port.** On Windows the port is opened without serialport's
+  `exclusive()`, which exists only on Unix; Windows opens a COM port for one handle
+  by itself (share mode 0, read in serialport 4.10.1's source). As before, the
+  driver then lowers DTR and RTS and fails if it cannot, and nothing is written
+  until the preflight has read USB SEND and both USB Keying items as OFF.
+- **What each system does to DTR and RTS at open**, for the IC-7300's CP210x:
+
+  | System | At open | Basis |
+  |---|---|---|
+  | Linux | Both raised (tty layer, `cp210x` `dtr_rts`); lowered on close (HUPCL) | Kernel source, read |
+  | macOS | Both raised on the first open of a port, after waiting out a 2 s DTR-down delay (`IOSerialBSDClient::initSession`); lowered on close (HUPCL) | Apple's IOSerialFamily source, read. That Apple's and Silicon Labs' current CP210x drivers, which are DriverKit extensions, reach the port through this code is understood, not checked |
+  | Windows | serialport applies its line settings with DTR and RTS control disabled before `open` returns; whether the driver raises them for an instant before that is not documented | serialport source, read; Microsoft's sample serial driver brings the lines up as its saved settings say. Silicon Labs' driver: inferred only |
+
+  So on every system the lines may be up for a moment while the port opens. The
+  radio's Inhibit Timer at USB Connection covers that moment, and with USB SEND and
+  USB Keying OFF (which the preflight requires) the lines do nothing. None of this
+  has been measured on an IC-7300. It can be measured without the radio, with a
+  separate CP2102 breakout board and a meter or LED on its DTR and RTS pins.
+- **Stop signals.** Ctrl-C, SIGTERM, SIGHUP and the Windows console events now
+  reach a handler that, once a command has passed its preflight and may write to
+  the radio, runs the same forced receive as the station layer (`17 FF`, `1C 00 00`,
+  then `1C 00` until it reads receive) and exits while still holding the radio.
+  Before, the process died on the signal and only systemd's stop hook forced
+  receive. Step 7 of the bench plan now also checks this stop.
+- **Start-up outside systemd.** `deploy/hfnode-supervise.sh` (macOS) and
+  `deploy/windows/hfnode-supervise.ps1` keep the unit's limits: restart 30 s after
+  a failure, give up after 3 starts an hour, no restart after a clean stop, and
+  `hfnode radio ... rx` after every stop or crash. As with the unit, that `rx`
+  failing does not write the inhibit file (see the open items above).
+- **The inhibit file and a missing state directory.** The bench commands `radio
+  setup`, `tune` and `cw` did not create `state_dir`, so in a fresh bench setup an
+  inhibit could not be written to `tx-inhibited` and held only for that one
+  process. Those commands now create the directory before opening the port, and
+  the inhibit creates it too if it is missing.
