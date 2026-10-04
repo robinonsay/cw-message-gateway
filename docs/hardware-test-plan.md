@@ -41,9 +41,11 @@ These hold whatever the stage or config, and are covered by unit tests:
 
 - **Serial control lines are dropped.** With USB SEND or USB Keying (CW) or (RTTY)
   set to DTR or RTS, a raised line transmits or holds the key down (p. 12-11, lines
-  6895-6927). Linux and macOS raise both lines when a serial port is opened; the
-  driver lowers them straight after opening and will not use the port if it
-  cannot. The radio's Inhibit Timer at USB Connection only delays such a signal by
+  6895-6927). Linux and macOS raise both lines when a serial port is opened, and
+  on Windows it is not documented whether the CP210x driver does for an instant;
+  the driver asks for them off when opening (Windows) and lowers them straight
+  after opening (every system), and will not use the port if it cannot. The
+  radio's Inhibit Timer at USB Connection only delays such a signal by
   "a few seconds" (line 6945), so these items must also be OFF, and the preflight
   checks that they are.
 - **Read-only preflight before any write.** `setup`, `tune`, `cw` and `run` first
@@ -75,8 +77,8 @@ These hold whatever the stage or config, and are covered by unit tests:
 - **Transmit inhibit.** If the radio cannot be confirmed back on receive, or its
   status reads receive while there is output, the node stops transmitting and
   writes `tx-inhibited` in its state directory, with the time and the reason.
-  While that file exists nothing transmits, also after a restart (systemd restarts
-  the service after a crash). Remove it only once you know what happened.
+  While that file exists nothing transmits, also after a restart (systemd or the
+  start-up scripts in `deploy/` restart the node after a crash). Remove it only once you know what happened.
 - **Config limits.** Baud must be one of the radio's CI-V USB rates and the CI-V
   address within 02h-DFh; frequency inside the transmit coverage table; power
   1-100 W, and at most 10 W until stage `keying`.
@@ -104,9 +106,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
   `tx-status` line, or `tx-inhibited` appears in the state directory.
 - The tuner does not finish (the node reports `no reply from radio` after 15 s of
   tuning).
-- The USB serial port or audio device drops out, the Pi resets, or audio is
+- The USB serial port or audio device drops out, the computer resets, or audio is
   distorted while transmitting. These are signs of RF getting into the USB cable
-  or the Pi.
+  or the computer.
 - The software watchdog or the hardware PTT timer does not end a test transmission
   when it should.
 - Anything smells hot, the radio's fan runs hard at low power, or the dummy load gets
@@ -119,14 +121,22 @@ Stop the test, force the radio to receive, and do not continue until you know wh
    1271), or remove its DC supply. (If the radio shows its overheat protection, it
    has already stopped transmitting: leave it on so the fan can cool it, line
    7333.)
-2. `Ctrl-C` an `hfnode` command, then run `hfnode radio --config $C rx`. Ctrl-C does
-   **not** send the stop command: the radio's keyer finishes the text it was already
-   given (up to 30 characters) before returning to receive. At 6 wpm that can be
-   over a minute, so prefer option 1 if the radio misbehaves. A command holds the
-   serial port exclusively while it runs, so `rx` from a second terminal cannot
-   open it until the first command has exited.
-3. For the service: `sudo systemctl stop hfnode`. The unit then runs
-   `hfnode radio ... rx` (see `deploy/hfnode.service`).
+2. `Ctrl-C` an `hfnode` command. Once the command has passed its preflight (so it
+   may write to the radio), Ctrl-C sends the stop command (`17 FF`, then `1C 00 00`)
+   and exits only once the radio reads receive (`radio confirmed on receive;
+   exiting`), or with an error if it does not. Until step 7 has shown that the stop
+   command ends a message the keyer is already sending, assume the keyer may
+   finish the text it was given (up to 30 characters; at 6 wpm over a minute), so
+   prefer option 1 if the radio misbehaves. Run `hfnode radio --config $C rx`
+   afterwards if in doubt. A command holds the serial port exclusively while it
+   runs, so `rx` from a second terminal cannot open it until the first command has
+   exited.
+3. For the node started at boot or log-in: on Linux `sudo systemctl stop hfnode`;
+   on a Mac Ctrl-C in its Terminal window (or `launchctl bootout` for the launchd
+   agent); on Windows Ctrl-C in its window, or, from the repository folder,
+   `powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\stop-hfnode.ps1`.
+   Each then runs `hfnode radio ... rx` (see `deploy/`). On Windows, closing the
+   window does not stop the keyer or check receive; run the stop script after it.
 
 After option 1, also stop `hfnode` (option 2 or 3) **before** switching the radio
 back on. A running node does not take the radio being off as a reason to stop: if
@@ -143,17 +153,28 @@ cp hfnode.example.toml ~/bench.toml
 C=~/bench.toml
 ```
 
+On Windows, in PowerShell: `Copy-Item hfnode.example.toml ~\bench.toml` and
+`$C = "$HOME\bench.toml"`. The `hfnode` commands below then work with `$C`, with
+two changes: where a command starts with `RUST_LOG=civ=trace`, run
+`$env:RUST_LOG = "civ=trace"` first and the command without it (and
+`Remove-Item Env:RUST_LOG` afterwards); and on the command line write `$HOME\...`
+where a path starts with `~/` (`~` works only inside the config file).
+
 In `~/bench.toml` set:
 
-- `station.node_call`, `station.field_calls`, `station.serial_port`, `audio.device`
-  (see [raspberry-pi-setup.md](raspberry-pi-setup.md));
+- `station.node_call`, `station.field_calls`, `station.serial_port`, and
+  `audio.device` if the radio's codec is not found under the default name
+  (`hfnode devices` lists the ports and audio inputs, and marks the radio's; see
+  the setup guide for your computer: [Raspberry Pi or Linux](raspberry-pi-setup.md),
+  [Mac](macos-setup.md) or [Windows](windows-setup.md));
 - `station.frequency_hz` to a frequency inside your license privileges in the CW
   segment;
 - `station.power_watts = 10` (raised only in step 9; the software refuses more
   until stage `keying`);
 - `station.commissioned = "none"` (see [Bring-up stages](#bring-up-stages));
-- `state_dir` to a scratch directory, for example `"/home/pi/bench-state"`, and
-  `auth.key_file` to a scratch key made with `hfnode keygen --out ~/bench.key`. Do
+- `state_dir` to a scratch directory, for example `"~/bench-state"` (on Windows
+  `'~\bench-state'`, in single quotes), and `auth.key_file` to a scratch key made
+  with `hfnode keygen --out ~/bench.key` (on Windows `--out $HOME\bench.key`). Do
   not test with the node's real key and state, because test exchanges use up codes.
 
 **Radio settings.** Set the IC-7300 menu settings listed in
@@ -419,7 +440,9 @@ nothing was written to the radio`. `status` prints `frequency N Hz` and
 
 **Fail:**
 
-- `opening radio on /dev/...`: wrong `serial_port`, or your user is not in `dialout`.
+- `opening radio on ...`: wrong `serial_port` (check `hfnode devices`); on Linux,
+  your user is not in `dialout`; on Windows, "Access is denied" means another
+  program has the COM port open.
 - `no reply from radio`: baud rate or CI-V address mismatch between the radio menu and
   the config, or CI-V USB Port linked to REMOTE at a different speed.
 - `transceiver ID` FAIL: the radio on the port is not an IC-7300 at 94h.
@@ -441,11 +464,13 @@ the pitch (use the radio's tuning indicator or AUTOTUNE).
 First check the audio level, with a strong signal tuned in:
 
 ```sh
-arecord -D plughw:CARD=CODEC,DEV=0 -f S16_LE -r 8000 -c 1 -V mono /dev/null
+hfnode record --config $C --out level.wav --seconds 10
 ```
 
-The VU meter should peak well below 100% on the strongest signals. Adjust USB AF
-Output Level on the radio if not. Ctrl-C to stop. Then:
+It records what the node hears and prints the peak level, which should be well
+below 100% on the strongest signals (it says so if the audio clipped, or if it got
+only silence, which on a Mac or Windows PC usually means the microphone permission
+in the setup guide). Adjust USB AF Output Level on the radio if not. Then:
 
 ```sh
 hfnode listen --config $C
@@ -466,8 +491,8 @@ signal (signal not on the pitch, or audio clipping).
 With the same kind of signal tuned in, record a minute of audio and decode it:
 
 ```sh
-arecord -D plughw:CARD=CODEC,DEV=0 -f S16_LE -r 8000 -c 1 -d 60 ~/rec-$(date +%Y%m%d).wav
-hfnode decode ~/rec-$(date +%Y%m%d).wav --pitch 600
+hfnode record --config $C --out rec.wav --seconds 60
+hfnode decode rec.wav --pitch 600
 ```
 
 For comparison, decode a synthetic signal at a similar speed and noise level:
@@ -602,7 +627,16 @@ the radio answered `FB` (OK) to both `17 FF` and `1C 00 00`. The node sends the 
 together, so the trace is what shows whether each one works on its own: an `FA`
 (NG) to either means only the other stopped the keyer. Write down which.
 
-Restore `key_speed_wpm = 18` and `max_key_seconds = 45`.
+**Ctrl-C.** Still at 6 wpm, set `max_key_seconds = 45`, run the same `cw` command
+and press Ctrl-C about 3 seconds into the transmission.
+
+**Pass:** the log shows `stop requested: stopping the keyer and forcing receive`,
+the keying stops within about a second, the radio is back on receive after its
+break-in delay, and the command exits with `radio confirmed on receive; exiting`;
+`status` shows `transmitting: false`. This is the stop that Ctrl-C and the start-up
+scripts rely on, on every system; on a Mac or Windows PC it is its first real test.
+
+Restore `key_speed_wpm = 18`.
 
 ## Step 8: high-SWR lockout (transmits briefly into a mismatch)
 
@@ -745,6 +779,10 @@ set -a; . /etc/hfnode/env; set +a     # or export HFNODE_EMAIL_PASSWORD=... by h
 hfnode run --config $C
 ```
 
+On a Mac load your own `env` file as in [macos-setup.md, section
+6](macos-setup.md#6-secrets); on Windows set each one with
+`$env:HFNODE_EMAIL_PASSWORD = "..."`.
+
 From the field rig, send the open and commit for a `TX` to your own contact, using
 the exact formats in [operating.md](operating.md).
 
@@ -775,17 +813,19 @@ signal report; the node's decode of the second station.
 decodes the second station well enough to read callsigns and numbers.
 
 **Fail:** high SWR (check the antenna and feedline before anything else); RF
-getting into the Pi or USB (serial errors, audio dropouts, resets) while
+getting into the computer or USB (serial errors, audio dropouts, resets) while
 transmitting: add ferrite chokes on the USB cable and check grounding before
 continuing.
 
 ## Step 13: end-to-end exchange on the air
 
-Use the real configuration now: `/etc/hfnode/hfnode.toml`, the real key, and a
-freshly printed table (`sudo -u hfnode hfnode codes --config /etc/hfnode/hfnode.toml`).
-Keep `power_watts` low for the first session. Run the node in the foreground the
-first time (`sudo systemctl stop hfnode` if it is running), or start the service and
-watch `journalctl -u hfnode -f`.
+Use the real configuration now (on a Pi `/etc/hfnode/hfnode.toml`; on a Mac or
+Windows PC the one in the node's folder), the real key, and a freshly printed table
+(on a Pi `sudo -u hfnode hfnode codes --config /etc/hfnode/hfnode.toml`, elsewhere
+`hfnode codes --config` with that file). Keep `power_watts` low for the first
+session. Run the node in the foreground the first time (on a Pi `sudo systemctl
+stop hfnode` if it is running), or start it as in section 7 or 10 of the setup
+guide and watch its log (on a Pi `journalctl -u hfnode -f`).
 
 The second station plays the field operator, inside a listening window, using
 [operating.md](operating.md). Work through:
@@ -818,8 +858,9 @@ with every decoded transmission, `health.csv` with tune and SWR lines.
 exchanges, SWR readings stay steady.
 
 **After passing:** raise `power_watts` in steps to the operating value (30-50 W),
-repeating step 12's SWR check at each power. Then enable the service
-(`sudo systemctl enable --now hfnode`) and keep an eye on `health.csv` for the first
+repeating step 12's SWR check at each power. Then have it start by itself (on a Pi
+`sudo systemctl enable --now hfnode`; on a Mac or Windows PC section 7 of the setup
+guide) and keep an eye on `health.csv` for the first
 weeks: a slow rise in SWR readings means a connector or the antenna needs attention.
 
 ## Results

@@ -1,7 +1,8 @@
 # ic-7300-hf-server
 
-A home-station node that relays texts and email over QRP Morse code. A Raspberry Pi,
-connected to an ICOM IC-7300 by one USB cable, listens on a fixed HF frequency,
+A home-station node that relays texts and email over QRP Morse code. A computer (a
+Raspberry Pi, a Mac or a Windows PC), connected to an ICOM IC-7300 by one USB cable,
+listens on a fixed HF frequency,
 decodes CW from a field operator, authenticates them with one-time letter codes
 from a printed table, and then:
 
@@ -64,14 +65,23 @@ crates/
               tests/mock_radio_e2e.rs: every selftest scenario, as cargo tests
               tests/sweep_e2e.rs: a fast slice of the speed x SNR x keying sweep
 hfnode.example.toml   annotated example configuration
-deploy/hfnode.service systemd unit
+deploy/               start-up: hfnode.service (systemd, Linux), hfnode-supervise.sh
+                      and macos/ (Terminal or launchd), windows/ (Task Scheduler)
 docs/                 setup, testing and operating guides
 ```
 
 ## Build and test
 
+`hfnode` runs on Linux (the Raspberry Pi included), macOS (Apple Silicon and Intel)
+and Windows. CI builds it, runs the tests and runs the self-test on all three (the
+Intel Mac build is compile-checked only). It has not yet been run with the radio on
+any of them.
+
 You need a Rust toolchain (stable) and a C compiler (the TLS library, `ring`,
-compiles some C).
+compiles some C): on Linux `build-essential`, on a Mac Apple's command line tools
+(`xcode-select --install`), on Windows Visual Studio Build Tools with "Desktop
+development with C++". Audio capture uses ALSA's `arecord` on Linux (package
+`alsa-utils`), Core Audio on a Mac and WASAPI on Windows.
 
 ```sh
 cargo test --workspace          # unit tests plus the end-to-end tests; no hardware needed
@@ -79,11 +89,16 @@ cargo build --release -p hfnode # binary at target/release/hfnode
 ```
 
 The mock-radio scenarios (`tests/mock_radio_e2e.rs`) run 100 times faster than
-real time and take about 30 s. On a slow machine such as a Pi, run them slower:
-`HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
+real time and take about 30 s. On a slow or busy machine (a Pi, or a Mac doing
+other work), run them slower: `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`,
+and `hfnode selftest --scale 20`.
 
 **Building on the Pi.** This works on a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS; the
 first build takes a while. See [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md).
+
+**On a Mac or Windows PC**, `cargo install --locked --path crates/hfnode` builds it
+and puts `hfnode` on your `PATH`. See [docs/macos-setup.md](docs/macos-setup.md) and
+[docs/windows-setup.md](docs/windows-setup.md).
 
 **Cross-compiling from an x86-64 Linux machine.** The simplest route is
 [`cross`](https://github.com/cross-rs/cross), which runs the build in a container
@@ -110,8 +125,9 @@ complains about a missing `GLIBC_` version, build with `cross` or on the Pi itse
 
 ## Quick start (no radio needed)
 
-Everything below runs on any machine. Start from the example config, pointing the
-key and state at a scratch directory:
+Everything below runs on any machine (the commands are for a Unix shell; in
+Windows PowerShell use a folder such as `$HOME\hf` instead of `/tmp/hf`). Start from
+the example config, pointing the key and state at a scratch directory:
 
 ```sh
 cargo build --release -p hfnode
@@ -158,8 +174,8 @@ hfnode synth "N0CALL/P 1 VZLLAIIJ RX K" --out /tmp/hf/t.wav --wpm 18 --snr 6 --j
 hfnode decode /tmp/hf/t.wav --pitch 600
 ```
 
-`decode` also works on a recording made from the radio with `arecord`, which is
-one of the bench steps.
+`decode` also works on a recording made from the radio with `hfnode record`, which
+is one of the bench steps.
 
 ## Self-test against a mock radio
 
@@ -307,9 +323,12 @@ the air.
 | `hfnode selftest [--scenario NAME] [--scale N] [--list] [-v]` | no | Run the scenarios against the mock IC-7300 (no hardware). |
 | `hfnode selftest --sweep [--wpm ..] [--snr ..] [--keying ..] [--trials N] [--rx] [--csv F]` | no | Sweep speed x SNR x keying with complete exchanges; print where it breaks. |
 | `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
+| `hfnode devices` | no | List serial ports and audio inputs, marking the radio's. Opens nothing. |
 | `hfnode filter --config C test` | no | Screen ten sample replies with the configured filter model and check the verdicts. With Claude, each is a paid API call. |
 | `hfnode filter --config C screen TEXT [--from NAME]` | no | Show what one reply would be keyed as. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
+| `hfnode record --config C --out F [--seconds N]` | no | Record the radio's audio as the node hears it; print the peak level. |
+| `hfnode radio --config C check` | no | Read-only preflight: identify the radio, check every setting that could make it transmit. Writes nothing. |
 | `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |
 | `hfnode radio --config C rx` | no | Stop the keyer and force the radio to receive. |
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
@@ -317,14 +336,20 @@ the air.
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
 | `hfnode run --config C` | **yes** | Run the node. |
 
-Logging goes to stderr; set `RUST_LOG=debug` for more detail.
+Logging goes to stderr; set `RUST_LOG=debug` for more detail. Ctrl-C (or
+Ctrl-Break on Windows), or a stop from systemd or launchd, makes a command that has
+started writing to the radio stop its keyer and confirm receive before it exits. On
+Windows, closing the window, logging off or a restart ends it without that; check
+receive afterwards (`hfnode radio --config C rx`).
 
 The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
 decoded transmission) and `health.csv` (every tune and SWR reading).
 
 ## Documentation
 
-- [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md): installing on the Pi, radio menu settings, secrets, systemd.
+- [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md): installing on the Pi (or other Linux), radio menu settings, secrets, systemd.
+- [docs/macos-setup.md](docs/macos-setup.md): running the node on a Mac.
+- [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
