@@ -11,20 +11,23 @@
 //! - **Forced receive.** After any failure, and on shutdown, the keyer is stopped
 //!   and the radio switched to receive, then receive is confirmed by reading the
 //!   radio's status, allowing for the break-in delay. If it cannot be confirmed,
-//!   transmitting is inhibited until the node is restarted.
+//!   transmitting is inhibited. With a state directory the inhibit is also written
+//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd restarts the
+//!   service after a crash); only removing the file, once the radio has been
+//!   checked, does.
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
-//!   receive is confirmed. It backs up, and does not replace, the hardware PTT
-//!   timer in series with the keying line.
+//!   receive is confirmed. It backs up, and does not replace, the hardware transmit
+//!   timer (docs/hardware-test-plan.md, step 10), which must act on CI-V keying.
 //! - **SWR check.** SWR is sampled repeatedly during the first second or so of
-//!   keying, counting only samples taken with the Po meter showing output, and the
-//!   highest is used; above the limit the node stops and stays silent until the
-//!   next window. If a piece is keyed without one such sample, the node also stops
-//!   and stays silent: the radio's own protection cuts its output into a bad load,
-//!   so missing output is itself a sign of one.
+//!   each transmission, counting only samples taken with the Po meter showing
+//!   output, and the highest is used; above the limit the node stops and stays
+//!   silent until the next window. If the first piece is keyed without one such
+//!   sample, the node also stops and stays silent: the radio's own protection cuts
+//!   its output into a bad load, so missing output is itself a sign of one.
 //!   Each SWR sample also reads the transmit status: if the radio reads receive
 //!   while the Po meter shows output, its status cannot be trusted for the checks
-//!   above, and transmitting is inhibited until restart.
+//!   above, and transmitting is inhibited as above.
 //! - **Reduced power**, set at start-up.
 //! - **Tuning** at start-up and at the top of each listening window.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
@@ -34,7 +37,7 @@ use crate::session::Transmission;
 use civ::{split_for_keyer, Rig, RigError};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -87,8 +90,9 @@ impl StationConfig {
             // the 3 s stuck margin covers.
             break_in_delay_dots: 10.0,
             stuck_margin: Duration::from_secs(3),
-            // The manual's tuner takes "2~3 seconds" (p. 11-2).
-            tune_timeout: Duration::from_secs(15),
+            // The manual's tuner takes "2~3 seconds" (p. 11-2), and "15 seconds
+            // (maximum)" (p. 16-3, manual text line 8119): leave room above that.
+            tune_timeout: Duration::from_secs(20),
             poll: Duration::from_millis(100),
         }
     }
@@ -120,7 +124,8 @@ impl std::fmt::Display for TxError {
             Self::Stuck => write!(f, "transmitter did not return to receive"),
             Self::Inhibited => write!(
                 f,
-                "radio not confirmed on receive: transmit inhibited until restart"
+                "radio not confirmed on receive: transmit inhibited until the node is \
+                 restarted with {INHIBIT_FILE} removed from the state directory"
             ),
             Self::Rig(e) => write!(f, "radio error: {e}"),
         }
@@ -182,13 +187,61 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
 }
 
 /// [`force_receive`], latching `inhibit` if receive is not confirmed.
-fn force_receive_or_inhibit<R: Rig>(rig: &Mutex<R>, inhibit: &AtomicBool) -> Result<(), TxError> {
+fn force_receive_or_inhibit<R: Rig>(rig: &Mutex<R>, inhibit: &Inhibit) -> Result<(), TxError> {
     let mut r = rig.lock().unwrap_or_else(|e| e.into_inner());
     force_receive(&mut *r).map_err(|e| {
-        inhibit.store(true, Ordering::SeqCst);
-        log::error!("radio not confirmed on receive ({e}): transmit inhibited until restart");
+        inhibit.latch(&format!("radio not confirmed on receive ({e})"));
         TxError::Inhibited
     })
+}
+
+/// Written to the state directory (beside the health log) when transmitting is
+/// inhibited; while it exists, nothing is transmitted, across restarts.
+pub const INHIBIT_FILE: &str = "tx-inhibited";
+
+/// The latch that stops all transmitting, in memory and in [`INHIBIT_FILE`].
+struct Inhibit {
+    set: AtomicBool,
+    file: Option<PathBuf>,
+}
+
+impl Inhibit {
+    fn new(file: Option<PathBuf>) -> Self {
+        let on_disk = file.as_deref().filter(|f| f.exists());
+        if let Some(f) = on_disk {
+            let why = std::fs::read_to_string(f).unwrap_or_default();
+            log::error!(
+                "transmit inhibited by {} ({}): remove it once the radio has been checked",
+                f.display(),
+                why.trim()
+            );
+        }
+        Self {
+            set: AtomicBool::new(on_disk.is_some()),
+            file,
+        }
+    }
+
+    fn is_set(&self) -> bool {
+        self.set.load(Ordering::SeqCst)
+    }
+
+    fn latch(&self, why: &str) {
+        if self.set.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::error!("{why}: transmit inhibited");
+        if let Some(f) = &self.file {
+            let line = format!("{} {why}\n", crate::gateway::unix_now());
+            match std::fs::write(f, line) {
+                Ok(()) => log::error!(
+                    "wrote {}: nothing is transmitted, also after a restart, until it is removed",
+                    f.display()
+                ),
+                Err(e) => log::error!("cannot write {}: {e}", f.display()),
+            }
+        }
+    }
 }
 
 pub struct Station<R: Rig + 'static> {
@@ -196,22 +249,29 @@ pub struct Station<R: Rig + 'static> {
     cfg: StationConfig,
     keying_since: Arc<Mutex<Option<Instant>>>,
     watchdog_fired: Arc<AtomicBool>,
-    /// Latched when the radio could not be confirmed on receive; never cleared.
-    tx_inhibit: Arc<AtomicBool>,
+    /// Latched when the radio could not be confirmed on receive, or its status
+    /// could not be trusted; never cleared while running.
+    tx_inhibit: Arc<Inhibit>,
     stop: Arc<AtomicBool>,
     swr_lockout: bool,
+    /// SWR has been measured on the current transmission.
     swr_checked: bool,
     health_log: Option<PathBuf>,
 }
 
 impl<R: Rig + 'static> Station<R> {
+    /// `health_log` is a file in the state directory; [`INHIBIT_FILE`] is kept
+    /// beside it, and if it is already there nothing will be transmitted.
     pub fn new(rig: R, cfg: StationConfig, health_log: Option<PathBuf>) -> Self {
+        let inhibit_file = health_log
+            .as_deref()
+            .map(|p| p.parent().unwrap_or(Path::new("")).join(INHIBIT_FILE));
         let s = Self {
             rig: Arc::new(Mutex::new(rig)),
             cfg,
             keying_since: Arc::new(Mutex::new(None)),
             watchdog_fired: Arc::new(AtomicBool::new(false)),
-            tx_inhibit: Arc::new(AtomicBool::new(false)),
+            tx_inhibit: Arc::new(Inhibit::new(inhibit_file)),
             stop: Arc::new(AtomicBool::new(false)),
             swr_lockout: false,
             swr_checked: false,
@@ -225,9 +285,9 @@ impl<R: Rig + 'static> Station<R> {
         self.rig.clone()
     }
 
-    /// Whether transmitting has been inhibited until restart.
+    /// Whether transmitting has been inhibited (see [`INHIBIT_FILE`]).
     pub fn tx_inhibited(&self) -> bool {
-        self.tx_inhibit.load(Ordering::SeqCst)
+        self.tx_inhibit.is_set()
     }
 
     fn spawn_watchdog(&self) {
@@ -284,8 +344,10 @@ impl<R: Rig + 'static> Station<R> {
         let c = self.cfg.clone();
         self.with_rig(|r| {
             r.set_transmit(false)?;
-            r.set_frequency(c.frequency_hz)?;
+            // Mode first: with SSB/CW Synchronous Tuning ON, a change from SSB to CW
+            // shifts the frequency by the CW pitch (p. 12-6, manual text line 6409).
             r.set_mode_cw()?;
+            r.set_frequency(c.frequency_hz)?;
             r.set_rf_power_watts(c.power_watts)?;
             r.set_key_speed(c.key_speed_wpm)?;
             r.set_break_in_delay(c.break_in_delay_dots)?;
@@ -343,6 +405,9 @@ impl<R: Rig + 'static> Station<R> {
         if self.swr_lockout {
             return Err(TxError::SwrLockout);
         }
+        // SWR is measured on every transmission, not once per window: the antenna
+        // or a connector can fail in the middle of one.
+        self.swr_checked = false;
         // On success the radio has been seen back on receive after the last piece;
         // on failure force it there.
         let result = self
@@ -423,10 +488,9 @@ impl<R: Rig + 'static> Station<R> {
                 // this module means anything. (The manual does not say 1C 00 covers
                 // them; this checks it on every window.)
                 self.health("tx-status", "rx-with-output");
-                self.tx_inhibit.store(true, Ordering::SeqCst);
-                log::error!(
+                self.tx_inhibit.latch(
                     "radio reads receive (1C 00) while the Po meter shows output: its \
-                     transmit status cannot be trusted; transmit inhibited until restart"
+                     transmit status cannot be trusted",
                 );
                 return Err(TxError::Inhibited);
             }
@@ -705,6 +769,52 @@ mod tests {
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
     }
 
+    #[test]
+    fn swr_is_checked_on_every_transmission() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+        // The antenna fails between two transmissions in the same window.
+        st.rig().lock().unwrap().swr = 3.5;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+    }
+
+    #[test]
+    fn an_inhibit_survives_a_restart_until_its_file_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = dir.path().join("health.csv");
+        let mut rig = Radio::new(fast_rig());
+        rig.status_blind = true;
+        let mut st = Station::new(rig, cfg(), Some(health.clone()));
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        drop(st);
+        let file = dir.path().join(INHIBIT_FILE);
+        let why = std::fs::read_to_string(&file).unwrap();
+        assert!(why.contains("1C 00"), "{why}");
+        // A restart, with a radio that now behaves: still nothing is transmitted.
+        let mut st = Station::new(fast_rig(), cfg(), Some(health.clone()));
+        st.configure().unwrap();
+        assert!(st.tx_inhibited());
+        assert!(st.start_window().is_err());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        {
+            let rig = st.rig();
+            let r = rig.lock().unwrap();
+            assert!(r.sent.is_empty());
+            assert_eq!(r.tunes, 0);
+        }
+        drop(st);
+        std::fs::remove_file(&file).unwrap();
+        let mut st = Station::new(fast_rig(), cfg(), Some(health));
+        st.configure().unwrap();
+        assert!(!st.tx_inhibited());
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
     /// A [`SimRig`] with two things a real radio may do: fold its output back to a
     /// fifth when the SWR is above 3:1 ("Power down transmission", p. 13-4), and
     /// stay on transmit for the break-in delay after being told to stop.
@@ -911,7 +1021,7 @@ mod tests {
             st.keying_since.lock().unwrap().is_some(),
             "watchdog retries"
         );
-        // Even once the radio recovers, nothing more is keyed until restart.
+        // Even once the radio recovers, nothing more is keyed.
         st.rig().lock().unwrap().tx_jammed = false;
         assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
         assert!(st.start_window().is_err());

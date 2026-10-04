@@ -311,8 +311,9 @@ checks), `read-back:` lines, a `health: tune ...` line, and
 - runs `/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml` as `hfnode`, with
   `dialout` and `audio` as supplementary groups;
 - loads `/etc/hfnode/env`;
-- restarts on failure after 30 s, and gives up after 5 failures in 10 minutes so a
-  broken radio connection does not turn into an endless loop of start-up tunes;
+- restarts on failure after 30 s, and gives up after 3 starts in an hour, so a
+  broken radio connection does not turn into an endless loop of start-up tunes
+  (`sudo systemctl reset-failed hfnode` before starting it again by hand);
 - runs `hfnode radio ... rx` after every stop or crash, to make sure the radio is on
   receive;
 - only allows the process to open USB serial (`ttyUSB`) and ALSA devices, and
@@ -320,6 +321,11 @@ checks), `read-back:` lines, a `health: tune ...` line, and
 
 If you use a udev symlink or by-id path, it still resolves to a `ttyUSB` device,
 so the device allow-list covers it.
+
+**If it stops transmitting.** When the node cannot confirm the radio is back on
+receive, it stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the
+time and reason. It keeps running (and keeps logging) but transmits nothing, also
+after a restart, until that file is removed. Check the radio first.
 
 **Stopping the node.** `sudo systemctl stop hfnode`. If the node was keying when it
 was stopped, the radio may finish the text already handed to its keyer (at most 30

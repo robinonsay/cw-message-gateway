@@ -64,9 +64,14 @@ These hold whatever the stage or config, and are covered by unit tests:
   shape as an error, never as a guess.
 - **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
   5917); the node then stays silent for that listening window. Any tuner error
-  forces receive. Every SWR sample while keying also reads `1C 00`: output on the
-  Po meter while the radio reads receive stops all transmitting until restart,
-  because none of the node's receive confirmations could then be trusted.
+  forces receive. SWR is measured at the start of every transmission. Every SWR
+  sample also reads `1C 00`: output on the Po meter while the radio reads receive
+  means none of the node's receive confirmations can be trusted.
+- **Transmit inhibit.** If the radio cannot be confirmed back on receive, or its
+  status reads receive while there is output, the node stops transmitting and
+  writes `tx-inhibited` in its state directory, with the time and the reason.
+  While that file exists nothing transmits, also after a restart (systemd restarts
+  the service after a crash). Remove it only once you know what happened.
 - **Config limits.** Baud must be one of the radio's CI-V USB rates and the CI-V
   address within 02h-DFh; frequency inside the transmit coverage table; power
   1-100 W, and at most 10 W until stage `keying`.
@@ -90,8 +95,8 @@ Stop the test, force the radio to receive, and do not continue until you know wh
   the config, or the node reports `the radio's settings do not read back as set`.
 - Any CI-V command fails with `radio rejected the command (NG)` or
   `unexpected reply`, in a step that is expected to pass.
-- The node reports `radio not confirmed on receive`, or `health.csv` gets a
-  `tx-status` line.
+- The node reports `radio not confirmed on receive`, `health.csv` gets a
+  `tx-status` line, or `tx-inhibited` appears in the state directory.
 - The tuner does not finish (the node reports `no reply from radio` after 15 s of
   tuning).
 - The USB serial port or audio device drops out, the Pi resets, or audio is
@@ -495,10 +500,11 @@ radio's own SWR meter; the radio returns to receive when the text ends.
 
 **Fail:** wrong characters sent, SWR reading far from the radio's meter (check step
 0.19), or the radio does not return to receive. If the node stops with
-`radio not confirmed on receive: transmit inhibited until restart` and
-`health.csv` has a `tx-status` line, the radio reported receive while its Po meter
-showed output: stop and report it, because the node's checks that the radio is
-back on receive depend on that status.
+`radio not confirmed on receive: transmit inhibited ...` and `health.csv` has a
+`tx-status` line, the radio reported receive while its Po meter showed output:
+stop and report it, because the node's checks that the radio is back on receive
+depend on that status. (Remove `tx-inhibited` from the state directory before
+transmitting again.)
 
 ## Step 7: software watchdog (transmits)
 
@@ -591,13 +597,28 @@ regardless of software, as the last line of defence against a stuck transmitter.
 command `17`, through the radio's internal keyer. A timer wired in series with the
 KEY jack or a PTT line will therefore **not** stop a transmission started by the
 node. The timer has to detect transmit in a way that works for CI-V keying and act
-on something that ends the transmission without any software. One way to sense
-transmit is pin 3 (SEND) of the ACC socket, which "goes low when the transceiver
-transmits" (IC-7300 Full Manual, ACC socket, p. 18-2). That pin is also an input:
-pulling it to ground **makes the radio transmit**, so the timer may only sense it
-through a high-impedance input and must never drive it low. What the timer then
-interrupts (for example the radio's DC supply) is your design decision; write down
-what it senses and what it interrupts.
+on something that ends the transmission without any software. Write down what it
+senses and what it interrupts, and keep to these rules, because a careless timer
+can itself key or damage the radio:
+
+- **Sensing.** The rear [SEND] jack "goes low when the transceiver transmits"
+  (p. 18-4, line 8509), and the manual describes it only as an output. Pin 3 (SEND)
+  of the ACC socket goes low too, but it is also an input: below +0.8 V it **makes
+  the radio transmit** (p. 18-2, lines 8265-8276). The manual does not say whether
+  the two are the same line inside the radio, so treat both as able to key it.
+  Sense through a high-value series resistor (100 kΩ or more) into an input that
+  cannot pull the line down when the timer is unpowered or has failed, with the
+  pull-up supplied by the timer. Do not power the timer from ACC pin 8, which only
+  carries 13.8 V while the radio is on. If the timer drives a relay from SEND, fit
+  the diode the manual asks for (line 8360).
+- **Acting.** Cut the radio's DC supply. Never switch the antenna or RF path: a
+  relay that opens under carrier reflects power into the radio, which the manual
+  warns may damage it (TX Delay item, line 6272). After a DC cut the radio needs its
+  POWER switch pressed and comes back in its previous state.
+- **First check, before any transmit test with the timer connected:** with the
+  timer connected but unpowered, and then powered, the radio stays on receive (TX
+  indicator off, `hfnode radio --config $C status` shows `transmitting: false`). If
+  you used ACC pin 3, measure it: it must stay above 2.0 V on receive.
 
 As an additional backstop inside the radio, set **Time-Out Timer (CI-V)** (MENU >
 SET > Function, p. 12-5) to its shortest setting, 3 minutes; `run` refuses to start

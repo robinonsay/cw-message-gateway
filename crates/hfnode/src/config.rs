@@ -317,6 +317,13 @@ impl Config {
         if s.field_calls.is_empty() {
             bail!("station.field_calls must list at least one callsign");
         }
+        // Callsigns are keyed with CI-V 17, which sends only its own character set
+        // (p. 19-13); a callsign uses letters, digits and "/".
+        for call in std::iter::once(&s.node_call).chain(&s.field_calls) {
+            if !call.chars().all(|c| c.is_ascii_alphanumeric() || c == '/') {
+                bail!("callsign {call:?}: only letters, digits and \"/\" can be keyed");
+            }
+        }
         // Only rates and addresses the radio can be set to (p. 12-10, 12-11).
         civ::ic7300::check_link_settings(s.baud, s.civ_address)
             .map_err(|e| anyhow::anyhow!("station.baud / station.civ_address: {e}"))?;
@@ -456,6 +463,25 @@ mod tests {
             cfg.station.baud = baud;
             cfg.station.civ_address = addr;
             assert_eq!(cfg.validate().is_ok(), ok, "{baud} {addr:02X}");
+        }
+    }
+
+    #[test]
+    fn callsigns_must_be_keyable() {
+        for (call, ok) in [
+            ("N0CALL", true),
+            ("N0CALL/P", true),
+            ("n0call", true),
+            ("N0 CALL", false),
+            ("N0CALL-1", false),
+            ("Ñ0CALL", false),
+        ] {
+            let mut cfg = example();
+            cfg.station.node_call = call.into();
+            assert_eq!(cfg.validate().is_ok(), ok, "node {call}");
+            let mut cfg = example();
+            cfg.station.field_calls.push(call.into());
+            assert_eq!(cfg.validate().is_ok(), ok, "field {call}");
         }
     }
 

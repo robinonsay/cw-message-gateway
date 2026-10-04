@@ -99,11 +99,13 @@ pub fn split_for_keyer(text: &str) -> Vec<String> {
     let mut cur = String::new();
     for word in text.split_whitespace() {
         let mut word = word.to_string();
-        while word.len() > MAX_CW_CHARS {
+        // Split on characters, not bytes, so text that is not ASCII cannot panic
+        // here (the driver refuses to send it).
+        while let Some((at, _)) = word.char_indices().nth(MAX_CW_CHARS) {
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
             }
-            let rest = word.split_off(MAX_CW_CHARS);
+            let rest = word.split_off(at);
             out.push(std::mem::replace(&mut word, rest));
         }
         if !cur.is_empty() && cur.len() + 1 + word.len() > MAX_CW_CHARS {
@@ -131,6 +133,11 @@ mod tests {
         assert_eq!(
             p.join(" "),
             "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K"
+        );
+        let wide = split_for_keyer(&"é".repeat(40));
+        assert_eq!(
+            wide.iter().map(|p| p.chars().count()).collect::<Vec<_>>(),
+            [30, 10]
         );
         let long = split_for_keyer(&"X".repeat(70));
         assert_eq!(
