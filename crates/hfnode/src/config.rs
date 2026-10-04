@@ -516,6 +516,11 @@ mod tests {
         assert_eq!(ex("/var/lib/hfnode"), Path::new("/var/lib/hfnode"));
         assert_eq!(ex("state/~x"), Path::new("state/~x"));
         assert_eq!(ex("~op/x"), Path::new("~op/x"));
+        #[cfg(windows)]
+        assert_eq!(
+            ex(r"~\AppData\Local\hfnode"),
+            Path::new("/home/op").join(r"AppData\Local\hfnode")
+        );
         assert!(expand_home_from(Path::new("~/x"), None).is_err());
         assert_eq!(
             expand_home_from(Path::new("/abs"), None).unwrap(),
