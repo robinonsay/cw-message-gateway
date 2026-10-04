@@ -144,8 +144,8 @@ arecord -l     # card numbers and names; look for "USB Audio CODEC"
 arecord -L     # ALSA device names; look for plughw:CARD=CODEC,DEV=0
 ```
 
-The example config uses `plughw:CARD=CODEC,DEV=0`, which names the card instead of
-its number, so it survives reboots and other USB audio devices. If your card has a
+`audio.device` defaults to `plughw:CARD=CODEC,DEV=0`, which names the card instead
+of its number, so it survives reboots and other USB audio devices. If your card has a
 different name, use the `plughw:CARD=...,DEV=0` line that `arecord -L` prints for
 it. Record a few seconds to check (tune the radio to a CW signal or to band noise
 first):
@@ -155,7 +155,8 @@ arecord -D plughw:CARD=CODEC,DEV=0 -f S16_LE -r 8000 -c 1 -d 10 /tmp/test.wav
 hfnode decode /tmp/test.wav --pitch 600
 ```
 
-Put the device name in `audio.device`. Once it is in a config,
+If it differs from the default, put the device name in `audio.device` (the line
+is commented out in the example config). Once the config is in place,
 `hfnode record --config <file> --out /tmp/test.wav` records the same way, as the
 node hears it, and prints the peak level.
 

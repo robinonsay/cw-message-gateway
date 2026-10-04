@@ -127,8 +127,8 @@ fn stable_path(path: &str) -> Option<String> {
         .map(|link| link.display().to_string())
 }
 
-/// macOS and Windows names already follow the device, not the order it was plugged
-/// in.
+/// macOS and Windows have no second name: theirs is kept from one plug-in to the
+/// next, though it can change when the radio goes into another USB socket.
 #[cfg(not(target_os = "linux"))]
 fn stable_path(_path: &str) -> Option<String> {
     None

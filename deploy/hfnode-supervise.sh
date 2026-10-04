@@ -40,8 +40,11 @@ if [ -n "$env_file" ]; then
         log "cannot read $env_file"
         exit 1
     fi
-    # Read KEY=value lines without running anything in the file.
+    # Read KEY=value lines without running anything in the file. A file saved
+    # with Windows line endings has a CR at the end of each line; drop it.
+    cr=$(printf '\r')
     while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%"$cr"}
         case $line in
             '' | '#'*) continue ;;
         esac

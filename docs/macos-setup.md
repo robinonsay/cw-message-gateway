@@ -34,12 +34,20 @@ mkdir -p ~/rust && cd ~/rust
 git clone -b main https://github.com/robinonsay/ic-7300-hf-server.git ic7300-hf-server
 cd ic7300-hf-server
 cargo test --workspace
-cargo install --path crates/hfnode      # installs ~/.cargo/bin/hfnode
-hfnode selftest                         # the whole node against a mock radio
+cargo install --locked --path crates/hfnode   # installs ~/.cargo/bin/hfnode
+hfnode selftest                               # the whole node against a mock radio
 ```
 
 `cargo install` puts `hfnode` on your `PATH` (rustup added `~/.cargo/bin` to it).
 `hfnode selftest` takes a minute or so and should end with every scenario `PASS`.
+It runs the radio 100 times faster than real time, so a Mac busy with other work can
+fail a scenario on timing; then run it slower, `hfnode selftest --scale 20` (and
+`HFNODE_E2E_SCALE=20 cargo test --workspace` for the tests). Check that the build
+is for your Mac's processor: `file ~/.cargo/bin/hfnode` says `arm64` on Apple
+Silicon and `x86_64` on Intel.
+
+Use `git clone` as above rather than a ZIP download from GitHub, so that `git pull`
+updates it later.
 
 ## 2. The node's folder
 
@@ -99,7 +107,8 @@ opens it (read in Apple's IOSerialFamily source; not yet measured on this radio)
 and the IC-7300 can be set to transmit on either. `hfnode` lowers them straight
 after opening and will not use the port if it cannot; before writing anything to
 the radio it reads USB SEND and both USB Keying items and refuses unless they are
-OFF; and the radio's Inhibit Timer at USB Connection covers the moment of opening.
+OFF, which is what makes the lines harmless. (The radio's Inhibit Timer at USB
+Connection, left ON, also holds off a signal for a few seconds when a port opens.)
 Other programs do not lower the lines, so keep the radio's port to `hfnode` alone:
 quit WSJT-X, fldigi, flrig and similar programs before starting it.
 
@@ -119,8 +128,8 @@ as a microphone, and asks once per app. Run the first recording from Terminal (t
 the radio to a CW signal or band noise first):
 
 ```sh
-hfnode record --config "$D/hfnode.toml" --out ~/Desktop/radio.wav --seconds 10
-hfnode decode ~/Desktop/radio.wav --pitch 600
+hfnode record --config "$D/hfnode.toml" --out ~/radio.wav --seconds 10
+hfnode decode ~/radio.wav --pitch 600
 ```
 
 Answer **Allow** to "Terminal would like to access the microphone". The grant is
@@ -131,7 +140,8 @@ reaching hfnode", and the node logs a warning after 3 s. Turn Terminal on under
 System Settings > Privacy & Security > Microphone and try again.
 
 Set the Mac's sound output (System Settings > Sound) to its own speakers, not the
-USB Audio CODEC, so system sounds do not go to the radio.
+USB Audio CODEC, so system sounds do not go to the radio, and do not use the codec
+in other audio programs while the node runs.
 
 ## 5. IC-7300 settings and the config
 
@@ -211,7 +221,9 @@ MacBook's lid still sleeps it unless an external display is connected, and a sle
 takes the radio's USB devices away. Keep it on the power adapter. After a power
 cut the Mac only comes back by itself with "Start up automatically after a power
 failure" on (Energy settings, desktop Macs) and automatic log-in, which FileVault
-does not allow.
+does not allow. Turn off "Install macOS updates" under System Settings > General >
+Software Update > Automatic Updates, so that an update does not restart the Mac
+and leave the node stopped.
 
 **Clock.** Listening windows are computed from UTC, so keep "Set time and date
 automatically" on (System Settings > General > Date & Time).
@@ -231,7 +243,7 @@ It keeps running and logging but transmits nothing, also after a restart, until
 that file is removed. Check the radio first.
 
 **Updating.** Stop the node, then in `~/rust/ic7300-hf-server`: `git pull`,
-`cargo install --path crates/hfnode`, and start it again. `last_seq` and the inbox
+`cargo install --locked --path crates/hfnode`, and start it again. `last_seq` and the inbox
 stay in the node's folder.
 
 **Moving the node to or from another computer.** Copy the whole node folder,

@@ -79,6 +79,11 @@ const BLOCK_SECS: f32 = 0.05;
 /// 0.4 s.
 const AHEAD_TX: usize = 200;
 const AHEAD: usize = 8;
+/// Real time the operator may fall behind its schedule and still catch up, sending
+/// blocks back to back as the node takes them (never ahead of the schedule); beyond
+/// it the schedule restarts from now, so a node that is slow to take the audio slows
+/// the operator down instead.
+const CATCH_UP: Duration = Duration::from_millis(50);
 /// Seconds of audio. The operator waits this long after the frequency goes quiet
 /// before keying.
 const REACTION: f32 = 2.0;
@@ -669,7 +674,16 @@ impl Air {
                 .clamp(Duration::from_micros(50), Duration::from_micros(500));
             thread::sleep(wait);
         }
-        self.next_due = self.next_due.max(Instant::now()) + self.block_real;
+        // Keep to the schedule through a late wake-up (a coarse timer or a busy
+        // machine, as on a macOS CI runner), catching up while the node takes the
+        // audio; only a node that held the operator back for longer moves it.
+        let now = Instant::now();
+        let start = if now.saturating_duration_since(self.next_due) > CATCH_UP {
+            now
+        } else {
+            self.next_due
+        };
+        self.next_due = start + self.block_real;
 
         if let Some(hz) = self
             .nudge_hz
@@ -1021,9 +1035,11 @@ impl Air {
 fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
     let key = dir.join("test.key");
     std::fs::write(&key, TEST_KEY)?;
-    let cfg: Config = toml::from_str(&format!(
+    // The paths are set after parsing, so that no character in them (a backslash,
+    // a quote) has to be escaped for TOML.
+    let mut cfg: Config = toml::from_str(&format!(
         r#"
-        state_dir = '{state}'
+        state_dir = ""
         [station]
         node_call = "{NODE_CALL}"
         field_calls = ["{FIELD_CALL}"]
@@ -1037,7 +1053,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         sample_rate = {SAMPLE_RATE}
         pitch_hz = {PITCH_HZ}
         [auth]
-        key_file = '{key}'
+        key_file = ""
         [schedule]
         {schedule}
         [[contacts]]
@@ -1056,8 +1072,6 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         number = 2
         grid = "DL89ME"
         "#,
-        state = dir.join("state").display(),
-        key = key.display(),
         wpm = s.node.key_wpm,
         chunk = s.node.chunk_chars,
         pause = ((2000.0 / scale) as u64).max(1),
@@ -1068,6 +1082,8 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
             None => "always = true".into(),
         },
     ))?;
+    cfg.state_dir = dir.join("state");
+    cfg.auth.key_file = key;
     cfg.validate()?;
     SeqStore::new(cfg.state_dir.join("last_seq")).save(START_SEQ)?;
     Ok(cfg)

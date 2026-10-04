@@ -65,3 +65,4 @@ if ($Hfnode) {
 Remove-Item -LiteralPath $work -Recurse -Force
 if ($failures -gt 0) { Write-Host "$failures check(s) failed"; exit 1 }
 Write-Host "all checks passed"
+exit 0

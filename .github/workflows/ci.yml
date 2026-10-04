@@ -38,8 +38,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          # GitHub's macOS runners wake sleeping threads late by a few ms, which at
+          # 100x real time is a few hundred ms of radio time; run the mock radio
+          # 20x real time there, as on any slow or busy machine.
+          - os: macos-latest
+            scale: 20
+          - os: windows-latest
+            scale: 100
     runs-on: ${{ matrix.os }}
+    env:
+      HFNODE_E2E_SCALE: ${{ matrix.scale }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +68,7 @@ jobs:
         run: cargo build --release -p hfnode
 
       - name: hfnode selftest
-        run: cargo run --release -p hfnode -- selftest
+        run: cargo run --release -p hfnode -- selftest --scale ${{ matrix.scale }}
 
       - name: hfnode devices
         run: cargo run --release -p hfnode -- devices

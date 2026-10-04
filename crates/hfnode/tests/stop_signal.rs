@@ -7,7 +7,9 @@
 
 #![cfg(unix)]
 
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,11 +17,25 @@ fn stopped_by(signal: &str) -> Option<i32> {
     // The self-test at real time runs for minutes; it is stopped long before that.
     let mut child = Command::new(env!("CARGO_BIN_EXE_hfnode"))
         .args(["selftest", "--scale", "1", "--jobs", "1"])
+        .env("RUST_LOG", "hfnode::signal=debug")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    thread::sleep(Duration::from_millis(500));
+    // Signal only once the handler is in place, however slow the machine.
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (ready_tx, ready) = mpsc::channel();
+    thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if line.contains("stop-signal handler installed") {
+                let _ = ready_tx.send(());
+            }
+        }
+    });
+    if ready.recv_timeout(Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        panic!("hfnode did not report its stop-signal handler");
+    }
     let sent = Command::new("kill")
         .args([&format!("-{signal}"), &child.id().to_string()])
         .status()

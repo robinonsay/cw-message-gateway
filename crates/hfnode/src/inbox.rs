@@ -79,11 +79,10 @@ impl Inbox {
             f.write_all(serde_json::to_string_pretty(&self.data)?.as_bytes())?;
             f.sync_all()?;
         }
-        fs::rename(&tmp, &self.path)?;
-        // The rename is only durable once the directory entry is: without this a
-        // power cut can bring back the old file after the caller has acknowledged
-        // the source (the email marked \Seen), losing the message.
-        sync_dir(dir)?;
+        // Without a durable replace a power cut can bring back the old file after
+        // the caller has acknowledged the source (the email marked \Seen), losing
+        // the message.
+        auth::replace_file(&tmp, &self.path)?;
         Ok(())
     }
 
@@ -174,18 +173,6 @@ impl Inbox {
         }
         Ok(())
     }
-}
-
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> std::io::Result<()> {
-    // Windows: a directory cannot be opened as a file to sync it; NTFS journals
-    // the rename itself.
-    Ok(())
 }
 
 #[cfg(test)]

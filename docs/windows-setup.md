@@ -31,9 +31,14 @@ branch is still the old one:
 git clone -b main https://github.com/robinonsay/ic-7300-hf-server.git
 cd ic-7300-hf-server
 cargo test --workspace
-cargo install --path crates/hfnode      # installs %USERPROFILE%\.cargo\bin\hfnode.exe
-hfnode selftest                         # the whole node against a mock radio
+cargo install --locked --path crates/hfnode   # installs %USERPROFILE%\.cargo\bin\hfnode.exe
+hfnode selftest                               # the whole node against a mock radio
 ```
+
+The self-test runs the radio 100 times faster than real time, so a PC busy with
+other work can fail a scenario on timing. Then run it slower:
+`hfnode selftest --scale 20` (and `$env:HFNODE_E2E_SCALE = 20` before `cargo test`
+for the tests).
 
 ## 2. The node's folder
 
@@ -81,12 +86,13 @@ to UART Bridge (COM3)". Put the name in `station.serial_port`, for example
 `hfnode devices` if the port is not found.
 
 **DTR and RTS.** The IC-7300 can be set to transmit on either serial control line.
-`hfnode` opens the port with both lines set to off, clears them again straight
-after, and will not use the port if it cannot; before writing anything to the radio
-it reads USB SEND and both USB Keying items and refuses unless they are OFF; and the
-radio's Inhibit Timer at USB Connection covers the moment of opening. Whether the
-CP210x driver raises the lines for an instant when the port opens is not
-documented. A COM port can be open in one program at a time, so quit WSJT-X,
+Whether the CP210x driver raises the lines for an instant when the port opens is
+not documented. `hfnode` opens the port with both lines set to off, clears them
+again straight after, and will not use the port if it cannot; before writing
+anything to the radio it reads USB SEND and both USB Keying items and refuses
+unless they are OFF, which is what makes the lines harmless. (The radio's Inhibit
+Timer at USB Connection, left ON, also holds off a signal for a few seconds when a
+port opens.) A COM port can be open in one program at a time, so quit WSJT-X,
 fldigi, flrig and similar programs before starting `hfnode`, and do not start them
 while it runs.
 
@@ -101,12 +107,14 @@ the full name `hfnode devices` shows. `hfnode` reads the device in its own forma
 
 Windows treats every recording device as a microphone. Under Settings > Privacy &
 security > Microphone, turn on **Microphone access** and **Let desktop apps access
-your microphone**. Without them `hfnode` hears silence and logs a warning after 3 s.
-Check with a recording (tune the radio to a CW signal or band noise first):
+your microphone**. Without them Windows refuses the device ("Access is denied") and
+`hfnode` says which setting to turn on; if it hears only silence instead, it logs a
+warning after 3 s. Check with a recording (tune the radio to a CW signal or band
+noise first):
 
 ```powershell
-hfnode record --config "$D\hfnode.toml" --out "$HOME\Desktop\radio.wav" --seconds 10
-hfnode decode "$HOME\Desktop\radio.wav" --pitch 600
+hfnode record --config "$D\hfnode.toml" --out "$HOME\radio.wav" --seconds 10
+hfnode decode "$HOME\radio.wav" --pitch 600
 ```
 
 In Sound settings, keep the PC's output on its own speakers, not on the USB Audio
@@ -174,6 +182,10 @@ runs, but not from a laptop's lid: set "When I close the lid" to "Do nothing"
 (Control Panel > Power Options > Choose what closing the lid does), and keep it on
 the charger. A sleep takes the radio's USB devices away.
 
+**Updates.** Windows Update restarts the PC to install updates, which leaves the
+node stopped until you log on again. Set "Active hours" (Settings > Windows Update
+> Advanced options) to cover the hours the node should run.
+
 **Clock.** Listening windows are computed from UTC, so keep "Set time
 automatically" on (Settings > Time & language > Date & time) and press "Sync now"
 once.
@@ -193,6 +205,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\stop-hfnode.p
 which ends the task and the node and then runs `hfnode radio ... rx`. To remove the
 task: `Unregister-ScheduledTask -TaskName hfnode`.
 
+**Looking at `state\health.csv`.** Open a copy, not the file itself: Excel locks a
+file it has open, and the node could not add to it meanwhile.
+
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive, it stops transmitting and writes `tx-inhibited` in
 `%LOCALAPPDATA%\hfnode\state` with the time and reason. It keeps running and
@@ -200,7 +215,7 @@ logging but transmits nothing, also after a restart, until that file is removed.
 Check the radio first.
 
 **Updating.** Stop the node, then in the repository folder: `git pull`,
-`cargo install --path crates/hfnode`, and start it again. `last_seq` and the inbox
+`cargo install --locked --path crates/hfnode`, and start it again. `last_seq` and the inbox
 stay in the node's folder.
 
 **Moving the node to or from another computer.** Copy the whole node folder,

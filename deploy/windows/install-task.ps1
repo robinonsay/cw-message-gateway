@@ -15,7 +15,7 @@ Do not run this until docs/hardware-test-plan.md has been worked through.
 #>
 param(
     [string] $Dir = (Join-Path $env:LOCALAPPDATA "hfnode"),
-    # Where `cargo install --path crates/hfnode` puts it.
+    # Where `cargo install --locked --path crates/hfnode` puts it.
     [string] $Hfnode = (Join-Path $env:USERPROFILE ".cargo\bin\hfnode.exe")
 )
 $ErrorActionPreference = "Stop"
@@ -30,9 +30,11 @@ $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$supervise`" " +
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory $Dir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 # No time limit, no restarts by Task Scheduler (the supervisor does that, with a
-# limit), and keep going on battery.
+# limit), and keep going on battery. Priority 4 is normal priority; Task Scheduler's
+# default, 7, would run the node (decoding and keying, both timed) below normal.
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+    -Priority 4
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
 Register-ScheduledTask -TaskName "hfnode" -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null

@@ -81,13 +81,39 @@ pub fn start(device: &str, sample_rate: u32, blocker: Blocker) -> Result<Source>
 }
 
 fn find(host: &cpal::Host, wanted: &str) -> Result<cpal::Device> {
-    let devices: Vec<cpal::Device> = host
-        .input_devices()
-        .map_err(|e| anyhow!("listing audio inputs: {e}"))?
-        .collect();
-    let names: Vec<String> = devices.iter().map(name_of).collect();
+    let (devices, names) = no_panic(|| {
+        let devices: Vec<cpal::Device> = host
+            .input_devices()
+            .map_err(|e| anyhow!("listing audio inputs: {e}"))?
+            .collect();
+        let names: Vec<String> = devices.iter().map(name_of).collect();
+        Ok((devices, names))
+    })?;
     let i = pick_device(&names, wanted)?;
     Ok(devices.into_iter().nth(i).expect("picked from this list"))
+}
+
+/// cpal's Windows backend panics, rather than returning an error, if a device goes
+/// away while it is being listed or named (the radio switched off at that moment).
+fn no_panic<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        bail!("listing the audio inputs failed (did a device go away just then?); try again")
+    })
+}
+
+/// Windows refuses a program that may not use the microphone with "Access is
+/// denied" (E_ACCESSDENIED, 0x80070005) when the device is opened; say which setting
+/// that is. (macOS gives such a program silence instead, which `Blocker` reports.)
+fn privacy_hint(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    let denied = e.contains("access is denied") || e.contains("80070005");
+    if cfg!(windows) && denied {
+        ". Windows is not letting hfnode use the radio's audio: turn on Settings > \
+         Privacy & security > Microphone > Microphone access, and Let desktop apps \
+         access your microphone"
+    } else {
+        ""
+    }
 }
 
 fn open(
@@ -99,9 +125,12 @@ fn open(
     let host = cpal::default_host();
     let device = find(&host, wanted)?;
     let name = name_of(&device);
-    let supported = device
-        .default_input_config()
-        .map_err(|e| anyhow!("reading the input format of {name:?}: {e}"))?;
+    let supported = device.default_input_config().map_err(|e| {
+        anyhow!(
+            "reading the input format of {name:?}: {e}{}",
+            privacy_hint(&e.to_string())
+        )
+    })?;
     let format = supported.sample_format();
     let config = supported.config();
     let channels = usize::from(config.channels);
@@ -129,10 +158,18 @@ fn open(
         SampleFormat::U8 => build::<u8>(&device, &config, sink, fail),
         other => bail!("{name:?} delivers {other:?} samples, which hfnode does not read"),
     }
-    .with_context(|| format!("opening {name:?} for capture"))?;
-    stream
-        .play()
-        .map_err(|e| anyhow!("starting capture from {name:?}: {e}"))?;
+    .map_err(|e| {
+        anyhow!(
+            "opening {name:?} for capture: {e:#}{}",
+            privacy_hint(&e.to_string())
+        )
+    })?;
+    stream.play().map_err(|e| {
+        anyhow!(
+            "starting capture from {name:?}: {e}{}",
+            privacy_hint(&e.to_string())
+        )
+    })?;
     Ok((stream, what))
 }
 
@@ -197,6 +234,10 @@ where
 
 /// Every input device, with its default format.
 pub fn input_devices() -> Result<Vec<InputDevice>> {
+    no_panic(list_inputs)
+}
+
+fn list_inputs() -> Result<Vec<InputDevice>> {
     let host = cpal::default_host();
     let default = host.default_input_device().map(|d| name_of(&d));
     let devices = host
@@ -224,4 +265,16 @@ pub fn input_devices() -> Result<Vec<InputDevice>> {
 
 fn name_of(d: &cpal::Device) -> String {
     d.name().unwrap_or_else(|e| format!("(no name: {e})"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_denied_names_the_windows_microphone_setting() {
+        let h = privacy_hint("Access is denied. (0x80070005)");
+        assert_eq!(h.contains("Let desktop apps access"), cfg!(windows), "{h}");
+        assert!(privacy_hint("The device is in use by another application").is_empty());
+    }
 }

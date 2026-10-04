@@ -651,7 +651,7 @@ mod tests {
 
     fn fast_rig() -> SimRig {
         let mut r = SimRig::new();
-        r.time_scale = 50.0;
+        r.time_scale = 10.0;
         r
     }
 

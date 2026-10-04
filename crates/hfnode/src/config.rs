@@ -534,6 +534,9 @@ mod tests {
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.station.civ_address, 0x94);
+        // The example leaves the audio device to the per-system default, so the same
+        // file works on Linux, macOS and Windows.
+        assert_eq!(cfg.audio.device, default_audio_device());
     }
 
     fn example() -> Config {

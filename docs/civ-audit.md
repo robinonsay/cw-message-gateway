@@ -206,8 +206,9 @@ read-back changed. What did:
   | Windows | serialport applies its line settings with DTR and RTS control disabled before `open` returns; whether the driver raises them for an instant before that is not documented | serialport source, read; Microsoft's sample serial driver brings the lines up as its saved settings say. Silicon Labs' driver: inferred only |
 
   So on every system the lines may be up for a moment while the port opens. The
-  radio's Inhibit Timer at USB Connection covers that moment, and with USB SEND and
-  USB Keying OFF (which the preflight requires) the lines do nothing. None of this
+  radio's Inhibit Timer at USB Connection is meant for that moment but only delays
+  a signal by a few seconds; with USB SEND and USB Keying OFF (which the preflight
+  requires) the lines do nothing. None of this
   has been measured on an IC-7300. It can be measured without the radio, with a
   separate CP2102 breakout board and a meter or LED on its DTR and RTS pins.
 - **Stop signals.** Ctrl-C, SIGTERM, SIGHUP and the Windows console events now

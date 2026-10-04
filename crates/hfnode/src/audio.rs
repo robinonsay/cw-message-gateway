@@ -201,37 +201,57 @@ pub fn input_devices() -> Result<Vec<InputDevice>> {
     backend::input_devices()
 }
 
-/// The one of `names` that `wanted` picks: an exact match (ignoring case), or else
-/// the only name containing it. Several matches is an error rather than a guess, so
-/// that the node never decodes the wrong sound card (a built-in microphone, say).
+/// The one of `names` that `wanted` picks: the only exact match (ignoring case), or
+/// else the only name containing it. Several matches is an error rather than a guess,
+/// so that the node never decodes the wrong sound card (a built-in microphone, or a
+/// second radio's codec with the same name).
 pub fn pick_device(names: &[String], wanted: &str) -> Result<usize> {
     let w = wanted.trim().to_lowercase();
     if w.is_empty() {
         bail!("audio.device is empty; {DEVICE_HINT}");
     }
-    if let Some(i) = names.iter().position(|n| n.trim().to_lowercase() == w) {
-        return Ok(i);
-    }
-    let hits: Vec<usize> = (0..names.len())
-        .filter(|&i| names[i].to_lowercase().contains(&w))
+    let exact: Vec<usize> = (0..names.len())
+        .filter(|&i| names[i].trim().to_lowercase() == w)
         .collect();
+    let hits: Vec<usize> = if exact.is_empty() {
+        (0..names.len())
+            .filter(|&i| names[i].to_lowercase().contains(&w))
+            .collect()
+    } else {
+        exact
+    };
     let list = |ix: &mut dyn Iterator<Item = usize>| {
         ix.map(|i| format!("\n  {:?}", names[i]))
             .collect::<String>()
     };
     match hits.as_slice() {
         [i] => Ok(*i),
-        [] => bail!(
-            "no audio input matches {wanted:?}. Inputs on this computer:{}\n\
-             (is the radio on and its USB cable connected? `hfnode devices` lists them too)",
-            if names.is_empty() {
-                "\n  (none)".to_string()
-            } else {
-                list(&mut (0..names.len()))
-            }
-        ),
+        [] => {
+            // A Linux (ALSA) name left in a config copied to a Mac or Windows PC.
+            let alsa = ["hw:", "plughw:", "sysdefault:", "dsnoop:"]
+                .iter()
+                .any(|p| w.starts_with(p))
+                || w.contains("card=");
+            bail!(
+                "no audio input matches {wanted:?}.{} Inputs on this computer:{}\n\
+                 (is the radio on and its USB cable connected? `hfnode devices` lists them too)",
+                if alsa {
+                    " That is a Linux (ALSA) device name; here audio.device is the \
+                     input's name or part of it, such as \"USB Audio CODEC\", which is \
+                     also what it is when left out."
+                } else {
+                    ""
+                },
+                if names.is_empty() {
+                    "\n  (none)".to_string()
+                } else {
+                    list(&mut (0..names.len()))
+                }
+            )
+        }
         _ => bail!(
-            "{wanted:?} matches more than one audio input; use more of the name:{}",
+            "{wanted:?} matches more than one audio input; use more of the name, or \
+             unplug the other device:{}",
             list(&mut hits.iter().copied())
         ),
     }
@@ -244,9 +264,10 @@ const SILENCE_CHECK_SECS: usize = 3;
 /// 50 ms for the queue, stamping each with the time it was completed.
 ///
 /// Also warns, once, if the first few seconds are exact zeros. A radio's audio always
-/// carries some noise, so that means the audio is not reaching the node: on macOS and
-/// Windows a program not allowed to use the microphone gets silence rather than an
-/// error, and an AF output level of 0 does the same.
+/// carries some noise, so that means the audio is not reaching the node: on macOS a
+/// program not allowed to use the microphone gets silence rather than an error (on
+/// Windows it is normally refused with "access denied", reported when the capture
+/// starts), and an AF output level of 0 does the same.
 pub(crate) struct Blocker {
     tx: BlockSender,
     block: usize,
@@ -403,6 +424,79 @@ mod tests {
         let (tx, rx) = queue(4);
         drop(rx);
         assert!(tx.send(block(2)).is_err());
+    }
+
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn device_is_picked_by_exact_name_or_the_only_partial_match() {
+        let n = names(&[
+            "MacBook Pro Microphone",
+            "USB Audio CODEC",
+            "Microphone (USB Audio CODEC)",
+        ]);
+        // An exact match wins over the other name that contains it.
+        assert_eq!(pick_device(&n, "usb audio codec").unwrap(), 1);
+        assert_eq!(
+            pick_device(&n, " Microphone (USB Audio CODEC) ").unwrap(),
+            2
+        );
+        assert_eq!(pick_device(&n, "macbook").unwrap(), 0);
+        assert!(pick_device(&n, "Microphone").is_err(), "two contain it");
+        assert!(pick_device(&n, "  ").is_err());
+    }
+
+    #[test]
+    fn two_inputs_with_the_same_name_are_refused_not_guessed() {
+        let n = names(&["USB Audio CODEC", "Built-in Microphone", "USB Audio CODEC"]);
+        let err = pick_device(&n, "USB Audio CODEC").unwrap_err().to_string();
+        assert!(err.contains("more than one"), "{err}");
+        let n = names(&[
+            "Microphone (USB Audio CODEC)",
+            "Microphone (2- USB Audio CODEC)",
+        ]);
+        assert!(pick_device(&n, "USB Audio CODEC").is_err());
+        assert_eq!(pick_device(&n, "2- USB Audio CODEC").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_linux_device_name_on_another_system_says_so() {
+        let n = names(&["USB Audio CODEC"]);
+        let err = pick_device(&n, "plughw:CARD=CODEC,DEV=0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Linux (ALSA) device name"), "{err}");
+        assert!(err.contains("\"USB Audio CODEC\""), "{err}");
+        let err = pick_device(&n, "Line In").unwrap_err().to_string();
+        assert!(!err.contains("ALSA"), "{err}");
+        assert!(pick_device(&[], "USB")
+            .unwrap_err()
+            .to_string()
+            .contains("(none)"));
+    }
+
+    #[test]
+    fn silence_is_reported_once_and_noise_is_not() {
+        // Exact zeros for the watched seconds, then the watch ends either way; the
+        // blocks still flow.
+        let (tx, rx) = queue(1000);
+        let mut b = Blocker::new(tx, 1000, "test");
+        assert!(b.push(&vec![0.0; 3000]));
+        assert_eq!(b.watch, 0);
+        assert!(!b.heard);
+        let (tx2, _rx2) = queue(1000);
+        let mut b2 = Blocker::new(tx2, 1000, "test");
+        let mut noise = vec![0.0; 3000];
+        noise[2999] = 1e-4;
+        assert!(b2.push(&noise));
+        assert!(b2.heard);
+        let mut got = 0;
+        while let Ok(blk) = rx.recv_timeout(Duration::from_millis(1)) {
+            got += blk.samples.len();
+        }
+        assert_eq!(got, 3000);
     }
 
     #[test]

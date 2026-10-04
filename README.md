@@ -89,14 +89,15 @@ cargo build --release -p hfnode # binary at target/release/hfnode
 ```
 
 The mock-radio scenarios (`tests/mock_radio_e2e.rs`) run 100 times faster than
-real time and take about 30 s. On a slow machine such as a Pi, run them slower:
-`HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
+real time and take about 30 s. On a slow or busy machine (a Pi, or a Mac doing
+other work), run them slower: `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`,
+and `hfnode selftest --scale 20`.
 
 **Building on the Pi.** This works on a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS; the
 first build takes a while. See [docs/raspberry-pi-setup.md](docs/raspberry-pi-setup.md).
 
-**On a Mac or Windows PC**, `cargo install --path crates/hfnode` builds it and puts
-`hfnode` on your `PATH`. See [docs/macos-setup.md](docs/macos-setup.md) and
+**On a Mac or Windows PC**, `cargo install --locked --path crates/hfnode` builds it
+and puts `hfnode` on your `PATH`. See [docs/macos-setup.md](docs/macos-setup.md) and
 [docs/windows-setup.md](docs/windows-setup.md).
 
 **Cross-compiling from an x86-64 Linux machine.** The simplest route is

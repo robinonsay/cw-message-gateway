@@ -38,9 +38,10 @@ fn field_message_over_the_air_is_sent() {
     let key = dir.path().join("node.key");
     std::fs::write(&key, b"end-to-end test key 0123456789").unwrap();
     let _ = env_logger::builder().is_test(true).try_init();
-    let cfg: Config = toml::from_str(&format!(
+    // The paths are set after parsing, so that nothing in them needs escaping.
+    let mut cfg: Config = toml::from_str(
         r#"
-        state_dir = '{state}'
+        state_dir = ""
         [station]
         node_call = "N0DE"
         field_calls = ["W5XXX"]
@@ -50,17 +51,17 @@ fn field_message_over_the_air_is_sent() {
         [audio]
         end_of_message_ms = 2500
         [auth]
-        key_file = '{key}'
+        key_file = ""
         [schedule]
         always = true
         [[contacts]]
         name = "MOM"
         address = "mom@example.com"
         "#,
-        state = dir.path().join("state").display(),
-        key = key.display()
-    ))
+    )
     .unwrap();
+    cfg.state_dir = dir.path().join("state");
+    cfg.auth.key_file = key.clone();
     cfg.validate().unwrap();
 
     let book = CodeBook::new(&std::fs::read(&key).unwrap());

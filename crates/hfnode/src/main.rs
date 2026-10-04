@@ -204,6 +204,8 @@ fn main() -> Result<()> {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
     ctrlc::set_handler(on_stop_signal).context("installing the stop-signal handler")?;
+    // For tests/stop_signal.rs, which waits for this before sending a signal.
+    log::debug!(target: "hfnode::signal", "stop-signal handler installed");
     match cli.cmd {
         Cmd::Keygen { out } => keygen(&out),
         Cmd::Codes {

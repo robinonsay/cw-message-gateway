@@ -56,9 +56,11 @@
 //!
 //! So on every system the lines may be up for the moment between the port opening
 //! and the settings being applied. The radio's "Inhibit Timer at USB Connection"
-//! (default ON) holds off a SEND or keying signal for a few seconds when "a virtual
-//! serial port communication is established" (manual text lines 6928-6945), which
-//! covers that moment; the preflight then makes sure the radio ignores the lines.
+//! (default ON) is meant for that moment: it holds off a SEND or keying signal for
+//! a few seconds when "a virtual serial port communication is established" (manual
+//! text lines 6928-6945). It only delays a line that stays up, though; what makes
+//! the lines harmless is USB SEND and USB Keying set to OFF, which the preflight
+//! requires before anything is written.
 
 use crate::frame::{bcd_be, bcd_le, from_bcd_be, from_bcd_le, take_frame, Frame, CONTROLLER};
 use crate::{Result, Rig, RigError, MAX_CW_CHARS};
@@ -308,8 +310,9 @@ impl Ic7300 {
     /// line would key the transmitter for as long as the port stays open (pp. 12-11;
     /// manual text lines 6895-6927). The system may still raise them for a moment
     /// while opening (see the module notes for Linux, macOS and Windows); the radio's
-    /// "Inhibit Timer at USB Connection" (default ON, line 6928) covers that moment,
-    /// and [`crate::preflight`] checks the settings themselves.
+    /// "Inhibit Timer at USB Connection" (default ON, line 6928) delays a signal
+    /// then by a few seconds, and [`crate::preflight`] refuses the radio unless the
+    /// settings themselves are OFF, which is what makes the lines harmless.
     pub fn open(path: &str, baud: u32, addr: u8) -> Result<Self> {
         check_link_settings(baud, addr)?;
         let io = |e: serialport::Error| RigError::Io(std::io::Error::other(e));
@@ -950,16 +953,18 @@ mod tests {
 
     #[test]
     fn late_reply_after_a_pause_is_not_taken_as_the_next_one() {
+        // The driver's own timeout, so that a slow test machine has the same margins
+        // as the driver: hundreds of milliseconds.
         let mut r = radio(&[], false);
-        r.timeout = Duration::from_millis(100);
-        // The OK to stop_cw arrives 160 ms after it was sent: after the timeout and
-        // after more than one quiet serial read.
+        r.timeout = Duration::from_millis(500);
+        // The OK to stop_cw arrives 800 ms after it was sent: after the timeout and
+        // after many quiet serial reads.
         r.port
             .timed
-            .push_back((Instant::now() + Duration::from_millis(160), reply(OK)));
+            .push_back((Instant::now() + Duration::from_millis(800), reply(OK)));
         assert!(matches!(r.stop_cw(), Err(RigError::Timeout)));
         // The radio answers the next command NG, slowly.
-        r.port.reply_delay = Some(Duration::from_millis(80));
+        r.port.reply_delay = Some(Duration::from_millis(150));
         r.port.replies.push_back(reply(&[0xFA]));
         assert!(matches!(r.set_transmit(false), Err(RigError::Rejected)));
     }

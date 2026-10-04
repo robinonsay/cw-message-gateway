@@ -32,9 +32,11 @@ chunk_chars = 60
 chunk_pause_ms = 2000
 
 [audio]
-device = "plughw:CARD=CODEC,DEV=0"  # the IC-7300's USB audio codec (see `hfnode devices`).
-                                    # Mac and Windows: its name, or part of it, such as
-                                    # "USB Audio CODEC" (the default there).
+# The IC-7300's USB audio codec; `hfnode devices` lists the inputs. Left out, it is
+# "plughw:CARD=CODEC,DEV=0" on Linux and "USB Audio CODEC" (part of the input's name)
+# on Mac and Windows, which find the radio's codec on each. Set it only if yours is
+# named differently or there are two.
+# device = "plughw:CARD=CODEC,DEV=0"
 sample_rate = 8000
 pitch_hz = 600                    # the radio's CW pitch setting
 end_of_message_ms = 3000

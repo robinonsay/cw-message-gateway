@@ -24,7 +24,7 @@ const FAKE: &str = r#"#!/bin/sh
 echo "$*" >> "$FAKE_LOG"
 case $1 in
 run)
-    echo "pw=${HFNODE_EMAIL_PASSWORD:-}" >> "$FAKE_LOG"
+    echo "pw=[${HFNODE_EMAIL_PASSWORD:-}]" >> "$FAKE_LOG"
     case $FAKE_RUN in
     fail) exit 1 ;;
     clean) exit 0 ;;
@@ -201,7 +201,7 @@ fn secrets_come_from_the_env_file_without_running_it() {
         fs::write(
             &env,
             format!(
-                "# node secrets\n\nHFNODE_EMAIL_PASSWORD=pa=ss word\n\
+                "# node secrets\r\n\r\nHFNODE_EMAIL_PASSWORD=pa=ss word\r\n\
                  BAD-KEY=x\n$(touch {})\nLAST=no newline",
                 marker.display()
             ),
@@ -212,7 +212,8 @@ fn secrets_come_from_the_env_file_without_running_it() {
             Duration::from_secs(20),
         );
         assert_eq!(status.code(), Some(0), "{sh}");
-        assert_eq!(c.count("pw=pa=ss word"), 1, "{sh}: {:?}", c.lines());
+        // Saved with Windows line endings (Notepad), the value still has no CR.
+        assert_eq!(c.count("pw=[pa=ss word]"), 1, "{sh}: {:?}", c.lines());
         assert!(!marker.exists(), "{sh} ran a line of the env file");
     }
 }
