@@ -37,6 +37,11 @@
 //!   reply once the last tune is older than `schedule.retune_minutes`.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
+//! - **Rigs without a tuner or meters** (an FM handheld, [`crate::handheld`]): a
+//!   window start sets the radio up and checks it but tunes nothing, and SWR is not
+//!   checked; such a rig enforces its own limits (a PTT time limit, a duty cycle,
+//!   a clear channel), which it reports through [`Rig::rest_needed`] and which are
+//!   waited out here, on receive, before each keying run.
 
 use crate::session::Transmission;
 use civ::{split_for_keyer, Rig, RigError};
@@ -459,6 +464,16 @@ impl<R: Rig + 'static> Station<R> {
         }
         let t0 = Instant::now();
         self.tuner_ran = true;
+        if !self
+            .rig
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_tuner()
+        {
+            // Nothing to tune (a handheld): set up and checked is all a window start
+            // needs, and nothing is transmitted.
+            return Ok(());
+        }
         if let Err(e) = self.tune(t0) {
             // The radio may have taken 1C 01 02 even if its reply was lost, or still
             // be tuning: make sure it is back on receive before going on.
@@ -547,6 +562,13 @@ impl<R: Rig + 'static> Station<R> {
         self.apply_settings()
             .and_then(|()| self.check_transmit_frequency())
             .map_err(|e| TxError::NotReady(e.to_string()))?;
+        // A rig without meters (a handheld) cannot measure SWR or output: it has its
+        // own limits instead, waited out before each piece below.
+        let meters = self
+            .rig
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_meters();
         for (si, segment) in tx.segments.iter().enumerate() {
             if si > 0 {
                 thread::sleep(self.cfg.segment_pause);
@@ -557,11 +579,12 @@ impl<R: Rig + 'static> Station<R> {
                 let dot = self.with_rig(|r| r.dot_duration())?;
                 let keying = dot * cw::units(&piece);
                 let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+                self.rest_before_keying(keying)?;
                 *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                 self.with_rig(|r| r.send_cw(&piece))?;
                 let sent = Instant::now();
 
-                if !self.swr_checked {
+                if !self.swr_checked && meters {
                     self.check_swr(sent, keying + hang)?;
                 }
                 // The radio's status says nothing about the keyer until the whole
@@ -573,6 +596,24 @@ impl<R: Rig + 'static> Station<R> {
             }
         }
         Ok(())
+    }
+
+    /// Wait, on receive, for as long as the rig says it must rest before keying a
+    /// run of `keying` ([`Rig::rest_needed`]: a handheld's duty cycle, or a busy
+    /// channel), asking again after each wait. Not counted as keying by the
+    /// watchdog, which only starts timing once the piece is sent.
+    fn rest_before_keying(&self, keying: Duration) -> Result<(), TxError> {
+        loop {
+            let rest = self.with_rig(|r| r.rest_needed(keying))?;
+            if rest.is_zero() {
+                return Ok(());
+            }
+            log::info!(
+                "waiting {:.1} s on receive before keying",
+                rest.as_secs_f32()
+            );
+            self.sleep_until(Instant::now() + rest)?;
+        }
     }
 
     /// Sample SWR from `swr_delay` after `sent` until `swr_window` or `on_air` has

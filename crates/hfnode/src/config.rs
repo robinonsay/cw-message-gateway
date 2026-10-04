@@ -23,11 +23,17 @@ pub struct Config {
     pub weather: Option<Weather>,
     #[serde(default)]
     pub filter: Filter,
+    /// The FM handheld, with `station.rig = "handheld"` (docs/handheld.md).
+    pub handheld: Option<Handheld>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Station {
+    /// The radio: the IC-7300 over CI-V (the default), or an FM handheld keyed
+    /// through a sound-card cable, set up in `[handheld]`.
+    #[serde(default)]
+    pub rig: RigKind,
     /// The node's own callsign, sent as `DE <call>` on every transmission.
     pub node_call: String,
     /// Field callsigns allowed to open transactions.
@@ -64,6 +70,63 @@ pub struct Station {
     /// Pause between chunks, in milliseconds.
     #[serde(default = "default_chunk_pause_ms")]
     pub chunk_pause_ms: u64,
+}
+
+/// Which radio the node drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RigKind {
+    #[default]
+    Ic7300,
+    Handheld,
+}
+
+/// An FM handheld (such as a Quansheng) keyed through a sound-card cable: Morse as
+/// a tone over FM (MCW), PTT on a control line of the cable's serial port, which is
+/// `station.serial_port`. See docs/handheld.md and [`crate::handheld`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Handheld {
+    /// Which control line keys the radio: "aioc" (DTR up with RTS down), "rts"
+    /// (Digirig Mobile) or "dtr".
+    pub ptt: crate::handheld::ptt::PttLine,
+    /// The cable's sound output, to the radio's microphone: on Linux an ALSA device
+    /// as `aplay -L` lists it, on macOS and Windows the output's name or part of it.
+    /// `hfnode devices` lists them.
+    pub output_device: String,
+    /// Pitch of the Morse tone the node sends, in Hz.
+    #[serde(default = "default_tone")]
+    pub tone_hz: f32,
+    /// Level of that tone, 0-1 of full scale: sets the FM deviation.
+    #[serde(default = "default_tone_level")]
+    pub tone_level: f32,
+    /// Carrier before the first element of each keying run, for the transmitter
+    /// to come up and the other radio's squelch to open.
+    #[serde(default = "default_lead_in")]
+    pub lead_in_ms: u64,
+    /// Carrier after the last element, before PTT is released.
+    #[serde(default = "default_tail")]
+    pub tail_ms: u64,
+    /// At most this share of any `duty_window_secs` on the air, so the handheld's
+    /// transmitter does not overheat; longer replies are paced.
+    #[serde(default = "default_duty")]
+    pub max_duty_percent: u32,
+    #[serde(default = "default_duty_window")]
+    pub duty_window_secs: u64,
+    /// Received audio above this RMS level (0-1 of full scale) means the squelch
+    /// is open: someone is using the frequency. 0 turns the check off.
+    #[serde(default = "default_busy_level")]
+    pub busy_level: f32,
+    /// The frequency must have been quiet this long before the node keys.
+    #[serde(default = "default_busy_quiet")]
+    pub busy_quiet_ms: u64,
+    /// Give up on a transmission after waiting this long for the frequency.
+    #[serde(default = "default_busy_wait")]
+    pub busy_max_wait_secs: u64,
+    /// The last bring-up stage passed with this handheld (docs/handheld.md,
+    /// "Bring-up"). Commands that need a later stage are refused.
+    #[serde(default)]
+    pub commissioned: crate::handheld::Stage,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -445,6 +508,33 @@ fn default_end_of_message_ms() -> u64 {
 fn default_bandwidth() -> f32 {
     150.0
 }
+fn default_tone() -> f32 {
+    800.0
+}
+fn default_tone_level() -> f32 {
+    0.4
+}
+fn default_lead_in() -> u64 {
+    400
+}
+fn default_tail() -> u64 {
+    150
+}
+fn default_duty() -> u32 {
+    50
+}
+fn default_duty_window() -> u64 {
+    300
+}
+fn default_busy_level() -> f32 {
+    0.02
+}
+fn default_busy_quiet() -> u64 {
+    1000
+}
+fn default_busy_wait() -> u64 {
+    30
+}
 fn default_every() -> u32 {
     60
 }
@@ -561,9 +651,10 @@ impl Config {
         if !(6..=48).contains(&s.key_speed_wpm) {
             bail!("station.key_speed_wpm must be 6-48");
         }
-        if !TX_COVERAGE_HZ
-            .iter()
-            .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
+        if s.rig == RigKind::Ic7300
+            && !TX_COVERAGE_HZ
+                .iter()
+                .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
         {
             bail!(
                 "station.frequency_hz {} is outside the IC-7300's amateur transmit coverage",
@@ -659,6 +750,7 @@ impl Config {
         self.decoder_config()
             .validate()
             .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
+        crate::handheld::validate(self)?;
         Ok(())
     }
 

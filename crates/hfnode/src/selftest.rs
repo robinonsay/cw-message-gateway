@@ -553,6 +553,16 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
         self.inner.set_transmit(tx)
     }
+    fn has_tuner(&self) -> bool {
+        self.inner.has_tuner()
+    }
+    fn has_meters(&self) -> bool {
+        self.inner.has_meters()
+    }
+    fn rest_needed(&mut self, keying: Duration) -> civ::Result<Duration> {
+        // The station's times are scaled, the rig's own in real time already.
+        self.inner.rest_needed(keying)
+    }
 }
 
 type NodeRig = TimeScaled<Ic7300<MockPort>>;

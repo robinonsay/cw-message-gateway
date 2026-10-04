@@ -697,6 +697,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "serialport",
  "tempfile",
  "toml",
  "ureq",
