@@ -88,15 +88,17 @@ fn field_message_over_the_air_is_sent() {
     );
 
     let mut rig = SimRig::new();
-    // 100x real time, or `HFNODE_E2E_SCALE` on a slow machine: there the short
-    // window ID can go by before the SWR check samples it.
+    // 100x real time, or `HFNODE_E2E_SCALE` on a slow machine.
     rig.time_scale = std::env::var("HFNODE_E2E_SCALE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(100.0);
     let mut sc = StationConfig::from_config(&cfg.station);
     sc.poll = Duration::from_millis(2);
-    sc.swr_delay = Duration::from_millis(2);
+    // The SWR check samples the short start-up `DE N0DE` the moment it is keyed,
+    // with no sleep first that a slow machine could wake from after it is over.
+    rig.tx_on_delay = Duration::ZERO;
+    sc.swr_delay = Duration::ZERO;
     let mut station = Station::new(rig, sc, None);
     station.configure().unwrap();
 

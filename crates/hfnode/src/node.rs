@@ -669,9 +669,6 @@ mod tests {
         assert_eq!(cfg.audio.sample_rate, 8000);
 
         let mut rig = SimRig::new();
-        // The window's `DE N0DE` is on the air for about 35 ms at 100x: a machine
-        // that wakes the SWR check late (GitHub's macOS runner) can miss all of
-        // its output and lock the window out, so CI runs these slower there.
         rig.time_scale = std::env::var("HFNODE_E2E_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -679,7 +676,13 @@ mod tests {
         rig.tuner_bypassed = opts.tuner_bypassed;
         let mut sc = StationConfig::from_config(&cfg.station);
         sc.poll = Duration::from_millis(2);
-        sc.swr_delay = Duration::from_millis(2);
+        // The start-up `DE N0DE` is on the air for about 35 ms at 100x. The SWR
+        // check samples it the moment it is keyed, with no sleep before that a
+        // slow machine (GitHub's macOS runner) can wake from too late to see any
+        // output, which would lock the node out. The station's own tests cover
+        // switch-on delays.
+        rig.tx_on_delay = Duration::ZERO;
+        sc.swr_delay = Duration::ZERO;
         let mut station = Station::new(rig, sc, None);
         station.configure().unwrap();
 
