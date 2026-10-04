@@ -242,7 +242,7 @@ It runs 100 times faster than real time by default (about 30 s for all of them o
 laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
 depend on it (any scale from 1 to 200). `--scale 1` runs everything at real speed, including the CI-V reply
 timeout, the watchdog and the forced-receive retries, which stay in real time in a
-time-scaled run (about 17 minutes with `--jobs 64`).
+time-scaled run (about 23 minutes with `--jobs 64`).
 
 **Sweep: where it breaks.** `hfnode selftest --sweep` runs a complete TX exchange
 (open, read-back, `OK`, `SENT`; `--rx` adds an RX readout) for every combination of

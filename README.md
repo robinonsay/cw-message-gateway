@@ -228,7 +228,7 @@ white, so real band conditions and real fists are tested only on the air. In a
 time-scaled run the CI-V reply timeout, the watchdog tick and the forced-receive
 retry pause stay in real time, so they take `scale` times longer in radio time;
 `hfnode selftest --scale 1` runs everything at its real speed, real-time margins
-included (about 17 minutes with one job per scenario,
+included (about 23 minutes with one job per scenario,
 `--jobs 64`).
 
 **Sweep: where it stops working.** The scenarios check one point each and all
