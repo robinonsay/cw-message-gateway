@@ -43,8 +43,10 @@
 //! - **Linux**: the tty layer raises DTR and RTS on open (the `cp210x` driver's
 //!   `dtr_rts` hook), and lowers them on close (HUPCL).
 //! - **macOS**: the first open of a port raises DTR and RTS (Apple's IOSerialFamily,
-//!   `IOSerialBSDClient::initSession`, which every serial driver goes through), and
-//!   close lowers them (HUPCL). Read in Apple's published source; not measured on
+//!   `IOSerialBSDClient::initSession`, which creates the `/dev/cu.*` and `/dev/tty.*`
+//!   files for a serial driver), and close lowers them (HUPCL). Read in Apple's
+//!   published source; that Apple's and Silicon Labs' current CP210x drivers go
+//!   through it is understood but not checked, and none of it has been measured on
 //!   an IC-7300.
 //! - **Windows**: the port is opened, then its line settings are applied with DTR
 //!   and RTS control disabled (serialport's `SetCommState`), then both are cleared.

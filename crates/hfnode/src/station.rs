@@ -12,9 +12,9 @@
 //!   and the radio switched to receive, then receive is confirmed by reading the
 //!   radio's status, allowing for the break-in delay. If it cannot be confirmed,
 //!   transmitting is inhibited. With a state directory the inhibit is also written
-//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd restarts the
-//!   service after a crash); only removing the file, once the radio has been
-//!   checked, does.
+//!   to [`INHIBIT_FILE`] there, so a restart does not clear it (systemd or the
+//!   start-up scripts in `deploy/` restart the node after a crash); only removing
+//!   the file, once the radio has been checked, does.
 //! - **Software watchdog.** A separate thread forces the radio back to receive if
 //!   any one keying run lasts longer than `max_key_seconds`, and keeps trying until
 //!   receive is confirmed. It backs up, and does not replace, the hardware transmit

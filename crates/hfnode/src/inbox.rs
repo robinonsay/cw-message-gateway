@@ -183,7 +183,8 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) -> std::io::Result<()> {
-    // Directories cannot be opened for syncing here; the node runs on Linux.
+    // Windows: a directory cannot be opened as a file to sync it; NTFS journals
+    // the rename itself.
     Ok(())
 }
 

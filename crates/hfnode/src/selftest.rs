@@ -1023,7 +1023,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
     std::fs::write(&key, TEST_KEY)?;
     let cfg: Config = toml::from_str(&format!(
         r#"
-        state_dir = "{state}"
+        state_dir = '{state}'
         [station]
         node_call = "{NODE_CALL}"
         field_calls = ["{FIELD_CALL}"]
@@ -1037,7 +1037,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         sample_rate = {SAMPLE_RATE}
         pitch_hz = {PITCH_HZ}
         [auth]
-        key_file = "{key}"
+        key_file = '{key}'
         [schedule]
         {schedule}
         [[contacts]]

@@ -40,7 +40,7 @@ fn field_message_over_the_air_is_sent() {
     let _ = env_logger::builder().is_test(true).try_init();
     let cfg: Config = toml::from_str(&format!(
         r#"
-        state_dir = "{state}"
+        state_dir = '{state}'
         [station]
         node_call = "N0DE"
         field_calls = ["W5XXX"]
@@ -50,7 +50,7 @@ fn field_message_over_the_air_is_sent() {
         [audio]
         end_of_message_ms = 2500
         [auth]
-        key_file = "{key}"
+        key_file = '{key}'
         [schedule]
         always = true
         [[contacts]]

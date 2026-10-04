@@ -464,7 +464,7 @@ mod tests {
         std::fs::write(&key, KEY).unwrap();
         let cfg: Config = toml::from_str(&format!(
             r#"
-            state_dir = "{state}"
+            state_dir = '{state}'
             [station]
             node_call = "N0DE"
             field_calls = ["W5XXX"]
@@ -474,7 +474,7 @@ mod tests {
             [audio]
             end_of_message_ms = 2500
             [auth]
-            key_file = "{key}"
+            key_file = '{key}'
             [schedule]
             always = true
             [[contacts]]
