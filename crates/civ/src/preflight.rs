@@ -299,6 +299,27 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
         },
     );
 
+    // Linked, the USB port shares the bus with [REMOTE]: another controller's
+    // replies could be taken for the radio's, and the USB baud rate and echo items
+    // no longer apply (p. 12-10 and 12-11).
+    match r.civ_usb_unlinked() {
+        Ok(true) => rep.add(
+            "CI-V USB port",
+            "1A 05 00 74",
+            "Unlink from [REMOTE]",
+            Level::Pass,
+            "",
+        ),
+        Ok(false) => rep.add(
+            "CI-V USB port",
+            "1A 05 00 74",
+            "Link to [REMOTE]",
+            Level::Warn,
+            "set Unlink from [REMOTE] (the default) unless nothing is on [REMOTE]",
+        ),
+        Err(e) => rep.add("CI-V USB port", "1A 05 00 74", "-", Level::Warn, unread(&e)),
+    }
+
     match r.usb_inhibit_timer() {
         Ok(true) => rep.add("USB inhibit timer", "1A 05 01 97", "ON", Level::Pass, ""),
         Ok(false) => rep.add(
@@ -581,6 +602,7 @@ mod tests {
             (&[0x21, 0x02], &[0x00]),
             (&[0x1A, 0x05, 0x00, 0x29], &[0x01]),
             (&[0x1A, 0x05, 0x01, 0x97], &[0x01]),
+            (&[0x1A, 0x05, 0x00, 0x74], &[0x01]),
             (&[0x03], &[0x00, 0x00, 0x03, 0x07, 0x00]),
             (&[0x04], &[0x03, 0x01]),
             (&[0x14, 0x0A], &[0x00, 0x26]),
@@ -626,7 +648,7 @@ mod tests {
         // that sets a value, keys or tunes.
         let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
         let sent = sent_bodies(&r);
-        assert_eq!(sent.len(), 19);
+        assert_eq!(sent.len(), 20);
         for body in sent {
             assert!(reads.contains(&body), "{body:02X?} is not a read");
         }
@@ -681,14 +703,16 @@ mod tests {
     }
 
     #[test]
-    fn keyer_ratio_and_peak_hold_only_warn() {
+    fn keyer_ratio_peak_hold_and_a_linked_port_only_warn() {
         let mut t = good();
         t.answers.insert(vec![0x1A, 0x05, 0x01, 0x61], vec![0x45]);
         t.answers.insert(vec![0x1A, 0x05, 0x00, 0x84], vec![0x01]);
+        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x74], vec![0x00]);
         let rep = preflight(&mut rig(t), true);
         assert!(rep.passed(), "{rep}");
         assert_eq!(level_of(&rep, "keyer dot/dash ratio"), Level::Warn);
         assert_eq!(level_of(&rep, "meter peak hold"), Level::Warn);
+        assert_eq!(level_of(&rep, "CI-V USB port"), Level::Warn);
     }
 
     #[test]

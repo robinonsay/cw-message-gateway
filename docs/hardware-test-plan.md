@@ -304,7 +304,7 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.25 | `1C 03` transmit frequency | 5 frequency bytes as in 0.4; must equal the set frequency | p. 19-7 (line 9332) | ☐ |
 | 0.26 | `1A 05 00 78`, `00 79`, `00 80` | USB SEND, USB Keying (CW), USB Keying (RTTY): `00` = OFF (required), `01` = DTR, `02` = RTS | p. 19-5 (lines 8986, 8991, 8995) | ☐ |
 | 0.27 | `1A 05 00 29` | Time-Out Timer (CI-V): `00` = OFF, `01` = 3 min to `05` = 30 min. `run` refuses OFF | p. 19-4 (line 8861) | ☐ |
-| 0.28 | `1A 05 01 97` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON | p. 19-7 (line 9269) | ☐ |
+| 0.28 | `1A 05 01 97`, `1A 05 00 74` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON. CI-V USB Port: `00` = Link to [REMOTE] (warning), `01` = Unlink | p. 19-7 (line 9269); p. 19-5 (line 8975) | ☐ |
 | 0.29 | `1A 05 00 71`, `00 75`, `00 84`, `01 61` | Reported only: CI-V Transceive, USB Echo Back (raw value), meter peak hold (warning if ON), keyer dot/dash ratio (warning unless `30`, 1:1:3) | pp. 19-5 and 19-6 (lines 8966, 8978, 9006, 9185) | ☐ |
 | 0.30 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
 | 0.31 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
@@ -332,10 +332,10 @@ hfnode radio --config $C status
 ```
 
 `check` only reads: `19 00`, `1C 00`, `1A 05 00 78`, `00 79`, `00 80`, `0F`, `21 02`,
-`1A 05 00 29`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `03`, `1C 03`, `04`,
-`14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent with no data,
-which reads the item. To see every frame on the wire, with the time each reply
-took, put `RUST_LOG=civ=trace` in front of the command.
+`1A 05 00 29`, `1A 05 00 74`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `03`,
+`1C 03`, `04`, `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent
+with no data, which reads the item. To see every frame on the wire, with the time
+each reply took, put `RUST_LOG=civ=trace` in front of the command.
 
 **Look for:** one line per item, each PASS, WARN or info, then `preflight passed;
 nothing was written to the radio`. `status` prints `frequency N Hz` and

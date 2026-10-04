@@ -137,6 +137,9 @@ mod cmd {
     pub const TIME_OUT_TIMER: &[u8] = &[0x1A, 0x05, 0x00, 0x29];
     /// 1A 05 00 71: "Send/read the CI-V transceive setting (00=OFF, 01=ON)" (p. 19-5).
     pub const CIV_TRANSCEIVE: &[u8] = &[0x1A, 0x05, 0x00, 0x71];
+    /// 1A 05 00 74: "Send/read the CI-V USB port setting (00=Link to [REMOTE],
+    /// 01=Unlink to [REMOTE]) (Read only)" (p. 19-5).
+    pub const CIV_USB_PORT: &[u8] = &[0x1A, 0x05, 0x00, 0x74];
     /// 1A 05 00 75: "Send/read echo back setting for CI-V operation from USB
     /// (00=ON, 01=OFF)" (p. 19-5).
     pub const USB_ECHO_BACK: &[u8] = &[0x1A, 0x05, 0x00, 0x75];
@@ -533,6 +536,13 @@ impl<P: Port> Ic7300<P> {
     /// 1A 05 00 71: whether CI-V Transceive is on.
     pub fn civ_transceive(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_TRANSCEIVE, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 74: whether the USB CI-V port is on its own ("Unlink from
+    /// [REMOTE]"), so that only this port's controller talks to the radio and the
+    /// USB baud rate and echo items apply (p. 12-10, line 6853).
+    pub fn civ_usb_unlinked(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::CIV_USB_PORT, 0x00..=0x01)? == 0x01)
     }
 }
 

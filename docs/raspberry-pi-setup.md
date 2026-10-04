@@ -161,7 +161,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Item | Set to | Why |
 |---|---|---|
 | CI-V Address | **94h** (default) | Must equal `station.civ_address` (02h to DFh). Instructions written for the IC-7300MK2 use B6h; do not copy them. |
-| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack. The two settings below only apply in this mode. |
+| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node warns if it is linked. |
 | CI-V USB Baud Rate | **115200** | Must equal `station.baud`. Set it explicitly rather than Auto. |
 | CI-V USB Echo Back | **OFF** (default) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
 | CI-V Transceive | **OFF** (default is ON) | Stops the radio sending unsolicited status frames whenever a setting changes. The driver ignores frames not addressed to it, so ON also works. |
