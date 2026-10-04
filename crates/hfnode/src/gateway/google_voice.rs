@@ -16,10 +16,10 @@
 //! the owner's account: see docs/texting.md for the checks to make before relying on
 //! it.
 
-use super::email::{connect_imap, dkim_authenticated, us_number};
+use super::email::{auth_headers, connect_imap, dkim_authenticated, from_address, us_number};
 use crate::config::{Contact, Email, Phone, GOOGLE_VOICE_DOMAIN};
 use anyhow::{Context, Result};
-use mail_parser::{HeaderName, MessageParser, PartType};
+use mail_parser::{MessageParser, PartType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -157,15 +157,17 @@ pub fn gv_text(parsed: &mail_parser::Message) -> Result<GvBody, String> {
 pub fn one_to_one(parsed: &mail_parser::Message) -> bool {
     let subject = parsed.subject().unwrap_or("").trim();
     subject.starts_with("New text message from ")
-        && plain_text(parsed)
-            .is_some_and(|t| t.lines().any(|l| normalized(l).starts_with(MARKER)))
+        && plain_text(parsed).is_some_and(|t| t.lines().any(|l| normalized(l).starts_with(MARKER)))
 }
 
 /// What one Google Voice mail teaches about reply addresses.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Learn<'c> {
     /// A one-to-one text from this contact: reply to it at `address`.
-    Yes { contact: &'c Contact, address: String },
+    Yes {
+        contact: &'c Contact,
+        address: String,
+    },
     /// Not a Google Voice mail to this number from a contact's phone.
     NotContact,
     /// From a contact's number, but our mail server reports no DKIM pass for it.
@@ -185,13 +187,7 @@ pub fn learn_decision<'c>(
     let Some(parsed) = MessageParser::default().parse(raw) else {
         return Learn::NotContact;
     };
-    let from = parsed
-        .from()
-        .and_then(|a| a.first())
-        .and_then(|a| a.address())
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let from = from_address(&parsed);
     let Some(addr) = parse_gv_from(&from) else {
         return Learn::NotContact;
     };
@@ -204,18 +200,7 @@ pub fn learn_decision<'c>(
     else {
         return Learn::NotContact;
     };
-    let auth_results: Vec<&str> = parsed
-        .headers()
-        .iter()
-        .filter(|h| h.name == HeaderName::AuthenticationResults)
-        .filter_map(|h| {
-            let raw = parsed
-                .raw_message
-                .get(h.offset_start as usize..h.offset_end as usize)?;
-            std::str::from_utf8(raw).ok()
-        })
-        .collect();
-    if !dkim_authenticated(&auth_results, &from, authserv_id) {
+    if !dkim_authenticated(&auth_headers(&parsed), &from, authserv_id) {
         return Learn::NotAuthenticated(contact);
     }
     if !one_to_one(&parsed) {
@@ -429,19 +414,21 @@ pub fn learn_gv(
     let mut delta = GvStore::default();
     let mut scanned = if full { 0 } else { stored.scanned_uid };
     let mut complete = true;
-    let mut fetched = 0;
-    for &uid in &uids {
+    for (fetched, &uid) in uids.iter().enumerate() {
         if full
             && (fetched >= FULL_SCAN_LIMIT
-                || phones.iter().all(|p| delta.contacts.contains_key(p.as_str())))
+                || phones
+                    .iter()
+                    .all(|p| delta.contacts.contains_key(p.as_str())))
         {
             break;
         }
-        fetched += 1;
         let fetches = match session.uid_fetch(uid.to_string(), "(UID INTERNALDATE BODY.PEEK[])") {
             Ok(f) => f,
             Err(e) => {
-                log::warn!("IMAP fetch of UID {uid} failed while looking for Google Voice addresses: {e}");
+                log::warn!(
+                    "IMAP fetch of UID {uid} failed while looking for Google Voice addresses: {e}"
+                );
                 complete = false;
                 break;
             }
@@ -469,7 +456,11 @@ pub fn learn_gv(
                     learned_unix: at,
                     uid,
                 };
-                let phone = contact.phone.as_ref().map(Phone::to_string).unwrap_or_default();
+                let phone = contact
+                    .phone
+                    .as_ref()
+                    .map(Phone::to_string)
+                    .unwrap_or_default();
                 match delta.contacts.get(&phone) {
                     Some(old) if !entry.newer_than(old) => {}
                     _ => {
@@ -607,10 +598,16 @@ pub(crate) mod tests {
                 "",
             );
         assert_ne!(plain, FIXTURE);
-        assert_eq!(gv_text(&parse(&plain)).unwrap().text, "Running late, home by 6");
+        assert_eq!(
+            gv_text(&parse(&plain)).unwrap().text,
+            "Running late, home by 6"
+        );
         // Several lines are joined.
         let two = FIXTURE.replace("Running late, home by 6", "Running late\r\nhome by 6");
-        assert_eq!(gv_text(&parse(&two)).unwrap().text, "Running late home by 6");
+        assert_eq!(
+            gv_text(&parse(&two)).unwrap().text,
+            "Running late home by 6"
+        );
     }
 
     #[test]

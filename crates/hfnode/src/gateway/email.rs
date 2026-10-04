@@ -112,7 +112,8 @@ fn carrier(domain: &str) -> Option<&'static [&'static str]> {
 /// Whether `address` is at a carrier email-to-SMS gateway.
 pub fn is_carrier_address(address: &str) -> bool {
     let a = address.trim().to_ascii_lowercase();
-    a.rsplit_once('@').is_some_and(|(_, d)| carrier(d).is_some())
+    a.rsplit_once('@')
+        .is_some_and(|(_, d)| carrier(d).is_some())
 }
 
 /// The 10-digit number of a carrier email-to-SMS address (lowercase).
@@ -501,25 +502,8 @@ pub fn accept_with<'c>(
     let parsed = MessageParser::default()
         .parse(raw)
         .ok_or_else(|| Rejected::info("unparseable message"))?;
-    let from = parsed
-        .from()
-        .and_then(|a| a.first())
-        .and_then(|a| a.address())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    // In header order, topmost first.
-    let auth_results: Vec<&str> = parsed
-        .headers()
-        .iter()
-        .filter(|h| h.name == HeaderName::AuthenticationResults)
-        .filter_map(|h| {
-            let raw = parsed
-                .raw_message
-                .get(h.offset_start as usize..h.offset_end as usize)?;
-            std::str::from_utf8(raw).ok()
-        })
-        .collect();
+    let from = from_address(&parsed);
+    let auth_results = auth_headers(&parsed);
     let source_id = parsed
         .message_id()
         .map(str::to_string)
@@ -572,7 +556,9 @@ pub fn accept_with<'c>(
     }
 
     let contact = contact_for(contacts, &from, &auth_results, authserv_id).ok_or_else(|| {
-        Rejected::info(format!("from {from:?}: not a contact, or not authenticated"))
+        Rejected::info(format!(
+            "from {from:?}: not a contact, or not authenticated"
+        ))
     })?;
     let text = strip_reply(&parsed.body_text(0).unwrap_or_default());
     if text.is_empty() {
@@ -596,6 +582,56 @@ pub fn accept_with<'c>(
         text,
         via,
     })
+}
+
+/// The From address, as written (a Google Voice token may be case-sensitive).
+pub(crate) fn from_address(parsed: &mail_parser::Message) -> String {
+    parsed
+        .from()
+        .and_then(|a| a.first())
+        .and_then(|a| a.address())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// The Authentication-Results header values, in header order, topmost first.
+pub(crate) fn auth_headers<'a>(parsed: &'a mail_parser::Message) -> Vec<&'a str> {
+    parsed
+        .headers()
+        .iter()
+        .filter(|h| h.name == HeaderName::AuthenticationResults)
+        .filter_map(|h| {
+            let raw = parsed
+                .raw_message
+                .get(h.offset_start as usize..h.offset_end as usize)?;
+            std::str::from_utf8(raw).ok()
+        })
+        .collect()
+}
+
+/// What the believed Authentication-Results header says about DKIM, for
+/// `hfnode messages check`.
+pub(crate) fn auth_summary(auth_results: &[&str], authserv_id: Option<&str>) -> String {
+    let Some(h) = trusted_header(auth_results, authserv_id) else {
+        return "no Authentication-Results header believed".into();
+    };
+    let dkim: Vec<String> = h
+        .results
+        .iter()
+        .filter(|r| r.method == "dkim")
+        .map(|r| format!("dkim={} d={}", r.result, r.domain().unwrap_or_default()))
+        .collect();
+    let id = if h.authserv_id.is_empty() {
+        "(no authserv-id)"
+    } else {
+        &h.authserv_id
+    };
+    if dkim.is_empty() {
+        format!("{id}: no DKIM result")
+    } else {
+        format!("{id}: {}", dkim.join(", "))
+    }
 }
 
 /// A phone's reaction to the operator's text, shortened for the air; a removed
@@ -1082,6 +1118,183 @@ mod tests {
         assert_eq!(
             (m.contact.name.as_str(), m.source_id.as_str()),
             ("MOM", "uid:9")
+        );
+    }
+
+    mod google_voice_texts {
+        use super::super::*;
+        use crate::gateway::google_voice::tests::{contacts, gv_number, FIXTURE};
+
+        /// (contact, text, route) or (why, warn, notice for).
+        type Taken = Result<(String, String, Via), (String, bool, Option<String>)>;
+
+        fn take(raw: &str) -> Taken {
+            let c = contacts();
+            let gv = gv_number();
+            accept_with(raw.as_bytes(), 3, &c, Some("mx.google.com"), Some(&gv))
+                .map(|m| (m.contact.name.clone(), m.text, m.via))
+                .map_err(|r| (r.why, r.warn, r.notice.map(|c| c.name.clone())))
+        }
+
+        #[test]
+        fn a_text_from_a_contact_is_taken() {
+            let c = contacts();
+            let gv = gv_number();
+            let m =
+                accept_with(FIXTURE.as_bytes(), 3, &c, Some("mx.google.com"), Some(&gv)).unwrap();
+            assert_eq!(
+                (m.contact.name.as_str(), m.text.as_str(), m.via),
+                ("MOM", "Running late, home by 6", Via::GoogleVoice)
+            );
+            assert_eq!(m.source_id, "gv-1@txt.voice.google.com");
+            // Ten or eleven digits in either field.
+            for local in ["5550001111.15551234567", "15550001111.5551234567"] {
+                let raw = FIXTURE.replace(
+                    "15550001111.15551234567.AbCdEf1234@",
+                    &format!("{local}.AbCdEf1234@"),
+                );
+                assert_ne!(raw, FIXTURE);
+                assert_eq!(take(&raw).unwrap().0, "MOM", "{local}");
+            }
+            // DKIM by google.com is aligned with txt.voice.google.com.
+            let raw = FIXTURE.replace("header.i=@txt.voice.google.com", "header.d=google.com");
+            assert!(take(&raw).is_ok());
+        }
+
+        #[test]
+        fn anything_else_from_google_voice_is_refused() {
+            // Not configured.
+            let c = contacts();
+            let r = accept_with(FIXTURE.as_bytes(), 3, &c, None, None).unwrap_err();
+            assert!(r.warn && r.why.contains("not configured"), "{}", r.why);
+            for (from, to, says, warn) in [
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "15550002222.15551234567.AbCdEf1234@",
+                    "another number",
+                    true,
+                ),
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "15550001111.15551234567.Ab.Cd@",
+                    "not recognized",
+                    true,
+                ),
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "1555000111x.15551234567.AbCdEf1234@",
+                    "not recognized",
+                    true,
+                ),
+                ("15551234567", "15559990000", "not a contact's phone", false),
+                ("dkim=pass", "dkim=none", "without a DKIM pass", true),
+            ] {
+                let raw = FIXTURE.replace(from, to);
+                assert_ne!(raw, FIXTURE);
+                let (why, w, notice) = take(&raw).unwrap_err();
+                assert!(why.contains(says), "{to}: {why}");
+                assert_eq!(w, warn, "{to}");
+                assert_eq!(notice, None, "{to}");
+                // A stranger's number is never in the log line.
+                assert!(!why.contains("9990000"), "{why}");
+            }
+        }
+
+        #[test]
+        fn unreadable_texts_from_a_contact_get_a_notice() {
+            let start = FIXTURE.find("--b1\r\nContent-Type: text/plain").unwrap();
+            let html = FIXTURE.find("--b1\r\nContent-Type: text/html").unwrap();
+            let cases = [
+                (format!("{}{}", &FIXTURE[..start], &FIXTURE[html..]), "without a text/plain part"),
+                (
+                    FIXTURE.replace("To respond to this text message, reply to this email or visit Google Voice <https://voice.google.com>.\r\n", ""),
+                    "unrecognized",
+                ),
+                (
+                    FIXTURE.replace("YOUR ACCOUNT", "MANAGE SETTINGS <https://voice.google.com/settings>\r\nYOUR ACCOUNT"),
+                    "footer left",
+                ),
+                (FIXTURE.replace("Running late, home by 6\r\n", ""), "no text"),
+            ];
+            for (raw, says) in cases {
+                let (why, warn, notice) = take(&raw).unwrap_err();
+                assert!(why.contains(says), "{says}: {why}");
+                assert!(warn);
+                assert_eq!(notice.as_deref(), Some("MOM"), "{says}");
+            }
+        }
+
+        #[test]
+        fn reactions_are_shortened_on_texts_only() {
+            let react = |text: &str| FIXTURE.replace("Running late, home by 6", text);
+            assert_eq!(
+                take(&react("Liked \u{201C}RUNNING LATE HOME SUN\u{201D}"))
+                    .unwrap()
+                    .1,
+                "LIKED YOUR MSG"
+            );
+            assert_eq!(
+                take(&react("Laughed at \"HI\"")).unwrap().1,
+                "LAUGHED AT YOUR MSG"
+            );
+            assert_eq!(
+                take(&react("Reacted \u{1F602} to \u{201C}RUNNING LATE\u{201D}"))
+                    .unwrap()
+                    .1,
+                "REACTED TO YOUR MSG"
+            );
+            let (why, warn, notice) =
+                take(&react("Removed a like from \u{201C}RUNNING LATE\u{201D}")).unwrap_err();
+            assert!(why.contains("reaction removed by MOM"), "{why}");
+            assert!(!warn && notice.is_none());
+            // Ordinary texts that start like one.
+            for text in [
+                "Liked it a lot",
+                "Loved \"",
+                "liked \"x\"",
+                "Reacted to nothing",
+            ] {
+                assert_eq!(take(&react(text)).unwrap().1, text);
+            }
+            // From an email contact the same words are just an email.
+            let c = super::contacts();
+            let mail = format!(
+                "Authentication-Results:{}From: Bob <bob@example.com>\r\nTo: n@example.org\r\n\r\nLiked \u{201C}RUNNING LATE\u{201D}\r\n",
+                super::GOOGLE_PASS
+            );
+            let m = accept_with(mail.as_bytes(), 1, &c, None, None).unwrap();
+            assert_eq!(
+                (m.text.as_str(), m.via),
+                ("Liked \u{201C}RUNNING LATE\u{201D}", Via::Email)
+            );
+            // From a carrier gateway it is a text.
+            let sms = "From: 5551234567@vtext.com\r\nTo: n@example.org\r\n\r\nLoved \"OK\"\r\n";
+            let m = accept_with(sms.as_bytes(), 2, &c, None, None).unwrap();
+            assert_eq!((m.text.as_str(), m.via), ("LOVED YOUR MSG", Via::Carrier));
+        }
+    }
+
+    #[test]
+    fn a_silent_imap_server_times_out() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let held: Vec<_> = l.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(30));
+            drop(held);
+        });
+        let start = std::time::Instant::now();
+        let r = connect_tls(
+            "localhost",
+            addr,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        assert!(r.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
         );
     }
 }

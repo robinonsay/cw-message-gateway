@@ -157,7 +157,10 @@ pub(crate) mod tests {
             (Vec::new(), DecodeError::NoString),
             (b"no class here".to_vec(), DecodeError::NoString),
             // Cut inside the length, then inside the text.
-            (blob(&[b'x'; 300], 0x94)[..tag + 2].to_vec(), DecodeError::Length),
+            (
+                blob(&[b'x'; 300], 0x94)[..tag + 2].to_vec(),
+                DecodeError::Length,
+            ),
             (good[..tag + 4].to_vec(), DecodeError::Truncated),
             // A length one past the end.
             (
