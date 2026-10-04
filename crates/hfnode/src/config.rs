@@ -25,15 +25,15 @@ pub struct Config {
     pub storm: Option<Storm>,
     #[serde(default)]
     pub filter: Filter,
-    /// The FM handheld, with `station.rig = "handheld"` (docs/handheld.md).
+    /// The handheld, with `station.rig = "handheld"` (docs/handheld.md).
     pub handheld: Option<Handheld>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Station {
-    /// The radio: the IC-7300 over CI-V (the default), or an FM handheld keyed
-    /// through a sound-card cable, set up in `[handheld]`.
+    /// The radio: the IC-7300 over CI-V (the default), or a handheld running the
+    /// CW firmware, set up in `[handheld]`.
     #[serde(default)]
     pub rig: RigKind,
     /// The node's own callsign, sent as `DE <call>` on every transmission.
@@ -83,43 +83,28 @@ pub enum RigKind {
     Handheld,
 }
 
-/// An FM handheld (such as a Quansheng) keyed through a sound-card cable: Morse as
-/// a tone over FM (MCW), PTT on a control line of the cable's serial port, which is
-/// `station.serial_port`. See docs/handheld.md and [`crate::handheld`].
+/// A handheld (such as a Quansheng UV-K1) running a CW firmware that keys a
+/// carrier on commands over `station.serial_port`: see docs/handheld.md, the
+/// command set in docs/handheld-protocol.md, and [`crate::handheld`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handheld {
-    /// Which control line keys the radio: "aioc" (DTR up with RTS down), "rts"
-    /// (Digirig Mobile) or "dtr".
-    pub ptt: crate::handheld::ptt::PttLine,
-    /// The cable's sound output, to the radio's microphone: on Linux an ALSA device
-    /// as `aplay -L` lists it, on macOS and Windows the output's name or part of it.
-    /// `hfnode devices` lists them.
-    pub output_device: String,
-    /// Pitch of the Morse tone the node sends, in Hz.
-    #[serde(default = "default_tone")]
-    pub tone_hz: f32,
-    /// Level of that tone, 0-1 of full scale: sets the FM deviation.
-    #[serde(default = "default_tone_level")]
-    pub tone_level: f32,
-    /// Carrier before the first element of each keying run, for the transmitter
-    /// to come up and the other radio's squelch to open.
-    #[serde(default = "default_lead_in")]
-    pub lead_in_ms: u64,
-    /// Carrier after the last element, before PTT is released.
-    #[serde(default = "default_tail")]
-    pub tail_ms: u64,
+    /// The serial speed the firmware uses.
+    #[serde(default = "default_handheld_baud")]
+    pub baud: u32,
+    /// Transmit power: "low" (the default), "mid" or "high", the handheld's own
+    /// levels. `station.power_watts` is not used with a handheld.
+    #[serde(default)]
+    pub power: crate::handheld::proto::Power,
     /// At most this share of any `duty_window_secs` on the air, so the handheld's
-    /// transmitter does not overheat; longer replies are paced.
+    /// transmitter does not overheat; longer replies wait on receive between
+    /// keying runs.
     #[serde(default = "default_duty")]
     pub max_duty_percent: u32,
     #[serde(default = "default_duty_window")]
     pub duty_window_secs: u64,
-    /// Received audio above this RMS level (0-1 of full scale) means the squelch
-    /// is open: someone is using the frequency. 0 turns the check off.
-    #[serde(default = "default_busy_level")]
-    pub busy_level: f32,
-    /// The frequency must have been quiet this long before the node keys.
+    /// The frequency must have been quiet (squelch closed) this long before the
+    /// node keys; 0 turns the check off.
     #[serde(default = "default_busy_quiet")]
     pub busy_quiet_ms: u64,
     /// Give up on a transmission after waiting this long for the frequency.
@@ -545,26 +530,14 @@ fn default_end_of_message_ms() -> u64 {
 fn default_bandwidth() -> f32 {
     150.0
 }
-fn default_tone() -> f32 {
-    800.0
-}
-fn default_tone_level() -> f32 {
-    0.4
-}
-fn default_lead_in() -> u64 {
-    400
-}
-fn default_tail() -> u64 {
-    150
+fn default_handheld_baud() -> u32 {
+    38_400
 }
 fn default_duty() -> u32 {
     50
 }
 fn default_duty_window() -> u64 {
     300
-}
-fn default_busy_level() -> f32 {
-    0.02
 }
 fn default_busy_quiet() -> u64 {
     1000
@@ -899,6 +872,48 @@ mod tests {
 
     fn example() -> Config {
         toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap()
+    }
+
+    /// The example with its handheld lines uncommented, on 2 m.
+    fn handheld_example() -> Config {
+        let text = include_str!("../../../hfnode.example.toml")
+            .replace("# rig = \"handheld\"", "rig = \"handheld\"")
+            .replace("frequency_hz = 7_030_000", "frequency_hz = 144_060_000")
+            .replace("# [handheld]", "[handheld]")
+            .replace("# baud = 38400", "baud = 38400")
+            .replace("# power = \"low\"", "power = \"low\"");
+        toml::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn a_handheld_config_parses_and_is_checked() {
+        let cfg = handheld_example();
+        assert_eq!(cfg.station.rig, RigKind::Handheld);
+        cfg.validate().unwrap();
+        let h = cfg.handheld.clone().unwrap();
+        assert_eq!(h.baud, 38_400);
+        assert_eq!(h.max_duty_percent, 50);
+        assert_eq!(h.commissioned, crate::handheld::Stage::None);
+        // Outside the handheld's amateur bands; HF is the IC-7300's.
+        for hz in [7_030_000, 162_550_000, 148_100_000] {
+            let mut c = cfg.clone();
+            c.station.frequency_hz = hz;
+            assert!(c.validate().is_err(), "{hz}");
+        }
+        let mut c = cfg.clone();
+        c.handheld = None;
+        assert!(c.validate().is_err(), "no [handheld]");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().max_duty_percent = 10;
+        c.handheld.as_mut().unwrap().duty_window_secs = 60;
+        assert!(c.validate().is_err(), "6 s budget < max_key_seconds");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().baud = 4800;
+        assert!(c.validate().is_err());
+        // And 2 m is not the IC-7300's.
+        let mut c = cfg;
+        c.station.rig = RigKind::Ic7300;
+        assert!(c.validate().is_err());
     }
 
     #[test]

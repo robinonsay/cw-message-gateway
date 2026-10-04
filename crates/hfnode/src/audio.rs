@@ -1,5 +1,4 @@
-//! Audio in: the radio's USB codec, or WAV files for testing. Also audio out, for a
-//! handheld keyed with a Morse tone ([`Speaker`]).
+//! Audio in: the radio's USB codec, or WAV files for testing.
 //!
 //! Live capture has one backend per platform, chosen when the program is built:
 //!
@@ -180,19 +179,7 @@ impl Capture {
 /// What `audio.device` names on this platform.
 pub const DEVICE_HINT: &str = backend::DEVICE_HINT;
 
-/// What `handheld.output_device` names on this platform.
-pub const OUTPUT_HINT: &str = backend::OUTPUT_HINT;
-
-/// A handheld's sound output, for [`crate::handheld`].
-pub use backend::Speaker;
-
-/// The audio outputs this computer offers, as `handheld.output_device` would name
-/// them.
-pub fn output_devices() -> Result<Vec<InputDevice>> {
-    backend::output_devices()
-}
-
-/// An audio input (or, from [`output_devices`], output) this computer offers.
+/// An audio input this computer offers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputDevice {
     /// What to put in `audio.device`.

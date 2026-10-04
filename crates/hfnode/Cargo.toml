@@ -24,7 +24,7 @@ ureq = { version = "3", features = ["json"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "hostname"] }
 imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
 mail-parser = "0.11"
-# PTT on a handheld cable's serial control line (DTR or RTS).
+# The serial link to a handheld running the CW firmware.
 serialport = { version = "4", default-features = false }
 
 [dev-dependencies]

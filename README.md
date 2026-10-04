@@ -339,6 +339,11 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode handheld --config C check` | no | A handheld running the CW firmware ([docs/handheld.md](docs/handheld.md)): its `HELLO`, transmit state and frequency. |
+| `hfnode handheld --config C setup` | no | Set the handheld's frequency (simplex), CW and power, and read them back. |
+| `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
+| `hfnode handheld --config C key TEXT` | **yes** | Set up, then key TEXT on the handheld. |
+| `hfnode handheld --config C linktest` | **yes** | Bring-up: check that the firmware stops on its own when the node goes silent. |
 | `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
 | `hfnode run --config C` | **yes** | Run the node. |
 
@@ -363,4 +368,5 @@ decoded transmission) and `health.csv` (every tune and SWR reading).
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
+- [docs/handheld.md](docs/handheld.md): testing locally on 2 m with a Quansheng handheld instead of the IC-7300; [docs/handheld-protocol.md](docs/handheld-protocol.md): the serial command set its CW firmware must keep.
 - [hfnode.example.toml](hfnode.example.toml): every config key, with comments.

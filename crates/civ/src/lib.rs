@@ -5,8 +5,8 @@
 //! in [`ic7300`], and [`mock`] is a byte-level IC-7300 behind a fake serial port for
 //! testing that implementation and the node above it. [`preflight`] holds the
 //! read-only checks made before the node writes to a real radio, and [`ports`] finds
-//! the radio's serial port without opening anything. An FM handheld keyed through a
-//! sound-card cable (no CI-V) implements [`Rig`] in `hfnode`'s `handheld` module.
+//! the radio's serial port without opening anything. A handheld running a CW
+//! firmware (no CI-V) implements [`Rig`] in `hfnode`'s `handheld` module.
 
 pub mod frame;
 pub mod ic7300;

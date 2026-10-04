@@ -12,6 +12,8 @@ state_dir = "/var/lib/hfnode"     # Mac: "~/Library/Application Support/hfnode/s
 pending_timeout_secs = 600
 
 [station]
+# rig = "handheld"               # a Quansheng running the CW firmware instead of the
+#                                  # IC-7300: see [handheld] at the end, docs/handheld.md
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
@@ -128,3 +130,18 @@ api_key_env = "ANTHROPIC_API_KEY" # Claude only
 # think = false                   # Ollama only: skip the model's reasoning (faster; some models ignore it); recheck with `hfnode filter test`
 # timeout_secs = 600              # default 120 for Claude, 600 for Ollama
 extra_policy = ""
+
+# A handheld running the CW firmware (docs/handheld.md), for testing locally on 2 m,
+# with station.rig = "handheld". The [station] settings still apply: frequency_hz
+# (simplex, e.g. 144_060_000), serial_port (the handheld's serial port),
+# key_speed_wpm and max_key_seconds; the CI-V ones (baud, civ_address,
+# commissioned, power_watts) do not. [audio] is the cable's sound input from the
+# handheld, and pitch_hz the firmware's CW pitch.
+# [handheld]
+# baud = 38400                    # the firmware's serial speed
+# power = "low"                   # low, mid or high: the handheld's own levels
+# max_duty_percent = 50           # at most this share of any duty_window_secs on the air
+# duty_window_secs = 300
+# busy_quiet_ms = 1000            # key only after the squelch has been closed this long
+# busy_max_wait_secs = 30         # then give up on the transmission
+# commissioned = "none"           # none, listen, keying or done (docs/handheld.md, "Bring-up")
