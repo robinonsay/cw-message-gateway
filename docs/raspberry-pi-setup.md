@@ -265,6 +265,15 @@ confirmed, used for `WX` alone) in `state_dir`.
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
 
+`run` also refuses to start without a `[storm]` section giving the station's latitude
+and longitude (the storm stand-down; see `hfnode.example.toml`). Check that it can
+read the forecast (it prints `clear:` or `storm:`; an error means the node would
+never transmit):
+
+```sh
+sudo -u hfnode /usr/local/bin/hfnode storm --config /etc/hfnode/hfnode.toml
+```
+
 `station.commissioned` starts at `"none"`: `hfnode run`, and so the service, refuses
 to start until the [hardware test plan](hardware-test-plan.md#bring-up-stages) has
 been worked through on this radio and it is set to `"done"`, and any `power_watts`

@@ -102,6 +102,21 @@ number = 2
 grid = "DL89ME"
 name = "Rio Grande Village"
 
+# Storm stand-down. While the NWS hourly forecast for the station mentions thunder
+# in the next lookahead_hours, or an alert there mentions thunder, lightning or a
+# tornado, the node neither tunes nor transmits, and stops any transmission under
+# way. Transmitting resumes after clear_minutes without thunder. It fails closed: no
+# answer from api.weather.gov means no transmitting. It only listens on, and does not
+# disconnect anything. `hfnode storm` runs one check. `run` refuses to start without
+# this section; enabled = false runs without the stand-down. US only (the NWS).
+[storm]
+latitude = 30.2672                # the station's antenna, decimal degrees (not the field spot)
+longitude = -97.7431
+lookahead_hours = 2
+check_minutes = 5
+clear_minutes = 30
+# user_agent = "hfnode (you@example.com)"   # defaults to weather.user_agent
+
 # Screens replies before they are keyed on air. See docs/reply-filter.md.
 [filter]
 enabled = true
