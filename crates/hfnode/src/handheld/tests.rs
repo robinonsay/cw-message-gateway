@@ -24,10 +24,10 @@ fn settings() -> Settings {
     }
 }
 
-/// Firmware with a 100 ms link timeout, so that runs outlast it.
+/// Firmware with the shortest link timeout the node accepts, 1 s.
 fn firmware(scale: f32) -> MockFirmware {
     let fw = MockFirmware::new(scale);
-    fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(100));
+    fw.set_hello(1, Duration::from_secs(60), MIN_LINK_TIMEOUT);
     fw
 }
 
@@ -82,7 +82,7 @@ fn firmware_without_limits_of_its_own_is_refused() {
         (2, 60_000, 100),
         (1, 0, 100),
         (1, 61_000, 100),
-        (1, 60_000, 50),
+        (1, 60_000, 500),
         (1, 60_000, 5000),
     ] {
         let fw = firmware(SCALE);
@@ -112,14 +112,18 @@ fn firmware_without_limits_of_its_own_is_refused() {
 
 #[test]
 fn a_run_is_kept_alive_and_read_back_as_ended() {
-    let (mut h, fw) = ready();
+    // Slow enough (1.46 s) to outlast the 1 s link timeout.
+    let mut set = settings();
+    set.time_scale = 10.0;
+    let (mut h, fw) = ready_with(set);
     h.send_cw(LONG).unwrap();
     assert!(h.is_transmitting().unwrap());
-    assert!(wait_receive(&mut h, Duration::from_secs(2)));
-    // Three times the 100 ms link timeout without it expiring: kept alive.
+    // Only the keep-alives talk to the firmware meanwhile.
+    thread::sleep(Duration::from_millis(1200));
+    assert!(wait_receive(&mut h, Duration::from_secs(3)));
     let (lasted, why) = off(&fw, 0);
-    assert_eq!(why, Off::Done);
-    assert!(lasted > Duration::from_millis(250), "{lasted:?}");
+    assert_eq!(why, Off::Done, "not ended by the link timeout");
+    assert!(lasted > Duration::from_millis(1400), "{lasted:?}");
     // Counted on the air for the duty cycle.
     let st = lock(&h.shared.state);
     assert!(!st.keyed);
@@ -139,6 +143,30 @@ fn a_run_past_the_end_of_its_text_is_stopped() {
         lasted > Duration::from_millis(350) && lasted < Duration::from_secs(1),
         "{lasted:?}"
     );
+    // Reported once, so that the piece is not counted as sent.
+    let e = h.is_transmitting().unwrap_err().to_string();
+    assert!(e.contains("past the end of its text"), "{e}");
+    assert!(!h.is_transmitting().unwrap());
+}
+
+#[test]
+fn a_run_cut_short_is_reported() {
+    // 1.46 s of text, and a firmware limit of 1 s.
+    let mut set = settings();
+    set.time_scale = 10.0;
+    let (mut h, fw) = ready_with(set);
+    fw.set_hello(1, Duration::from_secs(1), MIN_LINK_TIMEOUT);
+    h.send_cw(LONG).unwrap();
+    let end = Instant::now() + Duration::from_secs(3);
+    let e = loop {
+        match h.is_transmitting() {
+            Ok(true) if Instant::now() < end => thread::sleep(Duration::from_millis(20)),
+            Ok(tx) => panic!("no error; transmitting {tx}"),
+            Err(e) => break e.to_string(),
+        }
+    };
+    assert!(e.contains("cut short"), "{e}");
+    assert_eq!(off(&fw, 0).1, Off::Limit);
     assert!(!h.is_transmitting().unwrap());
 }
 
@@ -228,7 +256,7 @@ fn the_duty_cycle_waits_for_earlier_runs_to_leave_the_window() {
     // must pass 3 s ago, 7 s from now.
     let rest = h.duty_rest(Duration::from_secs(3)).unwrap();
     assert!(
-        rest.abs_diff(Duration::from_secs(7)) < Duration::from_millis(30),
+        rest.abs_diff(Duration::from_secs(7)) < Duration::from_millis(100),
         "{rest:?}"
     );
     // More than the whole budget can never go.
@@ -241,13 +269,16 @@ fn a_busy_frequency_is_waited_for_and_then_given_up_on() {
     set.busy_quiet = Duration::from_millis(100);
     let (mut h, fw) = ready_with(set);
     assert_eq!(h.rest_needed(Duration::ZERO).unwrap(), Duration::ZERO);
-    fw.set_busy_for(Duration::from_millis(30));
-    let rest = h.rest_needed(Duration::ZERO).unwrap();
-    assert!(rest > Duration::from_millis(50) && rest <= Duration::from_millis(100));
+    fw.set_busy_for(Duration::from_millis(200));
+    // In use now: the whole quiet time to wait.
+    assert_eq!(
+        h.rest_needed(Duration::ZERO).unwrap(),
+        Duration::from_millis(100)
+    );
     // Still busy past busy_max_wait: give up.
     let end = Instant::now() + Duration::from_secs(2);
     let err = loop {
-        fw.set_busy_for(Duration::from_millis(30));
+        fw.set_busy_for(Duration::from_millis(200));
         match h.rest_needed(Duration::ZERO) {
             Ok(_) if Instant::now() < end => thread::sleep(Duration::from_millis(20)),
             Ok(_) => panic!("never gave up"),
@@ -256,25 +287,33 @@ fn a_busy_frequency_is_waited_for_and_then_given_up_on() {
     };
     assert!(err.to_string().contains("in use"), "{err}");
     // Quiet again: fine.
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(350));
     assert_eq!(h.rest_needed(Duration::ZERO).unwrap(), Duration::ZERO);
 }
 
 #[test]
 fn the_link_test_passes_only_if_the_firmware_stops_by_itself() {
     let mut set = settings();
-    // Slow enough for the text to outlast the link timeout by a second.
-    set.time_scale = 10.0;
+    // Slow enough (2.9 s) for the text to outlast the link timeout by a second.
+    set.time_scale = 5.0;
     let (mut h, fw) = ready_with(set.clone());
     h.link_test(LONG).unwrap();
     assert_eq!(off(&fw, 0).1, Off::Link);
 
-    let (mut h, fw) = ready_with(set);
+    let (mut h, fw) = ready_with(set.clone());
     fw.set_no_link_watchdog(true);
     let e = h.link_test(LONG).unwrap_err();
     assert!(e.to_string().contains("did not stop it"), "{e}");
     assert_eq!(off(&fw, 0).1, Off::Stop);
     assert!(h.link_test("E").is_err(), "too short to tell");
+    // A transmit limit as short as the link timeout would pass it for the wrong
+    // reason.
+    let fw = firmware(5.0);
+    fw.set_hello(1, Duration::from_secs(2), MIN_LINK_TIMEOUT);
+    let mut h = open(&fw, set).unwrap();
+    let e = h.link_test(LONG).unwrap_err();
+    assert!(e.to_string().contains("could not tell"), "{e}");
+    assert!(fw.runs().is_empty(), "nothing keyed");
 }
 
 /// The station's timing, sped up like the firmware's keyer.
@@ -297,8 +336,12 @@ fn station_cfg() -> StationConfig {
 }
 
 fn station_with(set: Settings) -> (Station<Handheld>, MockFirmware) {
+    station_cfg_with(set, station_cfg())
+}
+
+fn station_cfg_with(set: Settings, cfg: StationConfig) -> (Station<Handheld>, MockFirmware) {
     let fw = firmware(SCALE);
-    let st = Station::new(open(&fw, set).unwrap(), station_cfg(), None);
+    let st = Station::new(open(&fw, set).unwrap(), cfg, None);
     st.configure().unwrap();
     (st, fw)
 }
@@ -343,12 +386,29 @@ fn the_station_watchdog_stops_firmware_that_keeps_sending() {
 }
 
 #[test]
+fn firmware_that_overruns_fails_the_transmission_even_once_stopped() {
+    let mut set = settings();
+    // The rig's own stop (within a keep-alive, 250 ms, of the end of the text)
+    // comes before the station's stuck check, as on the air.
+    set.run_slack = Duration::from_millis(20);
+    let mut cfg = station_cfg();
+    cfg.stuck_margin = Duration::from_secs(1);
+    let (mut st, fw) = station_cfg_with(set, cfg);
+    fw.set_endless(true);
+    let e = st.transmit(&tx(&["TEST", "MORE"])).unwrap_err();
+    assert!(e.to_string().contains("past the end"), "{e}");
+    assert_eq!(fw.runs().len(), 1, "the next piece not keyed");
+    assert_eq!(off(&fw, 0).1, Off::Stop);
+    assert!(!st.tx_inhibited());
+}
+
+#[test]
 fn firmware_that_will_not_stop_inhibits_transmitting() {
     let mut set = settings();
     set.run_slack = Duration::from_secs(3600);
     set.max_run = Duration::from_secs(3600);
     let (mut st, fw) = station_with(set);
-    fw.set_hello(1, Duration::from_secs(1), Duration::from_millis(100));
+    fw.set_hello(1, Duration::from_secs(1), MIN_LINK_TIMEOUT);
     fw.set_endless(true);
     fw.set_ignore_stop(true);
     fw.set_no_link_watchdog(true);

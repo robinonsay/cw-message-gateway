@@ -1078,6 +1078,14 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                     println!("sent; the handheld read back as on receive after each piece");
                 }
                 HandheldCmd::Linktest => {
+                    // Keyed outside `transmit`, so its inhibit check is made here.
+                    if st.tx_inhibited() {
+                        bail!(
+                            "transmitting is inhibited (state_dir/{}): see why in the log \
+                             before clearing it",
+                            hfnode::station::INHIBIT_FILE
+                        );
+                    }
                     let rig = st.rig();
                     let result = rig
                         .lock()
@@ -1089,7 +1097,8 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                     let waited = result?;
                     id?;
                     println!(
-                        "passed: the firmware stopped on its own within {:.1} s of the                          node's last command",
+                        "passed: the firmware stopped on its own within {:.1} s of the node's last \
+                         command",
                         waited.as_secs_f32()
                     );
                 }

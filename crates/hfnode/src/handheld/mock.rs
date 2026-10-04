@@ -138,6 +138,7 @@ impl Fw {
                 self.mode_cw = true;
                 "OK MODE CW".into()
             }
+            ("MODE", _) => "ERR MODE MODE".into(),
             ("POWER", p @ ("LOW" | "MID" | "HIGH")) => {
                 self.power = p.to_string();
                 format!("OK POWER {p}")
@@ -407,6 +408,7 @@ mod tests {
     fn its_link_watchdog_and_limit_stop_keying() {
         let mut fw = MockFirmware::new(1.0);
         fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(50));
+        // (Shorter than a node accepts, to keep the test quick.)
         send(&mut fw, 1, "MODE CW");
         send(&mut fw, 2, "CW 5 PARIS PARIS");
         assert!(fw.wait_receive(Duration::from_millis(500)));

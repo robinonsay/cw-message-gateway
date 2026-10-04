@@ -11,15 +11,16 @@
 //! transmission. What a handheld does not have, and what covers it here:
 //!
 //! - **No SWR or power meter.** The firmware's own transmit state
-//!   ([`proto::Status`]) is read back instead, and each keying run is bounded four
-//!   ways besides the station's watchdog: the node stops a run that goes on past
-//!   the end of its text (plus `run_slack`, and never past `max_key_seconds` plus
-//!   [`DEADMAN_MARGIN`]); while a run lasts the node sends `STATUS` often enough to
-//!   keep the firmware's link timeout from expiring, and stops once the run should
-//!   be over, so that the firmware's link timeout ends it if `STOP` is lost or the
-//!   node dies; the firmware has a transmit limit of its own of at most a minute;
-//!   and the radio's own transmit time-out timer is the last backstop
-//!   (docs/handheld.md).
+//!   ([`proto::Status`]) is read back instead, and a run read back as ended well
+//!   before its text could have gone out fails the transmission. Each keying run is
+//!   bounded four ways besides the station's watchdog: the node stops a run that goes
+//!   on past the end of its text (plus `run_slack`, and never past
+//!   `max_key_seconds` plus [`DEADMAN_MARGIN`]), and fails the transmission; while a
+//!   run lasts the node sends `STATUS` often enough to keep the firmware's link
+//!   timeout from expiring, and no longer, so that the link timeout ends the run if
+//!   the node dies or the cable is pulled; the firmware has a transmit limit of its
+//!   own of at most a minute; and the radio's own transmit time-out timer is the
+//!   last backstop (docs/handheld.md).
 //! - **No tuner**: a window start sets the radio up and checks it, and transmits
 //!   nothing.
 //! - **A small transmitter**: at most `max_duty_percent` of any `duty_window_secs`
@@ -49,9 +50,15 @@ use std::time::{Duration, Instant};
 /// stops it here: the station's watchdog should have acted by then.
 pub const DEADMAN_MARGIN: Duration = Duration::from_secs(5);
 
-/// The longest transmit limit the firmware may keep, and the longest link timeout.
+/// The longest transmit limit the firmware may keep.
 pub const MAX_FIRMWARE_TX_LIMIT: Duration = Duration::from_secs(60);
+/// The firmware's link timeout must lie between these: long enough that one lost
+/// reply (the node waits [`REPLY_TIMEOUT`] before sending again) does not end a
+/// run, short enough to end one soon after the node dies.
+pub const MIN_LINK_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MAX_LINK_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the node waits for each reply from the firmware.
+pub const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The US amateur bands a UV-K1 or UV-K5 covers, in Hz, where CW may be sent
 /// anywhere (47 CFR 97.305(a), from memory, not checked against the eCFR): 2 m,
@@ -208,10 +215,11 @@ pub fn check_hello(h: &Hello) -> Result<()> {
             MAX_FIRMWARE_TX_LIMIT.as_secs()
         );
     }
-    if h.link_timeout < Duration::from_millis(100) || h.link_timeout > MAX_LINK_TIMEOUT {
+    if h.link_timeout < MIN_LINK_TIMEOUT || h.link_timeout > MAX_LINK_TIMEOUT {
         bail!(
-            "the firmware's link timeout is {} ms; it must be 100-{} ms",
+            "the firmware's link timeout is {} ms; it must be {}-{} ms",
             h.link_timeout.as_millis(),
+            MIN_LINK_TIMEOUT.as_millis(),
             MAX_LINK_TIMEOUT.as_millis()
         );
     }
@@ -252,7 +260,7 @@ impl Settings {
             busy_max_wait: Duration::from_secs(h.busy_max_wait_secs),
             run_slack: Duration::from_secs(2),
             max_run: Duration::from_secs(cfg.station.max_key_seconds) + DEADMAN_MARGIN,
-            reply_timeout: Duration::from_millis(500),
+            reply_timeout: REPLY_TIMEOUT,
             time_scale: 1.0,
         })
     }
@@ -279,6 +287,8 @@ struct State {
     keyed: bool,
     /// When the current run was started.
     since: Option<Instant>,
+    /// When its text should have gone out.
+    end: Option<Instant>,
     /// When the node stops the current run, whatever the firmware says.
     deadline: Option<Instant>,
     /// The current run was stopped, or that was tried, at its deadline: no more
@@ -289,6 +299,10 @@ struct State {
     run: u64,
     /// When the firmware was sending, within the duty window.
     on_air: VecDeque<(Instant, Instant)>,
+    /// A run that did not end as it should have (cut short, or stopped by the node
+    /// for going on too long), not yet reported: the next status read through the
+    /// rig fails with it, so that the station does not count the piece as sent.
+    fault: Option<String>,
 }
 
 impl State {
@@ -298,6 +312,7 @@ impl State {
         }
         self.keyed = false;
         self.since = None;
+        self.end = None;
         self.deadline = None;
         self.abandoned = false;
     }
@@ -319,6 +334,21 @@ impl Shared {
         let s = Status::parse(&self.request(&Command::Status)?).map_err(RigError::Protocol)?;
         let mut st = lock(&self.state);
         if !s.tx && st.keyed && st.run == run {
+            // The end is seen at the first status read after it, so a run read back
+            // as ended this early really was cut short. A firmware keying at the
+            // speed asked for takes the whole length; a fifth is allowed for
+            // rounding.
+            if let (Some(since), Some(end)) = (st.since, st.end) {
+                let now = Instant::now();
+                if now < since + (end - since).mul_f32(0.8) {
+                    st.fault = Some(format!(
+                        "the handheld stopped sending after {:.1} s of a {:.1} s run: cut \
+                         short (its link timeout or transmit limit?)",
+                        (now - since).as_secs_f32(),
+                        (end - since).as_secs_f32()
+                    ));
+                }
+            }
             st.ended();
         }
         Ok(s)
@@ -334,6 +364,34 @@ impl Shared {
         }
         Ok(())
     }
+
+    /// Stop run `run` for going on past its deadline, if it is still that run and
+    /// keyed: the state stays locked throughout, so that no new run can start in
+    /// between and be stopped instead. Keep-alives for it end here either way.
+    fn stop_overdue(&self, run: u64) {
+        let mut st = lock(&self.state);
+        if !st.keyed || st.run != run || st.abandoned {
+            return;
+        }
+        log::error!("the handheld is still sending past the end of its text: stopping it");
+        let stopped = lock(&self.link).request(&Command::Stop);
+        let why = "the handheld went on sending past the end of its text, and the node \
+                   stopped it";
+        match stopped {
+            Ok(_) => {
+                st.ended();
+                st.fault = Some(why.into());
+            }
+            Err(e) => {
+                log::error!(
+                    "handheld: STOP failed ({e}); no longer keeping the link alive, so the \
+                     firmware's link timeout ends the transmission"
+                );
+                st.abandoned = true;
+                st.fault = Some(format!("{why}, but STOP failed ({e})"));
+            }
+        }
+    }
 }
 
 /// While a run lasts, keep the firmware's link alive with `STATUS` every `every`;
@@ -348,22 +406,10 @@ fn keep_alive(shared: &Shared, every: Duration) {
             }
             (st.run, st.deadline.is_none_or(|d| Instant::now() >= d))
         };
-        if !overdue {
-            if let Err(e) = shared.status() {
-                log::warn!("handheld: status during a keying run: {e}");
-            }
-            continue;
-        }
-        log::error!("the handheld is still sending past the end of its text: stopping it");
-        if let Err(e) = shared.stop() {
-            log::error!(
-                "handheld: STOP failed ({e}); no longer keeping the link alive, so the \
-                 firmware's link timeout ends the transmission"
-            );
-        }
-        let mut st = lock(&shared.state);
-        if st.keyed && st.run == run {
-            st.abandoned = true;
+        if overdue {
+            shared.stop_overdue(run);
+        } else if let Err(e) = shared.status() {
+            log::warn!("handheld: status during a keying run: {e}");
         }
     }
 }
@@ -374,8 +420,10 @@ pub struct Handheld {
     wpm: u32,
     shared: Arc<Shared>,
     hello: Hello,
-    /// When the node started waiting for the frequency to clear.
+    /// When the node started waiting for the frequency to clear, and when it last
+    /// looked.
     busy_since: Option<Instant>,
+    busy_looked: Option<Instant>,
     keeper: Option<JoinHandle<()>>,
     describe: String,
 }
@@ -434,6 +482,7 @@ impl Handheld {
             shared,
             hello,
             busy_since: None,
+            busy_looked: None,
             keeper: Some(keeper),
             describe,
         })
@@ -470,9 +519,14 @@ impl Handheld {
         &self.hello
     }
 
-    /// Read the firmware's status.
+    /// Read the firmware's status. Fails, once, if the last run did not end as it
+    /// should have.
     pub fn status(&mut self) -> civ::Result<Status> {
-        self.shared.status()
+        let s = self.shared.status()?;
+        match lock(&self.shared.state).fault.take() {
+            Some(f) => Err(RigError::Protocol(f)),
+            None => Ok(s),
+        }
     }
 
     /// The bring-up's link test: key `text`, which must last well past the
@@ -481,6 +535,13 @@ impl Handheld {
     /// then; if it has not, it is stopped here and the test fails.
     pub fn link_test(&mut self, text: &str) -> Result<Duration> {
         let wait = self.hello.link_timeout + Duration::from_millis(300);
+        if self.hello.tx_limit < wait + Duration::from_secs(1) {
+            bail!(
+                "the firmware's transmit limit ({} s) would end the run as soon as its link \
+                 timeout: the test could not tell them apart",
+                self.hello.tx_limit.as_secs()
+            );
+        }
         let length = self.set.dot(self.wpm) * cw::units(text);
         if length < wait + Duration::from_secs(1) {
             bail!(
@@ -583,17 +644,22 @@ impl Handheld {
         if self.set.busy_quiet.is_zero() {
             return Ok(Duration::ZERO);
         }
-        let s = self.shared.status()?;
+        let s = self.status()?;
         if s.tx {
             return Err(RigError::Protocol(
                 "the handheld is transmitting without the node keying it".into(),
             ));
         }
+        let now = Instant::now();
+        // A wait the station gave up on (a storm, an error) is not this one.
+        let looked = self.busy_looked.replace(now);
+        if looked.is_none_or(|t| now - t > self.set.busy_quiet + Duration::from_secs(2)) {
+            self.busy_since = None;
+        }
         if s.quiet >= self.set.busy_quiet {
             self.busy_since = None;
             return Ok(Duration::ZERO);
         }
-        let now = Instant::now();
         let since = *self.busy_since.get_or_insert(now);
         if now.duration_since(since) > self.set.busy_max_wait {
             self.busy_since = None;
@@ -690,10 +756,14 @@ impl Rig for Handheld {
         if st.keyed {
             return Err(RigError::Protocol("still transmitting".into()));
         }
+        if let Some(f) = st.fault.take() {
+            return Err(RigError::Protocol(f));
+        }
         st.run += 1;
         st.keyed = true;
         st.abandoned = false;
         st.since = Some(now);
+        st.end = Some(now + length);
         st.deadline = Some(now + (length + self.set.run_slack).min(self.set.max_run));
         // Under the state lock, so that the keep-alive thread takes this run up only
         // once it has been sent.
@@ -716,9 +786,10 @@ impl Rig for Handheld {
         self.shared.stop()
     }
 
-    /// The firmware's own transmit state.
+    /// The firmware's own transmit state; an error, once, if the last run did not
+    /// end as it should have.
     fn is_transmitting(&mut self) -> civ::Result<bool> {
-        Ok(self.shared.status()?.tx)
+        Ok(self.status()?.tx)
     }
 
     /// Only receive: the node never keys a handheld except through
@@ -737,6 +808,8 @@ impl Rig for Handheld {
         false
     }
 
+    /// The duty cycle first; once it allows the run, a clear frequency, so that
+    /// time resting for the duty cycle does not count as waiting for the frequency.
     fn rest_needed(&mut self, keying: Duration) -> civ::Result<Duration> {
         let duty = self.duty_rest(keying)?;
         if !duty.is_zero() {
@@ -744,12 +817,13 @@ impl Rig for Handheld {
                 "duty cycle: {:.1} s on receive before the next keying run",
                 duty.as_secs_f32()
             );
+            return Ok(duty);
         }
         let busy = self.busy_rest()?;
         if !busy.is_zero() {
             log::info!("the frequency is in use: waiting for it to clear");
         }
-        Ok(duty.max(busy))
+        Ok(busy)
     }
 }
 

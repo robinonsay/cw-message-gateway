@@ -42,7 +42,7 @@ up to twice when its reply does not come, except `CW`.
 
 | Command | Reply | What it does |
 |---|---|---|
-| `HELLO` | `OK HELLO <version> <tx limit s> <link timeout ms> <name>` | Who the firmware is. `version` is `1`. `tx limit`: the longest any one `CW` run may last, 1 to 60. `link timeout`: 100 to 3000. `name`: the firmware's name, may contain spaces. |
+| `HELLO` | `OK HELLO <version> <tx limit s> <link timeout ms> <name>` | Who the firmware is. `version` is `1`. `tx limit`: the longest any one `CW` run may last, 1 to 60. `link timeout`: 1000 to 3000. `name`: the firmware's name, may contain spaces. |
 | `STATUS` | `OK STATUS <tx> <quiet ms>` | `tx` is `1` from a `CW` being accepted until its text has gone out, a `STOP`, or a limit ends it, and while the transmitter is on for any other reason (its PTT pressed); else `0`. It is the transmitter's real state, not a copy of what the node asked for. `quiet`: milliseconds since the squelch was last open (someone else on the frequency), `0` while it is open, at most `60000`. |
 | `FREQ` | `OK FREQ <rx Hz> <tx Hz>` | The frequencies the radio receives and would transmit on. |
 | `FREQ <Hz>` | `OK FREQ <rx Hz> <tx Hz>` | Receive and transmit on that frequency, simplex: no offset, no split. Refused with `ERR FREQ RANGE` outside 144-148, 222-225 and 420-450 MHz (the firmware may refuse more), and with `ERR FREQ TX` while transmitting. The reply reads back what is now set. |
@@ -72,7 +72,7 @@ first two in `HELLO` and refuses firmware that reports anything looser.
    reports (60 s at most), whatever the text and speed: when it is reached, the
    transmitter goes off.
 2. **A link timeout.** While a `CW` run lasts, if no valid line has arrived for the
-   `link timeout` it reports (3 s at most), the transmitter goes off. This is what
+   `link timeout` it reports (1 to 3 s), the transmitter goes off. This is what
    ends a transmission when the computer crashes, `hfnode` is killed, or the cable
    is pulled.
 3. **Keying only for `CW`.** The firmware never transmits except while sending the
@@ -90,16 +90,24 @@ as the last backstop.
 
 So that the firmware's author knows the timing it will see:
 
-- At start: `HELLO`, `STOP`, `STATUS` (must read `tx` 0), then `MODE CW`, `FREQ <Hz>`
-  and `POWER`. Before every transmission, and every few minutes while it listens:
-  `STATUS`, the same settings again, and `FREQ` to read them back.
+- At start: `HELLO`, `STOP`, `STATUS` (must read `tx` 0); then `STOP` again,
+  `MODE CW`, `FREQ <Hz>` and `POWER`. Before every transmission, and every few
+  minutes while it listens: `STATUS`, the same settings again, and `FREQ` to read
+  them back.
 - Before keying: `STATUS`, and it waits for `quiet` to reach `busy_quiet_ms`.
-- A transmission goes out as `CW` runs of at most 30 characters, one at a time, with
-  `STATUS` reading `tx` 0 after each before the next is sent.
-- While a run lasts the node sends `STATUS` at least four times per link timeout, at
-  most every 250 ms. Once the run should have ended (its text's length at its speed,
-  plus 2 s) it sends `STOP`, and then nothing more for that run, so that if `STOP` is
-  lost the link timeout ends it.
+- A transmission goes out as `CW` runs of at most 30 characters, one at a time. After
+  each, once its text should have gone out, the node reads `STATUS` every 100 ms
+  until `tx` reads 0, and only then sends the next. A run read back as ended well
+  before its text could have gone out (cut short by a limit) fails the transmission.
+- While a run lasts, a keep-alive `STATUS` goes out every quarter of the link timeout
+  (every 250 ms, with timeouts of 1 s and up), besides the reads above.
+- The node stops a run that goes on too long: 2 s past the length of its text at its
+  speed, or `max_key_seconds` plus 5 s, whichever is sooner. It sends `STOP`, stops
+  the keep-alives for that run, and fails the transmission. If `STATUS` still reads
+  `tx` 1, it latches its transmit inhibit and goes on sending `STOP` and `STATUS`
+  every 250 ms until it reads 0; those lines keep the link alive, so a firmware that
+  ignores `STOP` is ended by its transmit limit. If the link is cut, or the node
+  dies, nothing arrives, and the link timeout ends the run.
 
 ## Example
 

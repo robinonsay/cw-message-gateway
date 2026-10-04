@@ -68,7 +68,8 @@ receive.
    command reports the handheld back on receive after each piece. Then
    **`hfnode handheld linktest`**: it keys a long message and goes silent, as if the
    node had died, and passes only if the firmware stops on its own within its link
-   timeout; it then sends `DE <call>`. When both are right, set
+   timeout, not its transmit limit (it refuses to run if the two are too close to
+   tell apart); it then sends `DE <call>`. When both are right, set
    `commissioned = "keying"`.
 5. **The radio's own timer.** Hold the node's handheld PTT by hand past its
    time-out timer, at low power and with your call, and check that it stops. Then
@@ -79,20 +80,23 @@ receive.
 
 Each keying run is ended by the first of:
 
-1. the end of its text, read back from the firmware (`STATUS`);
+1. the end of its text, read back from the firmware (`STATUS`); a run read back as
+   ended well before its text could have gone out fails the transmission;
 2. the station's software watchdog (`max_key_seconds`), and its check that the radio
    is back on receive after each piece;
 3. the node sending `STOP` once the run has gone 2 s past the end of its text, or
-   `max_key_seconds` plus 5 s, whichever is sooner;
-4. the firmware's link timeout: the node keeps the link alive only while a run should
-   last, so a lost `STOP`, a crash, a killed process or a pulled cable ends it within
-   that timeout (3 s at most);
-5. the firmware's own transmit limit (a minute at most);
+   `max_key_seconds` plus 5 s, whichever is sooner, which also fails the
+   transmission;
+4. the firmware's link timeout (1 to 3 s): the node keeps the link alive only while
+   a run should last, so a crash, a killed process or a pulled cable ends the run
+   within that timeout;
+5. the firmware's own transmit limit (a minute at most), which also ends a run on a
+   firmware that ignores `STOP`;
 6. the radio's own time-out timer.
 
 If the firmware still reads transmitting after the node has tried to stop it, the
 transmit inhibit latches as on the IC-7300, and nothing more is sent until it is
-cleared.
+cleared; the node goes on sending `STOP` until it reads receive.
 
 ## Rules
 
