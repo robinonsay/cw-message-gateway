@@ -206,8 +206,9 @@ replies, NO, AGN and AGN with a chunk letter, codes sent in two groups, a repeat
 codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm, SNR
 20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand key, the radio's sidetone in the receive
 audio, USB echo off, CI-V Transceive frames from someone at the radio, a load the
-tuner matches, listening windows (a high-SWR lockout cleared by the next window's
-tune), and radio faults: high SWR, power fold-back, stuck transmit or key (also
+tuner matches and one beyond its range (the window stays silent), listening windows
+(a high-SWR lockout cleared by the next window's tune), and radio faults: SWR rising
+after the tune, power fold-back, stuck transmit or key (also
 after the last over), a transmitter that will not unkey, one that only the watchdog
 gets off transmit, refused status commands, NG and lost or late CI-V replies, a
 readout the radio refuses (left unread), and a tuner that never finishes.

@@ -492,6 +492,9 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn tuner_busy(&mut self) -> civ::Result<bool> {
         self.inner.tuner_busy()
     }
+    fn tuner_matched(&mut self) -> civ::Result<bool> {
+        self.inner.tuner_matched()
+    }
     fn read_swr(&mut self) -> civ::Result<f32> {
         self.inner.read_swr()
     }
@@ -2140,13 +2143,16 @@ pub fn scenarios() -> Vec<Scenario> {
     v.push({
         let mut s = base(
             "fault-high-swr",
-            "SWR 3.5: the read-back is cut off, and nothing more is keyed this window",
+            "the antenna goes to SWR 3.5 after the window's tune: the read-back is cut off, \
+             and nothing more is keyed this window",
         );
-        s.radio.swr = 3.5;
-        s.script = vec![Step::Unanswered {
-            text: open_long.clone(),
-            tries: 2,
-        }];
+        s.script = vec![
+            Step::SetSwr(3.5),
+            Step::Unanswered {
+                text: open_long.clone(),
+                tries: 2,
+            },
+        ];
         s.expect.keyed = vec![Over::Cut(rb_long.clone())];
         s.expect.last_seq = 42;
         s.expect.forced_receive = true;
@@ -2155,17 +2161,20 @@ pub fn scenarios() -> Vec<Scenario> {
     v.push({
         let mut s = base(
             "fault-foldback",
-            "into a bad load the radio folds its output back to nothing: no SWR reading, so the node stops",
+            "the antenna goes bad after the window's tune and the radio folds its output back \
+             to nothing: no SWR reading, so the node stops",
         );
-        s.radio.swr = 4.0;
         s.radio.foldback = Some(Foldback {
             above_swr: 3.0,
             fraction: 0.0,
         });
-        s.script = vec![Step::Unanswered {
-            text: open_long.clone(),
-            tries: 2,
-        }];
+        s.script = vec![
+            Step::SetSwr(4.0),
+            Step::Unanswered {
+                text: open_long.clone(),
+                tries: 2,
+            },
+        ];
         s.expect.keyed = vec![Over::Cut(rb_long.clone())];
         s.expect.last_seq = 42;
         s.expect.forced_receive = true;
@@ -2174,14 +2183,14 @@ pub fn scenarios() -> Vec<Scenario> {
     v.push({
         let mut s = base(
             "fault-high-swr-next-window",
-            "SWR 3.5 locks the node out of its window; the antenna recovers, and at the next \
-             window the node tunes again, clears the lockout and works",
+            "SWR 3.5 after the window's tune locks the node out of its window; the antenna \
+             recovers, and at the next window the node tunes again, clears the lockout and works",
         );
         s.node.schedule = Some((15, 4));
-        s.radio.swr = 3.5;
         let rb44 = rb_tx(44, "MOM", "HOME SUN");
         let done = de("SENT 45");
         s.script = vec![
+            Step::SetSwr(3.5),
             Step::Unanswered {
                 text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
                 tries: 2,
@@ -2218,6 +2227,20 @@ pub fn scenarios() -> Vec<Scenario> {
         ),
         |r| r.swr = 2.5,
     ));
+    v.push({
+        let mut s = base(
+            "fault-no-match",
+            "an antenna at SWR 3.5, beyond the tuner's 3:1 range: the tuner bypasses itself \
+             (1C 01 reads 00), and the node keys nothing this window",
+        );
+        s.radio.swr = 3.5;
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s
+    });
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
         s.radio.faults.push(Fault::StickInTx {
