@@ -61,6 +61,7 @@ crates/
               selftest: scripted field operator + scenarios against the mock radio
               tests/end_to_end.rs: synthesized CW audio in, keyer text out, no hardware
               tests/mock_radio_e2e.rs: every selftest scenario, as cargo tests
+              tests/sweep_e2e.rs: a fast slice of the speed x SNR x keying sweep
 hfnode.example.toml   annotated example configuration
 deploy/hfnode.service systemd unit
 docs/                 setup, testing and operating guides
@@ -171,6 +172,7 @@ hfnode selftest                          # all scenarios, PASS/FAIL table; exit 
 hfnode selftest --list                   # names and what each covers
 hfnode selftest --scenario rx-several -v # one scenario with every check and its transcript
 hfnode selftest --scenario fault- --scale 20   # a group, at 20x real time (for a slow Pi)
+hfnode selftest --sweep --csv sweep.csv  # speed x SNR x keying matrices, where it breaks
 ```
 
 The operator keys CW audio (`cw::Keyer` plus noise) into the node's audio queue,
@@ -222,6 +224,49 @@ retry pause stay in real time, so they take `scale` times longer in radio time;
 included (about 17 minutes with one job per scenario,
 `--jobs 64`).
 
+**Sweep: where it stops working.** The scenarios check one point each and all
+pass, so they cannot show where the node breaks. `hfnode selftest --sweep` runs a
+complete TX exchange (open, read-back, `OK`, `SENT`; with `--rx` also an RX
+readout) over a grid of field operator speed (5, 8, 10, 13, 15, 18, 20, 25, 30,
+35 wpm: the decoder's range), SNR in 2500 Hz (clean, 20, 10, 6, 3, 0, -3, -6 dB)
+and keying (machine: 2% jitter; hand: 12% jitter, gaps stretched 1.4 times, 25 Hz
+off pitch), 3 trials per cell with their own noise and jitter (`--trials`,
+`--wpm`, `--snr`, `--keying` choose the grid; `--jobs`, `--scale` as above). The
+operator repeats a transmission that gets no answer up to 3 times, and answers a
+read-back that is not exactly the message `NO` and starts over once on fresh
+lines; it never commits a wrong read-back. A run succeeds only if the exact message
+reached the gateway, once, and `SENT` was keyed. It prints, per keying, a matrix of
+successes/trials (with the extra transmissions a success needed, `w` for a garbled
+read-back that still parsed, `W!` for a wrong message delivered, `S!` for a safety
+violation), how much of what the operator keyed the node decoded exactly, and the
+edges; `--csv PATH` writes one row per run. Wrong messages delivered and safety
+violations (any failed safety, CI-V, settings, forced-receive or self-decode check)
+are hard failures at any SNR. It exits non-zero on a hard failure or on any failed
+trial in the should-pass region: machine-keyed 10-30 wpm at 6 dB and above,
+hand-keyed 10-25 wpm at 10 dB and above, set well inside the edges measured below.
+The default grid is 480 runs, about 3.5 minutes on a 4-core laptop (the run is paced
+by the time scale, not the CPU); `tests/sweep_e2e.rs` runs a few cells of it in a
+few seconds.
+
+Measured on 2026-10-04 (default grid, 3 trials per cell, 100x real time; the
+noise and jitter seeds are fixed, so a re-run gives nearly the same matrices):
+
+- **Machine-keyed:** 8 to 35 wpm pass every trial from clean down to -3 dB. At -6
+  dB nothing gets through (1 success in 30 runs, at 8 wpm). 5 wpm passes clean and
+  from 6 to -3 dB, but 1 of 3 trials fails at 20 dB and at 10 dB.
+- **Hand-keyed:** 8 to 30 wpm pass down to -3 dB (20 wpm down to 0 dB), 35 wpm down
+  to 0 dB, 5 wpm down to 3 dB; -6 dB fails at every speed.
+- **At 10 dB:** machine-keyed 8 to 35 wpm, hand-keyed 5 to 35 wpm pass every trial.
+- **Repeats** start at 20 dB at most speeds (0.3 to 0.7 extra transmissions per
+  exchange on average) and, hand-keyed, even on a clean signal at 5, 15, 18, 20 and
+  35 wpm: with any noise only about half of the operator's transmissions decode
+  exactly (85% word for word, with noise characters around them), at 20 dB as at
+  -3 dB.
+- **Integrity and safety:** 15 read-backs in 480 runs were garbled text that still
+  parsed (for example `RUNNING LAEE HOME SUN`, hand-keyed and clean); the operator's
+  read-back check caught every one. No wrong message was delivered and no safety
+  bound was broken in any run.
+
 **Test vectors.** `hfnode testvectors --out DIR` writes the field operator's side of
 a session as WAV files at several speeds and noise levels, with `manifest.txt`
 giving what each decodes to and what a node should answer (or, for a noisy file
@@ -240,6 +285,7 @@ the air.
 | `hfnode synth TEXT --out F [--wpm] [--pitch] [--snr] [--jitter]` | no | Write CW to a WAV file. |
 | `hfnode decode FILE [--pitch HZ]` | no | Decode CW from a WAV file. |
 | `hfnode selftest [--scenario NAME] [--scale N] [--list] [-v]` | no | Run the scenarios against the mock IC-7300 (no hardware). |
+| `hfnode selftest --sweep [--wpm ..] [--snr ..] [--keying ..] [--trials N] [--rx] [--csv F]` | no | Sweep speed x SNR x keying with complete exchanges; print where it breaks. |
 | `hfnode testvectors --out DIR [--wpm 12,18,25] [--snr clean,10]` | no | Write test field transmissions as WAV files with a manifest. Test-only key. |
 | `hfnode listen --config C` | no | Decode live audio from the radio and print it. |
 | `hfnode radio --config C status` | no | Read the frequency and TX/RX state. |

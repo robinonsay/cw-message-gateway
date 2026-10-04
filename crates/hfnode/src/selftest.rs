@@ -233,6 +233,26 @@ pub enum Step {
     WaitReceive,
     /// Listen until the node tunes at the top of its next window, and that is over.
     NextWindow,
+    /// A whole transaction on the next two unused lines, as the operating guide
+    /// says to work one; see [`Exchange`].
+    Exchange(Exchange),
+}
+
+/// A transaction the operator works on the next two unused lines (from line 42):
+/// key the open, repeating it exactly while no read-back comes; on the expected
+/// read-back answer `OK`, repeating it while no result comes. A read-back other
+/// than the expected one (text garbled into something that still parsed) is
+/// answered `NO`, and the operator starts over on fresh lines, at most `restarts`
+/// times. The operator never commits a read-back that is not exactly right.
+#[derive(Debug, Clone)]
+pub struct Exchange {
+    /// What follows the code in the open: `TX MOM HOME SUN`, `RX`.
+    pub request: String,
+    /// The expected read-back; `{open}` stands for the open's line number.
+    pub read_back: String,
+    /// The expected result; `{commit}` stands for the commit's line number.
+    pub result: String,
+    pub restarts: u32,
 }
 
 /// One of the node's overs, as the radio keyed it.
@@ -291,6 +311,32 @@ pub struct Outcome {
     pub radio_time: Duration,
     /// What the operator sent and heard.
     pub transcript: Vec<String>,
+    /// What happened, beyond the checks.
+    pub facts: Facts,
+}
+
+/// What a run did, as the sweep classifies it.
+#[derive(Debug, Clone, Default)]
+pub struct Facts {
+    /// Messages the gateway sent, as (contact, text).
+    pub sent: Vec<(String, String)>,
+    /// Inbound message ids marked read.
+    pub read: Vec<u64>,
+    /// Everything the operator keyed, codes filled in, in order.
+    pub operator_sent: Vec<String>,
+    /// What the node decoded, one entry per reception (its `rx.log`).
+    pub received: Vec<String>,
+    /// [`Step::Exchange`]s that ended with the expected result.
+    pub exchanges_done: u32,
+    /// Read-backs that were not the expected one, each answered `NO`.
+    pub wrong_read_backs: u32,
+    /// Times the operator started over on fresh lines.
+    pub restarts: u32,
+    /// Transmissions in [`Step::Exchange`]s beyond the first open and the first
+    /// `OK` of each: repeats, `NO`s and the opens and `OK`s on fresh lines.
+    pub extra_transmissions: u32,
+    /// Why the script stopped early, if it did.
+    pub script_failures: Vec<String>,
 }
 
 impl Outcome {
@@ -333,6 +379,12 @@ impl Outcome {
         }
         for l in &self.transcript {
             let _ = writeln!(s, "    {l}");
+        }
+        if !self.facts.received.is_empty() {
+            let _ = writeln!(s, "  the node decoded (rx.log):");
+            for l in &self.facts.received {
+                let _ = writeln!(s, "    {l}");
+            }
         }
         s
     }
@@ -564,6 +616,15 @@ struct Air {
     deaf: bool,
     over_end: String,
     log: Vec<String>,
+    /// The next unused line, for [`Step::Exchange`].
+    line: u64,
+    /// Everything keyed, codes filled in.
+    sent: Vec<String>,
+    exchanges_done: u32,
+    wrong_read_backs: u32,
+    restarts: u32,
+    /// Transmissions in exchanges beyond the first open and the first `OK`.
+    extra: u32,
 }
 
 impl Air {
@@ -696,6 +757,7 @@ impl Air {
             audio.extend(k.render("E", 0.0));
         }
         self.note(format!("OP    {text}"));
+        self.sent.push(body.to_string());
         self.keying.extend(audio);
         while !self.keying.is_empty() {
             self.tick()?;
@@ -855,7 +917,68 @@ impl Air {
                 self.note("NODE  (tuning: the next window)");
                 self.wait_quiet()
             }
+            Step::Exchange(x) => self.exchange(x),
         }
+    }
+
+    /// Work `x` on fresh lines, starting over after a wrong read-back.
+    fn exchange(&mut self, x: &Exchange) -> Result<(), String> {
+        for round in 0..=x.restarts {
+            if round > 0 {
+                self.restarts += 1;
+                self.note("OP    (starting over on fresh lines)");
+            }
+            let (open, commit) = (self.line, self.line + 1);
+            self.line += 2;
+            let text = format!("{FIELD_CALL} {open} {{{open}}} {} K", x.request);
+            let read_back = x.read_back.replace("{open}", &open.to_string());
+            let mut heard = None;
+            for t in 0..TRIES {
+                self.extra += u32::from(round > 0 || t > 0);
+                self.key(&text)?;
+                match self.listen()? {
+                    Heard::Over(o) => {
+                        heard = Some(o);
+                        break;
+                    }
+                    Heard::Cut(_) | Heard::Nothing => self.note("OP    (no read-back)"),
+                }
+            }
+            let Some(heard) = heard else {
+                return Err(format!("no read-back to {text:?} after {TRIES} tries"));
+            };
+            if heard != read_back {
+                self.wrong_read_backs += 1;
+                self.note(format!("OP    (read-back wrong, expected {read_back:?})"));
+                // Abort it; a fresh open would replace it anyway, so an unheard NO
+                // is not repeated for long.
+                let no = de("R NO");
+                for _ in 0..2 {
+                    self.extra += 1;
+                    self.key("NO K")?;
+                    if matches!(self.listen()?, Heard::Over(o) if o == no) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            let ok = format!("OK {commit} {{{commit}}} K");
+            let result = x.result.replace("{commit}", &commit.to_string());
+            for t in 0..TRIES {
+                self.extra += u32::from(t > 0);
+                self.key(&ok)?;
+                match self.listen()? {
+                    Heard::Over(o) if o == result => {
+                        self.exchanges_done += 1;
+                        return Ok(());
+                    }
+                    Heard::Over(o) => return Err(format!("heard {o:?}, expected {result:?}")),
+                    Heard::Cut(_) | Heard::Nothing => self.note("OP    (no answer)"),
+                }
+            }
+            return Err(format!("no answer to {ok:?} after {TRIES} tries"));
+        }
+        Err(format!("read-back wrong {} times: gave up", x.restarts + 1))
     }
 
     /// Run the script. The first failed step ends it, as an operator would give up.
@@ -1063,6 +1186,7 @@ pub fn run(s: &Scenario, scale: f32) -> Outcome {
         wall: Duration::ZERO,
         radio_time: Duration::ZERO,
         transcript: Vec::new(),
+        facts: Facts::default(),
     };
     if let Err(e) = run_inner(s, scale, &mut out) {
         out.checks.push(check("setup", false, format!("{e:#}")));
@@ -1142,11 +1266,26 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         deaf: false,
         over_end: format!("DE {NODE_CALL} K"),
         log: Vec::new(),
+        line: START_SEQ + 1,
+        sent: Vec::new(),
+        exchanges_done: 0,
+        wrong_read_backs: 0,
+        restarts: 0,
+        extra: 0,
     };
     let failures = air.operate(&s.script);
     // Closing the audio ends node::run.
     air.tx = None;
     out.transcript = std::mem::take(&mut air.log);
+    out.facts = Facts {
+        operator_sent: std::mem::take(&mut air.sent),
+        exchanges_done: air.exchanges_done,
+        wrong_read_backs: air.wrong_read_backs,
+        restarts: air.restarts,
+        extra_transmissions: air.extra,
+        script_failures: failures.clone(),
+        ..Facts::default()
+    };
     out.checks.push(check(
         "script",
         failures.is_empty(),
@@ -1202,6 +1341,8 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
 
+    out.facts.sent = svc.sent.clone();
+    out.facts.read = svc.read.clone();
     let weather: Vec<Option<String>> = e.weather.clone();
     let gateway_ok = svc.sent == e.sent && svc.read == e.read && svc.weather_calls == weather;
     out.checks.push(check(
@@ -1259,6 +1400,11 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
 
     let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
+    // `<unix time>,<text>`.
+    out.facts.received = rx_log
+        .lines()
+        .map(|l| l.split_once(',').map_or(l, |(_, t)| t).to_string())
+        .collect();
     let own = format!("DE {NODE_CALL}");
     let echoes: Vec<&str> = rx_log.lines().filter(|l| l.contains(&own)).collect();
     out.checks.push(check(
@@ -2283,6 +2429,781 @@ pub fn scenario(name: &str) -> Option<Scenario> {
 }
 
 // ---------------------------------------------------------------------------
+// The sweep: complete exchanges over speed x SNR x keying, several trials each, to
+// find where the node stops working rather than to check one point.
+
+/// The field operator speeds the sweep runs by default: the decoder's 5-35 wpm.
+pub const SWEEP_WPM: [f32; 10] = [5.0, 8.0, 10.0, 13.0, 15.0, 18.0, 20.0, 25.0, 30.0, 35.0];
+/// The SNRs in 2500 Hz the sweep runs by default; `None` is no noise at all.
+pub const SWEEP_SNR: [Option<f32>; 8] = [
+    None,
+    Some(20.0),
+    Some(10.0),
+    Some(6.0),
+    Some(3.0),
+    Some(0.0),
+    Some(-3.0),
+    Some(-6.0),
+];
+/// Trials per cell by default, each with its own noise and timing jitter.
+pub const SWEEP_TRIALS: u32 = 3;
+/// The message every sweep run sends.
+pub const SWEEP_DEST: &str = "MOM";
+pub const SWEEP_TEXT: &str = LONG_TEXT;
+/// The inbound message a sweep run with RX reads out.
+const SWEEP_INBOX: (&str, &str) = ("BOB", "DRIVE SAFE CALL WHEN YOU CAN");
+/// Times the sweep's operator starts over on fresh lines after a wrong read-back.
+const SWEEP_RESTARTS: u32 = 1;
+/// The checks whose failure is a hard failure whatever the conditions: the node
+/// broke a safety bound, sent the radio something the manual does not allow, left
+/// it misconfigured, forced receive with no fault, decoded itself or stopped.
+const HARD_CHECKS: [&str; 7] = [
+    "setup",
+    "ended",
+    "ci-v",
+    "settings",
+    "forced receive",
+    "safety",
+    "self-decode",
+];
+
+/// How the field operator keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Keying {
+    /// An electronic keyer or a computer: 2% timing jitter, on the node's pitch.
+    Machine,
+    /// A sloppy straight key, as the `hand-keyed` scenario: 12% timing jitter,
+    /// character and word gaps stretched 1.4 times, 25 Hz off pitch.
+    Hand,
+}
+
+impl Keying {
+    pub const ALL: [Keying; 2] = [Keying::Machine, Keying::Hand];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Keying::Machine => "machine",
+            Keying::Hand => "hand",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Keying::Machine => "machine-keyed: 2% timing jitter, on pitch",
+            Keying::Hand => "hand-keyed: 12% timing jitter, gaps stretched 1.4x, 25 Hz off pitch",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "machine" | "machine-keyed" => Some(Keying::Machine),
+            "hand" | "hand-keyed" => Some(Keying::Hand),
+            _ => None,
+        }
+    }
+
+    fn apply(self, f: &mut Fist) {
+        let (jitter, gap_stretch, offset_hz) = match self {
+            Keying::Machine => (0.02, 1.0, 0.0),
+            Keying::Hand => (0.12, 1.4, 25.0),
+        };
+        f.jitter = jitter;
+        f.gap_stretch = gap_stretch;
+        f.offset_hz = offset_hz;
+    }
+}
+
+/// One point of the sweep's grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cell {
+    pub keying: Keying,
+    pub wpm: f32,
+    /// SNR in 2500 Hz; `None` for no noise.
+    pub snr_db: Option<f32>,
+}
+
+impl std::fmt::Display for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} wpm {}",
+            self.keying.name(),
+            self.wpm,
+            snr_head(self.snr_db)
+        )
+    }
+}
+
+/// `clean` or `6 dB`.
+fn snr_head(snr: Option<f32>) -> String {
+    snr.map_or("clean".into(), |s| format!("{s} dB"))
+}
+
+/// The region every trial must pass, or the sweep fails. It is set well inside
+/// what the full sweep measured on 2026-10-04 (every trial passed down to -3 dB at
+/// 8-35 wpm machine-keyed and at 8-30 wpm hand-keyed, -6 dB failed throughout,
+/// and 5 wpm failed some trials even at 20 dB), so that it flags a regression,
+/// not the luck of three trials at an edge.
+pub fn should_pass(c: &Cell) -> bool {
+    let snr = c.snr_db.unwrap_or(f32::INFINITY);
+    match c.keying {
+        Keying::Machine => (10.0..=30.0).contains(&c.wpm) && snr >= 6.0,
+        Keying::Hand => (10.0..=25.0).contains(&c.wpm) && snr >= 10.0,
+    }
+}
+
+/// [`should_pass`], in words.
+pub const SHOULD_PASS: &str = "machine-keyed 10-30 wpm at 6 dB and above (and clean); \
+     hand-keyed 10-25 wpm at 10 dB and above (and clean)";
+
+/// The grid, the trials per cell and what each run does.
+#[derive(Debug, Clone)]
+pub struct SweepSpec {
+    pub wpms: Vec<f32>,
+    pub snrs: Vec<Option<f32>>,
+    pub keyings: Vec<Keying>,
+    pub trials: u32,
+    /// Follow the TX exchange with an RX exchange reading out one message.
+    pub rx: bool,
+}
+
+impl Default for SweepSpec {
+    fn default() -> Self {
+        Self {
+            wpms: SWEEP_WPM.to_vec(),
+            snrs: SWEEP_SNR.to_vec(),
+            keyings: Keying::ALL.to_vec(),
+            trials: SWEEP_TRIALS,
+            rx: false,
+        }
+    }
+}
+
+impl SweepSpec {
+    /// Speeds slowest first, SNRs clean first and then strongest first, no
+    /// duplicates.
+    pub fn normalized(mut self) -> Self {
+        self.wpms.sort_by(f32::total_cmp);
+        self.wpms.dedup();
+        let key = |s: &Option<f32>| -s.unwrap_or(f32::INFINITY);
+        self.snrs.sort_by(|a, b| key(a).total_cmp(&key(b)));
+        self.snrs.dedup();
+        let mut k = Vec::new();
+        for x in self.keyings {
+            if !k.contains(&x) {
+                k.push(x);
+            }
+        }
+        self.keyings = k;
+        self
+    }
+
+    pub fn cells(&self) -> Vec<Cell> {
+        let mut v = Vec::new();
+        for &keying in &self.keyings {
+            for &wpm in &self.wpms {
+                for &snr_db in &self.snrs {
+                    v.push(Cell {
+                        keying,
+                        wpm,
+                        snr_db,
+                    });
+                }
+            }
+        }
+        v
+    }
+
+    /// Every run: each cell, `trials` times.
+    pub fn runs(&self) -> Vec<(Cell, u32)> {
+        self.cells()
+            .into_iter()
+            .flat_map(|c| (0..self.trials).map(move |t| (c, t)))
+            .collect()
+    }
+}
+
+/// The scenario for one trial of `cell`: a TX exchange of [`SWEEP_TEXT`] to
+/// [`SWEEP_DEST`] (open, read-back, `OK`, `SENT`) and, with `rx`, an RX exchange
+/// reading out one waiting message, each worked as [`Exchange`] says.
+pub fn sweep_scenario(cell: &Cell, trial: u32, rx: bool) -> Scenario {
+    let name = format!(
+        "sweep-{}-{}wpm-{}-{trial}",
+        cell.keying.name(),
+        cell.wpm,
+        cell.snr_db.map_or("clean".into(), |s| format!("{s}db"))
+    );
+    let mut s = base(&name, &format!("{cell}, trial {}", trial + 1));
+    s.fist = Fist {
+        wpm: cell.wpm,
+        snr_db: cell.snr_db,
+        seed: mix(&[
+            0x0053_5745_4550,
+            cell.keying as u64,
+            u64::from(cell.wpm.to_bits()),
+            cell.snr_db.map_or(u64::MAX, |x| u64::from(x.to_bits())),
+            u64::from(trial),
+        ]),
+        ..Fist::default()
+    };
+    cell.keying.apply(&mut s.fist);
+    s.script = vec![Step::Exchange(Exchange {
+        request: format!("TX {SWEEP_DEST} {SWEEP_TEXT}"),
+        read_back: format!("R {{open}} TX {SWEEP_DEST} {SWEEP_TEXT} ? DE {NODE_CALL} K"),
+        result: de("SENT {commit}"),
+        restarts: SWEEP_RESTARTS,
+    })];
+    // What a run without a repeat or restart keys; the sweep classifies runs by
+    // their facts, not by these.
+    let rb = rb_tx(42, SWEEP_DEST, SWEEP_TEXT);
+    let done = de("SENT 43");
+    s.expect.keyed = full(&[&rb, &done]);
+    s.expect.sent = sent(SWEEP_DEST, SWEEP_TEXT);
+    s.expect.last_seq = 43;
+    if rx {
+        let (from, text) = SWEEP_INBOX;
+        s.node.inbox = vec![(from.into(), text.into())];
+        let result = format!("NR 1 FM {from} {text} = A");
+        s.script.push(Step::Exchange(Exchange {
+            request: "RX".into(),
+            read_back: de("R {open} 1 MSG ?"),
+            result: de(&result),
+            restarts: SWEEP_RESTARTS,
+        }));
+        s.expect
+            .keyed
+            .extend(full(&[&de("R 44 1 MSG ?"), &de(&result)]));
+        s.expect.read = vec![1];
+        s.expect.last_seq = 45;
+    }
+    s
+}
+
+/// One sweep run, classified.
+#[derive(Debug, Clone)]
+pub struct TrialResult {
+    pub cell: Cell,
+    pub trial: u32,
+    pub seed: u64,
+    /// The exact message reached the gateway, once and nothing else did, the
+    /// operator heard `SENT` for it (and with RX, heard the readout exactly and the
+    /// message was marked read), with no hard failure.
+    pub success: bool,
+    /// The gateway sent the exact message at least once.
+    pub delivered: bool,
+    /// Messages the gateway sent that are not the one intended, and repeats of it:
+    /// a serious failure, never a success.
+    pub wrong_delivered: Vec<(String, String)>,
+    /// Everything the operator keyed, `NO` included.
+    pub transmissions: u32,
+    /// Transmissions beyond the open and `OK` an exchange needs when nothing is
+    /// lost or garbled: repeats, `NO`s, and the transmissions on fresh lines.
+    pub repeats: u32,
+    pub restarts: u32,
+    /// Read-backs that parsed but were not the message (garbled text), which the
+    /// operator caught and answered `NO`.
+    pub wrong_read_backs: u32,
+    /// What the node decoded: receptions in all, operator transmissions decoded
+    /// exactly, and receptions that were not exactly one of them (garbled, split,
+    /// or noise).
+    pub receptions: u32,
+    pub decoded_exact: u32,
+    pub decode_mismatches: u32,
+    /// Operator transmissions found word for word inside a reception, with noise
+    /// decoded as extra characters around them allowed.
+    pub decoded_intact: u32,
+    /// Hard failures: `check: detail`.
+    pub hard: Vec<String>,
+    /// The run hit the self-test's time limit.
+    pub timed_out: bool,
+    /// Why it is not a success, empty if it is.
+    pub why: String,
+    pub wall: Duration,
+    pub radio_time: Duration,
+}
+
+impl TrialResult {
+    /// A safety violation or a wrong message delivered: a failure whatever the SNR.
+    pub fn hard_failure(&self) -> bool {
+        !self.hard.is_empty() || !self.wrong_delivered.is_empty()
+    }
+}
+
+/// Classify a sweep run from its outcome.
+pub fn classify(cell: &Cell, trial: u32, seed: u64, rx: bool, out: &Outcome) -> TrialResult {
+    let f = &out.facts;
+    let intended = (SWEEP_DEST.to_string(), SWEEP_TEXT.to_string());
+    let right = f.sent.iter().filter(|m| **m == intended).count();
+    let mut wrong_delivered: Vec<_> = f.sent.iter().filter(|m| **m != intended).cloned().collect();
+    // The node must never send a message twice either.
+    wrong_delivered.extend(std::iter::repeat_n(intended, right.saturating_sub(1)));
+    let hard: Vec<String> = out
+        .checks
+        .iter()
+        .filter(|c| !c.pass && HARD_CHECKS.contains(&c.name))
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    let exchanges = if rx { 2 } else { 1 };
+    let read_ok = if rx { f.read == [1] } else { f.read.is_empty() };
+    let why = if !hard.is_empty() {
+        hard.join("; ")
+    } else if !wrong_delivered.is_empty() {
+        format!("WRONG MESSAGE DELIVERED: {wrong_delivered:?}")
+    } else if let Some(e) = f.script_failures.first() {
+        e.clone()
+    } else if f.exchanges_done < exchanges {
+        "the exchange did not finish".into()
+    } else if right == 0 {
+        "SENT keyed but no message reached the gateway".into()
+    } else if !read_ok {
+        format!("messages marked read: {:?}", f.read)
+    } else {
+        String::new()
+    };
+    let words = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    let sent: Vec<Vec<String>> = f.operator_sent.iter().map(|t| words(t)).collect();
+    // Each reception matches one transmission at most.
+    let matched = |fits: &dyn Fn(&[String], &[String]) -> bool| {
+        let mut pool: Vec<Vec<String>> = f.received.iter().map(|r| words(r)).collect();
+        let mut n = 0;
+        for t in &sent {
+            if let Some(i) = pool.iter().position(|r| fits(r, t)) {
+                pool.remove(i);
+                n += 1;
+            }
+        }
+        (n, pool.len() as u32)
+    };
+    let (exact, unmatched) = matched(&|r, t| r == t);
+    let (intact, _) = matched(&|r, t| !t.is_empty() && r.windows(t.len()).any(|w| w == t));
+    let transmissions = f.operator_sent.len() as u32;
+    TrialResult {
+        cell: *cell,
+        trial,
+        seed,
+        success: why.is_empty(),
+        delivered: right > 0,
+        wrong_delivered,
+        transmissions,
+        repeats: f.extra_transmissions,
+        restarts: f.restarts,
+        wrong_read_backs: f.wrong_read_backs,
+        receptions: f.received.len() as u32,
+        decoded_exact: exact,
+        decode_mismatches: unmatched,
+        decoded_intact: intact,
+        hard,
+        timed_out: f
+            .script_failures
+            .iter()
+            .any(|e| e.contains("took too long")),
+        why,
+        wall: out.wall,
+        radio_time: out.radio_time,
+    }
+}
+
+/// Run trial `trial` of `cell`.
+pub fn run_trial(cell: &Cell, trial: u32, rx: bool, scale: f32) -> (TrialResult, Outcome) {
+    let s = sweep_scenario(cell, trial, rx);
+    let out = run(&s, scale);
+    (classify(cell, trial, s.fist.seed, rx, &out), out)
+}
+
+/// Run every trial of `spec`, `jobs` at once, calling `each` with the number done
+/// so far as each finishes. Results come back in [`SweepSpec::runs`] order.
+pub fn sweep(
+    spec: &SweepSpec,
+    scale: f32,
+    jobs: usize,
+    each: &(dyn Fn(usize, &TrialResult, &Outcome) + Sync),
+) -> Vec<TrialResult> {
+    sweep_runs(&spec.runs(), spec.rx, scale, jobs, each)
+}
+
+/// [`sweep`] over any list of (cell, trial) runs, in that order.
+pub fn sweep_runs(
+    runs: &[(Cell, u32)],
+    rx: bool,
+    scale: f32,
+    jobs: usize,
+    each: &(dyn Fn(usize, &TrialResult, &Outcome) + Sync),
+) -> Vec<TrialResult> {
+    // The slowest speeds take longest: start them first.
+    let mut order: Vec<usize> = (0..runs.len()).collect();
+    order.sort_by(|&a, &b| runs[a].0.wpm.total_cmp(&runs[b].0.wpm));
+    let next = AtomicU64::new(0);
+    let done = AtomicU64::new(0);
+    let results = std::sync::Mutex::new(vec![None; runs.len()]);
+    thread::scope(|sc| {
+        for _ in 0..jobs.clamp(1, runs.len().max(1)) {
+            sc.spawn(|| loop {
+                let k = next.fetch_add(1, Ordering::Relaxed) as usize;
+                let Some(&i) = order.get(k) else { break };
+                let (cell, trial) = &runs[i];
+                let (r, out) = run_trial(cell, *trial, rx, scale);
+                each(done.fetch_add(1, Ordering::Relaxed) as usize + 1, &r, &out);
+                results.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner())
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// A cell's trials, added up.
+#[derive(Debug, Default, Clone, Copy)]
+struct Tally {
+    trials: u32,
+    successes: u32,
+    repeats_in_successes: u32,
+    wrong_read_backs: u32,
+    wrong_delivered: u32,
+    hard: u32,
+    timed_out: u32,
+    transmissions: u32,
+    decoded_exact: u32,
+    decoded_intact: u32,
+}
+
+impl Tally {
+    fn of(results: &[TrialResult], cell: &Cell) -> Self {
+        let mut t = Tally::default();
+        for r in results.iter().filter(|r| r.cell == *cell) {
+            t.trials += 1;
+            if r.success {
+                t.successes += 1;
+                t.repeats_in_successes += r.repeats;
+            }
+            t.wrong_read_backs += r.wrong_read_backs;
+            t.wrong_delivered += r.wrong_delivered.len() as u32;
+            t.hard += u32::from(!r.hard.is_empty());
+            t.timed_out += u32::from(r.timed_out);
+            t.transmissions += r.transmissions;
+            t.decoded_exact += r.decoded_exact;
+            t.decoded_intact += r.decoded_intact;
+        }
+        t
+    }
+
+    fn all_pass(&self) -> bool {
+        self.trials > 0 && self.successes == self.trials
+    }
+
+    /// Repeated transmissions per successful trial, if any success needed one.
+    fn repeats(&self) -> Option<f32> {
+        (self.successes > 0 && self.repeats_in_successes > 0)
+            .then(|| self.repeats_in_successes as f32 / self.successes as f32)
+    }
+
+    fn text(&self, region: bool) -> String {
+        if self.trials == 0 {
+            return "-".into();
+        }
+        let mut s = format!("{}/{}", self.successes, self.trials);
+        if let Some(r) = self.repeats() {
+            let _ = write!(s, "+{r:.1}");
+        }
+        if self.wrong_read_backs > 0 {
+            s.push('w');
+        }
+        if self.timed_out > 0 {
+            s.push('T');
+        }
+        if self.wrong_delivered > 0 {
+            s.push_str("W!");
+        }
+        if self.hard > 0 {
+            s.push_str("S!");
+        }
+        if region {
+            format!("[{s}]")
+        } else {
+            format!(" {s}")
+        }
+    }
+}
+
+/// Where a sweep went wrong: hard failures anywhere, and failures in the
+/// should-pass region.
+#[derive(Debug)]
+pub struct Verdict<'a> {
+    pub hard: Vec<&'a TrialResult>,
+    pub region_failures: Vec<&'a TrialResult>,
+}
+
+impl Verdict<'_> {
+    pub fn ok(&self) -> bool {
+        self.hard.is_empty() && self.region_failures.is_empty()
+    }
+}
+
+pub fn verdict(results: &[TrialResult]) -> Verdict<'_> {
+    Verdict {
+        hard: results.iter().filter(|r| r.hard_failure()).collect(),
+        region_failures: results
+            .iter()
+            .filter(|r| should_pass(&r.cell) && !r.success)
+            .collect(),
+    }
+}
+
+/// The matrices, the edges, the hard failures and the verdict.
+pub fn render_sweep(spec: &SweepSpec, results: &[TrialResult]) -> String {
+    let mut s = String::new();
+    let col = 12;
+    for &k in &spec.keyings {
+        let _ = writeln!(s, "{}", k.about());
+        let mut head = format!("{:>5} |", "wpm");
+        for &snr in &spec.snrs {
+            let _ = write!(head, " {:<w$}", snr_head(snr), w = col - 1);
+        }
+        let _ = writeln!(s, "{}", head.trim_end());
+        let _ = writeln!(s, "{}", "-".repeat(head.trim_end().len()));
+        for &wpm in &spec.wpms {
+            let mut line = format!("{wpm:>5} |");
+            for &snr_db in &spec.snrs {
+                let c = Cell {
+                    keying: k,
+                    wpm,
+                    snr_db,
+                };
+                let _ = write!(
+                    line,
+                    "{:<col$}",
+                    Tally::of(results, &c).text(should_pass(&c))
+                );
+            }
+            let _ = writeln!(s, "{}", line.trim_end());
+        }
+        let _ = writeln!(s);
+        let _ = writeln!(
+            s,
+            "  operator transmissions the node decoded ({}), %: exactly / word for word \
+             with noise characters around",
+            k.name()
+        );
+        let mut head = format!("{:>5} |", "wpm");
+        for &snr in &spec.snrs {
+            let _ = write!(head, " {:>8}", snr_head(snr));
+        }
+        let _ = writeln!(s, "{head}");
+        for &wpm in &spec.wpms {
+            let mut line = format!("{wpm:>5} |");
+            for &snr_db in &spec.snrs {
+                let t = Tally::of(
+                    results,
+                    &Cell {
+                        keying: k,
+                        wpm,
+                        snr_db,
+                    },
+                );
+                if t.transmissions == 0 {
+                    let _ = write!(line, " {:>8}", "-");
+                } else {
+                    let pct = |n: u32| (100.0 * n as f32 / t.transmissions as f32).round();
+                    let cell = format!("{}/{}", pct(t.decoded_exact), pct(t.decoded_intact));
+                    let _ = write!(line, " {cell:>8}");
+                }
+            }
+            let _ = writeln!(s, "{line}");
+        }
+        let _ = writeln!(s);
+        s.push_str(&render_edges(spec, results, k));
+        let _ = writeln!(s);
+    }
+    let _ = writeln!(
+        s,
+        "cells: successes/trials; +n.n extra transmissions per success, on average (repeats, NO and the restart) \
+         (an exchange with none is 2 transmissions: open and OK); w a garbled read-back \
+         that still parsed, caught by the operator (NO, then fresh lines); T hit the \
+         time limit; W! WRONG MESSAGE DELIVERED; S! SAFETY VIOLATION; [ ] should-pass \
+         region ({SHOULD_PASS})."
+    );
+    let n = results.len();
+    let ok = results.iter().filter(|r| r.success).count();
+    let sum = |f: fn(&TrialResult) -> u32| results.iter().map(f).sum::<u32>();
+    let _ = writeln!(
+        s,
+        "\n{n} runs: {ok} succeeded, {} failed. {} garbled read-backs caught by the \
+         operator, {} wrong messages delivered, {} runs with a safety violation, {} \
+         timed out.",
+        n - ok,
+        sum(|r| r.wrong_read_backs),
+        sum(|r| r.wrong_delivered.len() as u32),
+        results.iter().filter(|r| !r.hard.is_empty()).count(),
+        results.iter().filter(|r| r.timed_out).count(),
+    );
+    let v = verdict(results);
+    for r in &v.hard {
+        let _ = writeln!(
+            s,
+            "\n!!! HARD FAILURE: {} trial {} (seed {:#x}): {}",
+            r.cell,
+            r.trial + 1,
+            r.seed,
+            r.why
+        );
+    }
+    for r in &v.region_failures {
+        if !r.hard_failure() {
+            let _ = writeln!(
+                s,
+                "\n!!! SHOULD-PASS FAILURE: {} trial {} (seed {:#x}): {}",
+                r.cell,
+                r.trial + 1,
+                r.seed,
+                r.why
+            );
+        }
+    }
+    let _ = writeln!(
+        s,
+        "\n{}",
+        if v.ok() {
+            "verdict: PASS (no hard failures; every should-pass trial succeeded)".to_string()
+        } else {
+            format!(
+                "verdict: FAIL ({} hard failures, {} should-pass trials failed)",
+                v.hard.len(),
+                v.region_failures.len()
+            )
+        }
+    );
+    s
+}
+
+/// The edges for one keying: per speed the lowest SNR down to which every trial
+/// passes and where repeats start; at 10 dB the slowest and fastest passing speed.
+fn render_edges(spec: &SweepSpec, results: &[TrialResult], keying: Keying) -> String {
+    let mut s = format!("  edges ({}):\n", keying.name());
+    let tally = |wpm: f32, snr_db: Option<f32>| {
+        Tally::of(
+            results,
+            &Cell {
+                keying,
+                wpm,
+                snr_db,
+            },
+        )
+    };
+    for &wpm in &spec.wpms {
+        // From clean down, while every trial passes.
+        let mut lowest = None;
+        for &snr in &spec.snrs {
+            if !tally(wpm, snr).all_pass() {
+                break;
+            }
+            lowest = Some(snr);
+        }
+        let below: Vec<String> = spec
+            .snrs
+            .iter()
+            .skip_while(|&&snr| Some(snr) != lowest)
+            .skip(usize::from(lowest.is_some()))
+            .filter(|&&snr| tally(wpm, snr).all_pass())
+            .map(|&snr| snr_head(snr))
+            .collect();
+        let repeats = spec
+            .snrs
+            .iter()
+            .find(|&&snr| tally(wpm, snr).repeats().is_some())
+            .map(|&snr| format!("repeats from {}", snr_head(snr)))
+            .unwrap_or_else(|| "no repeats".into());
+        let _ = writeln!(
+            s,
+            "    {wpm:>4} wpm: all trials pass down to {}{}; {repeats}",
+            lowest.map_or_else(
+                || format!(
+                    "(none: fails at {})",
+                    spec.snrs.first().map_or("-".into(), |&x| snr_head(x))
+                ),
+                snr_head
+            ),
+            if below.is_empty() {
+                String::new()
+            } else {
+                format!(" (and again at {})", below.join(", "))
+            }
+        );
+    }
+    if spec.snrs.contains(&Some(10.0)) {
+        let pass: Vec<f32> = spec
+            .wpms
+            .iter()
+            .copied()
+            .filter(|&w| tally(w, Some(10.0)).all_pass())
+            .collect();
+        match (pass.first(), pass.last()) {
+            (Some(lo), Some(hi)) => {
+                let gaps: Vec<String> = spec
+                    .wpms
+                    .iter()
+                    .filter(|&&w| w > *lo && w < *hi && !pass.contains(&w))
+                    .map(|w| format!("{w}"))
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    "    at 10 dB: slowest passing {lo} wpm, fastest passing {hi} wpm{}",
+                    if gaps.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (but not {} wpm)", gaps.join(", "))
+                    }
+                );
+            }
+            _ => {
+                let _ = writeln!(s, "    at 10 dB: no speed passes every trial");
+            }
+        }
+    }
+    s
+}
+
+/// The raw results, one row per run.
+pub fn sweep_csv(results: &[TrialResult]) -> String {
+    let mut s = String::from(
+        "keying,wpm,snr_db,trial,seed,success,delivered,wrong_delivered,safety_violation,\
+         timed_out,transmissions,repeats,restarts,wrong_read_backs,receptions,decoded_exact,\
+         decode_mismatches,decoded_intact,should_pass,wall_s,radio_s,why\n",
+    );
+    for r in results {
+        let _ = writeln!(
+            s,
+            "{},{},{},{},{:#x},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.2},{:.0},\"{}\"",
+            r.cell.keying.name(),
+            r.cell.wpm,
+            r.cell.snr_db.map_or("clean".into(), |x| x.to_string()),
+            r.trial + 1,
+            r.seed,
+            r.success,
+            r.delivered,
+            r.wrong_delivered.len(),
+            !r.hard.is_empty(),
+            r.timed_out,
+            r.transmissions,
+            r.repeats,
+            r.restarts,
+            r.wrong_read_backs,
+            r.receptions,
+            r.decoded_exact,
+            r.decode_mismatches,
+            r.decoded_intact,
+            should_pass(&r.cell),
+            r.wall.as_secs_f32(),
+            r.radio_time.as_secs_f32(),
+            r.why.replace('"', "\"\"")
+        );
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
 // Test vectors: the field operator's side, as audio files.
 
 /// One field transmission.
@@ -2509,5 +3430,127 @@ mod tests {
         // A cut where a whole over was expected.
         let cut = piece("R 42 TX MOM RUNNING LATE HOME", "R 42", false);
         assert!(match_overs(&[cut, b, s], &full).is_err());
+    }
+
+    /// An outcome whose checks all pass, as a clean sweep run's would.
+    fn sweep_outcome(sent: &[(&str, &str)]) -> Outcome {
+        let rb = "W5XXX 42 ZWEXVXGQ TX MOM RUNNING LATE HOME SUN K".to_string();
+        let ok = "OK 43 WSQIZJVX K".to_string();
+        Outcome {
+            scenario: "x".into(),
+            checks: ["script", "ended", "keyed", "gateway", "ci-v", "safety"]
+                .into_iter()
+                .map(|n| check(n, true, ""))
+                .collect(),
+            wall: Duration::ZERO,
+            radio_time: Duration::ZERO,
+            transcript: Vec::new(),
+            facts: Facts {
+                sent: sent
+                    .iter()
+                    .map(|(d, t)| (d.to_string(), t.to_string()))
+                    .collect(),
+                operator_sent: vec![rb.clone(), ok.clone()],
+                extra_transmissions: 0,
+                received: vec![format!("E E {rb}"), ok],
+                exchanges_done: 1,
+                ..Facts::default()
+            },
+        }
+    }
+
+    const CELL: Cell = Cell {
+        keying: Keying::Machine,
+        wpm: 18.0,
+        snr_db: Some(10.0),
+    };
+
+    #[test]
+    fn a_sweep_success_is_the_exact_message_delivered_once() {
+        let r = classify(&CELL, 0, 1, false, &sweep_outcome(&[("MOM", SWEEP_TEXT)]));
+        assert!(r.success && r.delivered && !r.hard_failure(), "{r:?}");
+        assert_eq!((r.transmissions, r.repeats), (2, 0));
+        // The open came with noise in front of it: intact, not exact.
+        assert_eq!(
+            (r.decoded_exact, r.decoded_intact, r.decode_mismatches),
+            (1, 2, 1)
+        );
+    }
+
+    #[test]
+    fn a_wrong_or_repeated_message_is_never_a_success() {
+        for sent in [
+            vec![("MOM", "RUNNING LAEE HOME SUN")],
+            vec![("BOB", SWEEP_TEXT)],
+            vec![("MOM", SWEEP_TEXT), ("MOM", SWEEP_TEXT)],
+            vec![("MOM", SWEEP_TEXT), ("MOM", "RUNNING LATE")],
+        ] {
+            let r = classify(&CELL, 0, 1, false, &sweep_outcome(&sent));
+            assert!(!r.success, "{sent:?}");
+            assert!(r.hard_failure(), "{sent:?}");
+            assert_eq!(r.wrong_delivered.len(), 1, "{sent:?}");
+            assert!(r.why.contains("WRONG MESSAGE DELIVERED"), "{}", r.why);
+            let text = render_sweep(
+                &SweepSpec {
+                    wpms: vec![18.0],
+                    snrs: vec![Some(10.0)],
+                    keyings: vec![Keying::Machine],
+                    trials: 1,
+                    rx: false,
+                },
+                &[r],
+            );
+            assert!(text.contains("[0/1W!]"), "{text}");
+            assert!(text.contains("verdict: FAIL"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_safety_violation_is_a_hard_failure_whatever_the_snr() {
+        let mut out = sweep_outcome(&[("MOM", SWEEP_TEXT)]);
+        out.checks.push(check("safety", false, "key down for 99 s"));
+        let cell = Cell {
+            snr_db: Some(-6.0),
+            ..CELL
+        };
+        let r = classify(&cell, 0, 1, false, &out);
+        assert!(!r.success && r.hard_failure());
+        assert!(!should_pass(&cell));
+        let v = [r];
+        assert!(!verdict(&v).ok());
+        // Failing the checks a sweep run does not hold to is no hard failure.
+        let mut out = sweep_outcome(&[]);
+        out.checks
+            .push(check("keyed", false, "not what a clean run keys"));
+        out.facts.script_failures = vec!["no read-back".into()];
+        out.facts.exchanges_done = 0;
+        let r = classify(&cell, 0, 1, false, &out);
+        assert!(!r.success && !r.hard_failure() && !r.delivered);
+        assert!(verdict(&[r]).ok());
+    }
+
+    #[test]
+    fn sweep_grid_and_csv() {
+        let spec = SweepSpec {
+            wpms: vec![20.0, 5.0, 20.0],
+            snrs: vec![Some(-3.0), None, Some(10.0)],
+            keyings: vec![Keying::Hand, Keying::Hand],
+            trials: 2,
+            rx: false,
+        }
+        .normalized();
+        assert_eq!(spec.wpms, [5.0, 20.0]);
+        assert_eq!(spec.snrs, [None, Some(10.0), Some(-3.0)]);
+        assert_eq!(spec.keyings, [Keying::Hand]);
+        assert_eq!(spec.runs().len(), 12);
+        let mut r = classify(&CELL, 0, 1, false, &sweep_outcome(&[]));
+        r.why = "said \"no\", twice".into();
+        let csv = sweep_csv(&[r]);
+        assert_eq!(csv.lines().count(), 2);
+        assert!(csv.ends_with(",\"said \"\"no\"\", twice\"\n"), "{csv}");
+        assert_eq!(
+            csv.lines().next().unwrap().split(',').count(),
+            csv.lines().nth(1).unwrap().split(',').count() - 1
+        );
     }
 }
