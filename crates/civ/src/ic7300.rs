@@ -557,6 +557,12 @@ impl<P: Port> Rig for Ic7300<P> {
         Ok(self.tuner_state()? == cmd::TUNER_TUNE)
     }
 
+    /// The tuner reads "01" (ON) after a match, "00" (OFF) once it has bypassed
+    /// itself (1C 01, p. 19-7; p. 11-2).
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(self.tuner_state()? == 0x01)
+    }
+
     fn read_swr(&mut self) -> Result<f32> {
         Ok(swr_from_meter(self.read_level(cmd::SWR_METER)?))
     }

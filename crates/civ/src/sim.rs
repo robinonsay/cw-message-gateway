@@ -32,6 +32,8 @@ pub struct SimRig {
     pub stop_cw_fails: bool,
     /// Fault: the radio stays on transmit whatever it is told.
     pub tx_jammed: bool,
+    /// Fault: the tuner cannot match the load and bypasses itself.
+    pub tuner_bypassed: bool,
     /// Simulated speed-up: keying takes `real time / time_scale`.
     pub time_scale: f32,
     keying: Option<Keying>,
@@ -73,6 +75,7 @@ impl Default for SimRig {
             tx_on_delay: Duration::from_millis(20),
             stop_cw_fails: false,
             tx_jammed: false,
+            tuner_bypassed: false,
             time_scale: 1.0,
             keying: None,
             forced_tx: false,
@@ -182,6 +185,10 @@ impl Rig for SimRig {
 
     fn tuner_busy(&mut self) -> Result<bool> {
         Ok(self.tune_until.is_some_and(|t| Instant::now() < t))
+    }
+
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(!self.tuner_bypassed)
     }
 
     fn read_swr(&mut self) -> Result<f32> {

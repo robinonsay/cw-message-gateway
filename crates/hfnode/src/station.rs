@@ -291,7 +291,8 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     /// Run the internal tuner and wait for it to finish. Call at start-up and at
-    /// the top of each listening window; clears any SWR lockout from the last window.
+    /// the top of each listening window; clears any SWR lockout from the last window,
+    /// and locks out transmitting for this one if the tuner could not match.
     pub fn start_window(&mut self) -> civ::Result<()> {
         if self.tx_inhibited() {
             // Tuning transmits.
@@ -309,6 +310,13 @@ impl<R: Rig + 'static> Station<R> {
                 return Err(civ::RigError::Timeout);
             }
             thread::sleep(self.cfg.poll);
+        }
+        if !self.with_rig(|r| r.tuner_matched())? {
+            // The tuner bypassed itself: the antenna is beyond its 3:1 range.
+            self.health("tune", "no-match");
+            self.swr_lockout = true;
+            log::error!("tuner could not match the antenna: silent until next window");
+            return Err(RigError::Protocol("tuner could not match the load".into()));
         }
         self.health("tune", &format!("{}ms", t0.elapsed().as_millis()));
         Ok(())
@@ -619,6 +627,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tuner_that_cannot_match_locks_out_the_window() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().tuner_bypassed = true;
+        assert!(st.start_window().is_err());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        assert!(st.rig().lock().unwrap().sent.is_empty(), "nothing keyed");
+        st.rig().lock().unwrap().tuner_bypassed = false;
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
     fn swr_is_checked_only_with_output_present() {
         let mut st = Station::new(fast_rig(), cfg(), None);
         st.configure().unwrap();
@@ -698,6 +719,9 @@ mod tests {
         }
         fn tuner_busy(&mut self) -> civ::Result<bool> {
             self.sim.tuner_busy()
+        }
+        fn tuner_matched(&mut self) -> civ::Result<bool> {
+            self.sim.tuner_matched()
         }
         fn read_swr(&mut self) -> civ::Result<f32> {
             self.sim.read_swr()

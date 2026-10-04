@@ -71,6 +71,13 @@ pub trait Rig: Send {
     fn start_tune(&mut self) -> Result<()>;
     /// Whether a tuner cycle is still running.
     fn tuner_busy(&mut self) -> Result<bool>;
+    /// After a tuner cycle: whether the tuner matched the load. One that cannot
+    /// (SWR of 3:1 or more) does not report an error: "TUNE disappears and the
+    /// tuning circuit is automatically bypassed" (p. 11-2). Rigs that cannot tell
+    /// answer `true`, leaving the SWR check on the first transmission to catch it.
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(true)
+    }
     /// SWR meter reading. Only meaningful while transmitting with the key down;
     /// with no RF out it reads 1.0.
     fn read_swr(&mut self) -> Result<f32>;

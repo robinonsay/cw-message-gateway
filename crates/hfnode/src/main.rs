@@ -471,16 +471,6 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             );
             if matches!(action, RadioCmd::Tune) {
                 st.start_window()?;
-                // A tuner that cannot match the load switches itself to bypass
-                // ("TUNE disappears", p. 11-2) rather than reporting an error.
-                let state = st
-                    .rig()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .tuner_state()?;
-                if state != 0x01 {
-                    bail!("tuner reads {state:02X} after tuning, not 01 (ON): it did not match the load");
-                }
                 println!("tuned");
             }
             if let RadioCmd::Cw { text } = action {
