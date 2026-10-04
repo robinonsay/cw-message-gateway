@@ -22,6 +22,7 @@ use auth::{CodeBook, SeqStore, Verifier};
 use civ::Rig;
 use cw::{events_to_text, DecodeEvent, Decoder, DecoderConfig};
 use protocol::{sanitize, Vocabulary};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -91,12 +92,18 @@ pub fn open_inbox(cfg: &Config) -> Result<Arc<Mutex<Inbox>>> {
     )?)))
 }
 
+/// Times the filter may time out on one message before it is withheld. Each try
+/// holds up the mail check, and a model too slow for a message stays too slow.
+const MAX_FILTER_TIMEOUTS: u32 = 3;
+
 /// Screen every unscreened message. Messages stay unscreened (and are never keyed)
-/// if the filter cannot be reached.
+/// if the filter cannot be reached; a message the filter has timed out on
+/// [`MAX_FILTER_TIMEOUTS`] times, counted in `timeouts`, is withheld.
 pub fn screen_inbox(
     cfg: &Config,
     inbox: &Arc<Mutex<Inbox>>,
-    filter: Option<&filter::ClaudeFilter>,
+    filter: Option<&filter::Screener>,
+    timeouts: &mut HashMap<u64, u32>,
 ) {
     let pending = inbox.lock().map(|i| i.unscreened()).unwrap_or_default();
     for m in pending {
@@ -114,6 +121,17 @@ pub fn screen_inbox(
                         v.reason
                     );
                     filter::apply(&on_air, &v)
+                }
+                Err(e) if filter::timed_out(&e) => {
+                    let n = timeouts.entry(m.id).or_default();
+                    *n += 1;
+                    if *n < MAX_FILTER_TIMEOUTS {
+                        log::warn!("filter timed out ({n}), message {} held: {e:#}", m.id);
+                        continue;
+                    }
+                    log::warn!("filter timed out {n} times, message {} withheld", m.id);
+                    timeouts.remove(&m.id);
+                    filter::WITHHELD.to_string()
                 }
                 Err(e) => {
                     log::warn!("filter unavailable, message {} held: {e:#}", m.id);
@@ -138,8 +156,11 @@ pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
     };
     thread::spawn(move || {
         let filter = if cfg.filter.enabled {
-            match filter::ClaudeFilter::new(&cfg.filter) {
-                Ok(f) => Some(f),
+            match filter::Screener::new(&cfg.filter) {
+                Ok(f) => {
+                    log::info!("inbound filter: {}", f.describe());
+                    Some(f)
+                }
                 Err(e) => {
                     log::error!(
                         "inbound filter not available, inbound messages will be held: {e:#}"
@@ -153,6 +174,7 @@ pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
         };
         // Mail ignored under an earlier configuration is considered again once.
         let mut retry_ignored = true;
+        let mut timeouts = HashMap::new();
         loop {
             match gateway::email::poll_imap(&email, &cfg.contacts, &inbox, retry_ignored) {
                 Ok(n) => {
@@ -163,7 +185,7 @@ pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
                 }
                 Err(e) => log::warn!("IMAP poll failed: {e:#}"),
             }
-            screen_inbox(&cfg, &inbox, filter.as_ref());
+            screen_inbox(&cfg, &inbox, filter.as_ref(), &mut timeouts);
             thread::sleep(Duration::from_secs(email.poll_secs.max(30)));
         }
     });
@@ -818,5 +840,55 @@ mod tests {
         ));
         assert!(listening(true, false, false, &idle, &[]));
         assert!(listening(false, true, false, &idle, &[]));
+    }
+
+    #[test]
+    fn a_message_the_filter_keeps_timing_out_on_is_withheld() {
+        // One server that accepts and never answers, one that is not there.
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let slow_url = format!("http://{}", slow.local_addr().unwrap());
+        thread::spawn(move || {
+            let held: Vec<_> = slow.incoming().collect();
+            drop(held);
+        });
+        let gone_url = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        // Refusal can take seconds on some systems, so only the slow server gets the
+        // short timeout.
+        for (url, timeout, withheld) in [(slow_url, 1, true), (gone_url, 60, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg: Config =
+                toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+            cfg.filter.provider = crate::config::Provider::Ollama;
+            cfg.filter.model = Some("m".into());
+            cfg.filter.base_url = Some(url);
+            cfg.filter.timeout_secs = Some(timeout);
+            let inbox = Arc::new(Mutex::new(
+                Inbox::open(dir.path().join("inbox.json")).unwrap(),
+            ));
+            inbox
+                .lock()
+                .unwrap()
+                .add("MOM", "a", "SEE YOU SUN", 0)
+                .unwrap();
+            let f = filter::Screener::new(&cfg.filter).unwrap();
+            let mut timeouts = HashMap::new();
+            for _ in 1..MAX_FILTER_TIMEOUTS {
+                screen_inbox(&cfg, &inbox, Some(&f), &mut timeouts);
+                assert_eq!(inbox.lock().unwrap().unscreened().len(), 1);
+            }
+            screen_inbox(&cfg, &inbox, Some(&f), &mut timeouts);
+            let ready = inbox.lock().unwrap().ready();
+            if withheld {
+                assert_eq!(ready.len(), 1);
+                assert_eq!(ready[0].screened.as_deref(), Some(filter::WITHHELD));
+            } else {
+                // Unreachable is not slow: held until the service is back.
+                assert!(ready.is_empty());
+                assert_eq!(inbox.lock().unwrap().unscreened().len(), 1);
+            }
+        }
     }
 }
