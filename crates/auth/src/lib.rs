@@ -14,7 +14,7 @@
 
 mod store;
 
-pub use store::SeqStore;
+pub use store::{replace_file, SeqStore};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

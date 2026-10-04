@@ -1,14 +1,23 @@
-# Example configuration for hfnode. Copy to /etc/hfnode/hfnode.toml and edit.
+# Example configuration for hfnode. Copy to /etc/hfnode/hfnode.toml on a Pi or Linux
+# machine (docs/raspberry-pi-setup.md), to ~/Library/Application Support/hfnode/ on a
+# Mac (docs/macos-setup.md) or to %LOCALAPPDATA%\hfnode\ on Windows
+# (docs/windows-setup.md), and edit.
 # Secrets (email password, API key) come from environment variables, never this file.
+#
+# Paths may start with ~ (your home folder). On Windows write paths in single quotes,
+# which TOML takes literally: '~\AppData\Local\hfnode\state'. In double quotes a
+# backslash starts an escape.
 
-state_dir = "/var/lib/hfnode"
+state_dir = "/var/lib/hfnode"     # Mac: "~/Library/Application Support/hfnode/state"
 pending_timeout_secs = 600
 
 [station]
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
-serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port
+serial_port = "/dev/ttyUSB0"      # the IC-7300's USB (CP210x) serial port; `hfnode devices`
+                                  # lists them. Mac: "/dev/cu.usbserial-..." (cu, not tty).
+                                  # Windows: "COM3" (the number Device Manager shows).
 baud = 115200                     # must match the radio's CI-V USB baud rate setting
 civ_address = 0x94                # IC-7300 default CI-V address
 # Last bring-up stage passed on this radio (docs/hardware-test-plan.md, "Bring-up
@@ -23,7 +32,11 @@ chunk_chars = 60
 chunk_pause_ms = 2000
 
 [audio]
-device = "plughw:CARD=CODEC,DEV=0"  # the IC-7300's USB audio codec (see `arecord -L`)
+# The IC-7300's USB audio codec; `hfnode devices` lists the inputs. Left out, it is
+# "plughw:CARD=CODEC,DEV=0" on Linux and "USB Audio CODEC" (part of the input's name)
+# on Mac and Windows, which find the radio's codec on each. Set it only if yours is
+# named differently or there are two.
+# device = "plughw:CARD=CODEC,DEV=0"
 sample_rate = 8000
 pitch_hz = 600                    # the radio's CW pitch setting
 end_of_message_ms = 3000
@@ -31,6 +44,7 @@ bandwidth_hz = 150
 
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
+                                  # Mac: "~/Library/Application Support/hfnode/node.key"
 
 [schedule]
 always = false

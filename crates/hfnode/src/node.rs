@@ -493,9 +493,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("node.key");
         std::fs::write(&key, KEY).unwrap();
-        let cfg: Config = toml::from_str(&format!(
+        // The paths are set after parsing, so that nothing in them needs escaping.
+        let mut cfg: Config = toml::from_str(
             r#"
-            state_dir = "{state}"
+            state_dir = ""
             [station]
             node_call = "N0DE"
             field_calls = ["W5XXX"]
@@ -505,17 +506,17 @@ mod tests {
             [audio]
             end_of_message_ms = 2500
             [auth]
-            key_file = "{key}"
+            key_file = ""
             [schedule]
             always = true
             [[contacts]]
             name = "MOM"
             address = "mom@example.com"
             "#,
-            state = dir.path().join("state").display(),
-            key = key.display()
-        ))
+        )
         .unwrap();
+        cfg.state_dir = dir.path().join("state");
+        cfg.auth.key_file = key.clone();
         cfg.validate().unwrap();
         assert_eq!(cfg.audio.sample_rate, 8000);
 

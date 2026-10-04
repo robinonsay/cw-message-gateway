@@ -14,7 +14,7 @@ use hfnode::{audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -76,6 +76,18 @@ enum Cmd {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Record the radio's audio to a WAV file, as the node hears it. Never transmits.
+    Record {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        seconds: u32,
+    },
+    /// List this computer's serial ports and audio inputs, to find the radio's. Opens
+    /// nothing, so sends nothing to any radio. No config needed.
+    Devices,
     /// Talk to the radio directly, for bench testing.
     Radio {
         #[arg(long)]
@@ -221,6 +233,9 @@ fn main() -> Result<()> {
         "info"
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+    ctrlc::set_handler(on_stop_signal).context("installing the stop-signal handler")?;
+    // For tests/stop_signal.rs, which waits for this before sending a signal.
+    log::debug!(target: "hfnode::signal", "stop-signal handler installed");
     match cli.cmd {
         Cmd::Keygen { out } => keygen(&out),
         Cmd::Codes {
@@ -239,6 +254,12 @@ fn main() -> Result<()> {
             jitter,
         } => synth(&text, &out, wpm, pitch, snr, jitter),
         Cmd::Listen { config } => listen(&Config::load(&config)?),
+        Cmd::Record {
+            config,
+            out,
+            seconds,
+        } => record(&Config::load(&config)?, &out, seconds),
+        Cmd::Devices => devices(),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&Config::load(&config)?),
         Cmd::Storm { config } => storm_check(&Config::load(&config)?),
@@ -287,6 +308,52 @@ fn main() -> Result<()> {
             pitch,
         } => testvectors(&out, &wpm, &snr, jitter, pitch),
     }
+}
+
+type DynRig = dyn civ::Rig + 'static;
+type Radio = Arc<Mutex<DynRig>>;
+
+/// The radio, once a command has passed the preflight and may write to it.
+static RADIO: Mutex<Option<Radio>> = Mutex::new(None);
+
+/// From here on a stop signal puts `radio` back on receive before the program exits.
+fn guard_radio(radio: Radio) {
+    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some(radio);
+}
+
+/// Ctrl-C, or a stop from systemd or launchd (SIGINT, SIGTERM, SIGHUP, or on Windows
+/// a console Ctrl-C or Ctrl-Break): with a radio in use, put it back on receive
+/// first (see [`stop_radio`]) and exit while still holding it, so that nothing else
+/// can key it in between. Exits 0 once receive is confirmed (a clean stop, so
+/// neither systemd nor the start-up scripts in `deploy/` restart the node), 1 if
+/// receive is not confirmed, and 130 if no radio was in use (interrupted, as without
+/// this handler).
+fn on_stop_signal() {
+    let radio = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(radio) = radio else {
+        std::process::exit(130);
+    };
+    let (_held, code) = stop_radio(&radio);
+    std::process::exit(code);
+}
+
+/// Take the radio, stop the keyer and confirm receive. The radio may first finish
+/// the text already in its keyer (at most 30 characters). Returns the radio, still
+/// held, and the exit code.
+fn stop_radio(radio: &Mutex<DynRig>) -> (MutexGuard<'_, DynRig>, i32) {
+    log::warn!("stop requested: stopping the keyer and forcing receive");
+    let mut rig = radio.lock().unwrap_or_else(|e| e.into_inner());
+    let code = match hfnode::station::force_receive(&mut *rig) {
+        Ok(()) => {
+            log::info!("radio confirmed on receive; exiting");
+            0
+        }
+        Err(e) => {
+            log::error!("radio NOT confirmed on receive ({e}); check it before restarting");
+            1
+        }
+    };
+    (rig, code)
 }
 
 fn keygen(out: &Path) -> Result<()> {
@@ -512,7 +579,102 @@ fn listen(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn record(cfg: &Config, out: &Path, seconds: u32) -> Result<()> {
+    if !(1..=3600).contains(&seconds) {
+        bail!("--seconds must be 1-3600");
+    }
+    let rate = cfg.audio.sample_rate;
+    let cap = audio::Capture::start(&cfg.audio.device, rate)?;
+    println!("recording {seconds} s from {}", cfg.audio.device);
+    let want = rate as usize * seconds as usize;
+    let mut samples = Vec::with_capacity(want);
+    let deadline = Instant::now() + Duration::from_secs(u64::from(seconds) + 10);
+    while samples.len() < want {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match cap.samples.recv_timeout(left) {
+            Ok(b) => samples.extend_from_slice(&b.samples),
+            Err(_) => bail!(
+                "audio stopped after {:.1} s",
+                samples.len() as f32 / rate as f32
+            ),
+        }
+    }
+    samples.truncate(want);
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    audio::write_wav(out, &samples, rate)?;
+    println!(
+        "wrote {} ({rate} Hz mono); peak level {:.0}% of full scale{}",
+        out.display(),
+        peak * 100.0,
+        if peak >= 0.99 {
+            ": clipping, turn the radio's ACC/USB AF output level down"
+        } else if peak == 0.0 {
+            ": silence, no audio is reaching hfnode"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn devices() -> Result<()> {
+    use civ::ports::Match;
+    println!("Serial ports (station.serial_port):");
+    let ports = civ::ports::list().unwrap_or_else(|e| {
+        println!("  could not list serial ports: {e}");
+        Vec::new()
+    });
+    if ports.is_empty() {
+        println!("  none found; is the radio on and its USB cable connected?");
+    }
+    for p in &ports {
+        let usb = p.usb.as_ref().map_or(String::new(), |u| {
+            let parts: Vec<&str> = [&u.manufacturer, &u.product, &u.serial_number]
+                .into_iter()
+                .filter_map(|s| s.as_deref())
+                .collect();
+            format!("  USB {:04X}:{:04X} {}", u.vid, u.pid, parts.join(", "))
+        });
+        let note = match p.radio_match() {
+            Match::Ic7300 => "  <- the IC-7300",
+            Match::Cp210x => "  <- a CP210x bridge, as in the IC-7300",
+            Match::No => "",
+        };
+        println!("  {}{usb}{note}", p.path);
+        if let Some(stable) = &p.stable_path {
+            println!("      same port, a name that does not change: {stable}");
+        }
+    }
+    println!();
+    println!("Audio inputs (audio.device; {}):", audio::DEVICE_HINT);
+    match audio::input_devices() {
+        Ok(inputs) if inputs.is_empty() => println!("  none found"),
+        Ok(inputs) => {
+            for d in &inputs {
+                println!(
+                    "  {:?}  {}{}",
+                    d.name,
+                    d.detail,
+                    if d.looks_like_radio() {
+                        "  <- the IC-7300's USB codec"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        Err(e) => println!("  could not list audio inputs: {e}"),
+    }
+    Ok(())
+}
+
 fn open_radio(cfg: &Config) -> Result<civ::ic7300::Ic7300> {
+    if cfg!(target_os = "macos") && civ::ports::is_macos_dialin(&cfg.station.serial_port) {
+        log::warn!(
+            "station.serial_port {} is a dial-in device; use the /dev/cu. one",
+            cfg.station.serial_port
+        );
+    }
     civ::ic7300::Ic7300::open(
         &cfg.station.serial_port,
         cfg.station.baud,
@@ -600,12 +762,16 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 RadioCmd::Tune => Action::Tune,
                 _ => Action::Cw,
             };
+            // The health log and any transmit inhibit are written there.
+            std::fs::create_dir_all(&cfg.state_dir)
+                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
             let rig = open_for(cfg, needs)?;
             let mut st = Station::new(
                 rig,
                 StationConfig::from_config(&cfg.station),
                 Some(cfg.state_dir.join("health.csv")),
             );
+            guard_radio(st.rig());
             st.configure()?;
             verify_setup(cfg, &st)?;
             println!(
@@ -741,7 +907,8 @@ fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
 }
 
 fn run(cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)?;
+    std::fs::create_dir_all(&cfg.state_dir)
+        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     // First, so the first check is likely back before the first window.
     let storm = start_storm_watch(cfg)?;
     let inbox = node::open_inbox(cfg)?;
@@ -754,6 +921,7 @@ fn run(cfg: &Config) -> Result<()> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
+    guard_radio(station.rig());
     if let Some(hold) = storm {
         // So the start-up tune is not skipped just because the first answer (up
         // to three NWS requests of at most 20 s each) is still on its way.
@@ -1016,6 +1184,35 @@ fn testvectors(out: &Path, wpms: &[f32], snrs: &[String], jitter: f32, pitch: f3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use civ::Rig;
+
+    fn keying() -> civ::sim::SimRig {
+        let mut sim = civ::sim::SimRig::new();
+        sim.set_mode_cw().unwrap();
+        sim.set_break_in(true).unwrap();
+        sim.stuck_key = true;
+        sim.send_cw("TEST TEST TEST").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(sim.is_transmitting().unwrap());
+        sim
+    }
+
+    #[test]
+    fn a_stop_signal_puts_the_radio_on_receive() {
+        let radio: Radio = Arc::new(Mutex::new(keying()));
+        let (held, code) = stop_radio(&radio);
+        assert_eq!(code, 0);
+        drop(held);
+        assert!(!radio.lock().unwrap().is_transmitting().unwrap());
+    }
+
+    #[test]
+    fn a_stop_signal_reports_a_radio_stuck_on_transmit() {
+        let mut sim = keying();
+        sim.tx_jammed = true;
+        let radio: Radio = Arc::new(Mutex::new(sim));
+        assert_eq!(stop_radio(&radio).1, 1);
+    }
 
     #[test]
     fn sim_messages_added_in_the_same_second_are_all_kept() {

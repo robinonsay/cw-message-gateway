@@ -71,7 +71,9 @@ pub struct Station {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audio {
-    /// ALSA capture device for the radio's USB audio codec, as passed to `arecord -D`.
+    /// Capture device for the radio's USB audio codec. On Linux an ALSA device as
+    /// passed to `arecord -D`; on macOS and Windows the input device's name, or a part
+    /// of it that matches no other input. `hfnode devices` lists them.
     #[serde(default = "default_audio_device")]
     pub device: String,
     #[serde(default = "default_sample_rate")]
@@ -446,8 +448,13 @@ fn default_chunk_chars() -> usize {
 fn default_chunk_pause_ms() -> u64 {
     2000
 }
+/// The IC-7300's USB codec calls itself "USB Audio CODEC"; ALSA names the card CODEC.
 fn default_audio_device() -> String {
-    "plughw:CARD=CODEC,DEV=0".into()
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        "USB Audio CODEC".into()
+    } else {
+        "plughw:CARD=CODEC,DEV=0".into()
+    }
 }
 fn default_sample_rate() -> u32 {
     8000
@@ -504,12 +511,37 @@ const TX_COVERAGE_HZ: [(u64, u64); 12] = [
     (70_000_000, 70_500_000),
 ];
 
+/// A path starting with `~` starts in the user's home directory, as in a shell: the
+/// node may be started by launchd or Task Scheduler, where no shell expands it.
+pub fn expand_home(path: &Path) -> Result<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    expand_home_from(path, home)
+}
+
+fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
+    let mut parts = path.components();
+    match parts.next() {
+        Some(std::path::Component::Normal(first)) if first == "~" => match home {
+            Some(h) => Ok(h.join(parts.as_path())),
+            None => bail!(
+                "{} starts with ~ but the home directory is not known here; use a full path",
+                path.display()
+            ),
+        },
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.state_dir = expand_home(&cfg.state_dir).context("state_dir")?;
+        cfg.auth.key_file = expand_home(&cfg.auth.key_file).context("auth.key_file")?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -707,11 +739,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tilde_means_home() {
+        let home = Some(PathBuf::from("/home/op"));
+        let ex = |p: &str| expand_home_from(Path::new(p), home.clone()).unwrap();
+        assert_eq!(
+            ex("~/hfnode/state"),
+            Path::new("/home/op").join("hfnode/state")
+        );
+        assert_eq!(ex("~"), Path::new("/home/op"));
+        assert_eq!(ex("/var/lib/hfnode"), Path::new("/var/lib/hfnode"));
+        assert_eq!(ex("state/~x"), Path::new("state/~x"));
+        assert_eq!(ex("~op/x"), Path::new("~op/x"));
+        #[cfg(windows)]
+        assert_eq!(
+            ex(r"~\AppData\Local\hfnode"),
+            Path::new("/home/op").join(r"AppData\Local\hfnode")
+        );
+        assert!(expand_home_from(Path::new("~/x"), None).is_err());
+        assert_eq!(
+            expand_home_from(Path::new("/abs"), None).unwrap(),
+            Path::new("/abs")
+        );
+    }
+
+    #[test]
     fn example_config_parses() {
         let text = include_str!("../../../hfnode.example.toml");
         let cfg: Config = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.station.civ_address, 0x94);
+        // The example leaves the audio device to the per-system default, so the same
+        // file works on Linux, macOS and Windows.
+        assert_eq!(cfg.audio.device, default_audio_device());
     }
 
     fn example() -> Config {

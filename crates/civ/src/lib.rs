@@ -4,11 +4,13 @@
 //! in memory for tests and `hfnode sim`; the IC-7300 implementation over CI-V lives
 //! in [`ic7300`], and [`mock`] is a byte-level IC-7300 behind a fake serial port for
 //! testing that implementation and the node above it. [`preflight`] holds the
-//! read-only checks made before the node writes to a real radio.
+//! read-only checks made before the node writes to a real radio, and [`ports`] finds
+//! the radio's serial port without opening anything.
 
 pub mod frame;
 pub mod ic7300;
 pub mod mock;
+pub mod ports;
 pub mod preflight;
 pub mod sim;
 
