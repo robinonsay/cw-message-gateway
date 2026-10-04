@@ -456,8 +456,8 @@ mod tests {
 
     const KEY: &[u8] = b"node unit test key 0123456789";
 
-    /// Run the node on `audio` (8 kHz) with a simulated radio, delivering 50 ms
-    /// blocks 100x faster than real time to match the radio's time scale.
+    /// Run the node on `audio` (8 kHz) with a simulated radio (time scale 100),
+    /// delivering 50 ms blocks as fast as the node takes them.
     fn run_node(audio: Vec<f32>) -> Heard {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("node.key");
@@ -488,11 +488,30 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.audio.sample_rate, 8000);
 
+        let mut rig = SimRig::new();
+        rig.time_scale = 100.0;
+        let mut sc = StationConfig::from_config(&cfg.station);
+        sc.poll = Duration::from_millis(2);
+        sc.swr_delay = Duration::from_millis(2);
+        let mut station = Station::new(rig, sc, None);
+        station.configure().unwrap();
+
         let (tx, rx) = audio::queue(usize::MAX);
         let blocks: Vec<Vec<f32>> = audio.chunks(400).map(<[f32]>::to_vec).collect();
+        let radio = station.rig();
         thread::spawn(move || {
             for samples in blocks {
-                thread::sleep(Duration::from_micros(500));
+                // Paced by the node, not the wall clock: the next block goes out
+                // only once the node has taken the last, and the operator's audio
+                // stands still while the radio tunes or transmits, as the silence
+                // after a read-back would on the air. A busy test machine then
+                // changes how long the test takes, not which audio the node hears.
+                while tx.queued() > 0 || {
+                    let mut r = radio.lock().unwrap();
+                    r.is_transmitting().unwrap_or(true) || r.tuner_busy().unwrap_or(true)
+                } {
+                    thread::sleep(Duration::from_micros(200));
+                }
                 let b = Block {
                     at: Instant::now(),
                     samples,
@@ -502,13 +521,6 @@ mod tests {
                 }
             }
         });
-        let mut rig = SimRig::new();
-        rig.time_scale = 100.0;
-        let mut sc = StationConfig::from_config(&cfg.station);
-        sc.poll = Duration::from_millis(2);
-        sc.swr_delay = Duration::from_millis(2);
-        let mut station = Station::new(rig, sc, None);
-        station.configure().unwrap();
         let mut session = build_session(&cfg).unwrap();
         let mut svc = Fake::default();
         let end = run(&cfg, &mut station, &rx, &mut session, &mut svc).unwrap_err();

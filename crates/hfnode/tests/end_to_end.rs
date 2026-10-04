@@ -11,7 +11,6 @@ use hfnode::inbox::Message;
 use hfnode::node;
 use hfnode::session::Services;
 use hfnode::station::{Station, StationConfig};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -31,16 +30,6 @@ impl Services for Fake {
     fn weather(&mut self, _: Option<&str>) -> Result<String, String> {
         Ok("SUNNY".into())
     }
-}
-
-/// Wait, for at most 10 s, until the simulated radio is `ready`, then a little
-/// longer: the node discards audio from before it saw the radio back on receive.
-fn wait_for(radio: &Mutex<SimRig>, ready: impl Fn(&mut SimRig) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !ready(&mut radio.lock().unwrap()) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    std::thread::sleep(Duration::from_millis(100));
 }
 
 #[test]
@@ -81,10 +70,7 @@ fn field_message_over_the_air_is_sent() {
     k.jitter = 0.06;
     // The field operator waits while the node sends its read-back before
     // committing, as they would on the air.
-    let read_back = "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K";
-    let read_back_ms = cw::duration_ms(read_back, 18);
-    // Where each of the operator's transmissions (and its lead-in) starts.
-    let mut starts = Vec::new();
+    let read_back_ms = cw::duration_ms("R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K", 18);
     for (text, wait_ms) in [
         (
             format!("W5XXX 42 {} TX MOM RUNNING LATE HOME SUN K", book.code(42)),
@@ -92,7 +78,6 @@ fn field_message_over_the_air_is_sent() {
         ),
         (format!("OK 43 {} K", book.code(43)), 8000),
     ] {
-        starts.push(audio.len());
         audio.extend(k.render(&text, 3000.0));
         audio.extend(vec![0.0; sr as usize * wait_ms as usize / 1000]);
     }
@@ -108,33 +93,28 @@ fn field_message_over_the_air_is_sent() {
     sc.swr_delay = Duration::from_millis(2);
     let mut station = Station::new(rig, sc, None);
     station.configure().unwrap();
-    let mut session = node::build_session(&cfg).unwrap();
-    let mut svc = Fake::default();
 
-    // Feed 50 ms blocks 100x faster than real time, matching the simulated radio's
-    // time scale, so audio heard while "transmitting" is discarded as it would be.
-    // Never full: every block is delivered, as in real time. Like an operator on
-    // the air, the feed calls only once the node is listening: after the window's
-    // tune (the first block opens the window), and with the commit, after the
-    // read-back.
+    // Feed 50 ms blocks as fast as the node takes them. Never full: every block
+    // is delivered, as in real time.
     let (tx, rx) = audio::queue(usize::MAX);
-    let block_len = sr as usize / 20;
-    let blocks: Vec<Vec<f32>> = audio.chunks(block_len).map(<[f32]>::to_vec).collect();
-    let commit = starts[1] / block_len;
+    let blocks: Vec<Vec<f32>> = audio
+        .chunks(sr as usize / 20)
+        .map(<[f32]>::to_vec)
+        .collect();
     let radio = station.rig();
     std::thread::spawn(move || {
-        for (i, b) in blocks.into_iter().enumerate() {
-            if i == 1 {
-                wait_for(&radio, |r| r.tunes > 0 && !r.tuner_busy().unwrap());
+        for b in blocks {
+            // Paced by the node, not the wall clock: the next block goes out only
+            // once the node has taken the last, and the operator's audio stands
+            // still while the radio tunes or transmits, as the silence after a
+            // read-back would on the air. A busy test machine then changes how
+            // long the test takes, not which audio the node hears.
+            while tx.queued() > 0 || {
+                let mut r = radio.lock().unwrap();
+                r.is_transmitting().unwrap_or(true) || r.tuner_busy().unwrap_or(true)
+            } {
+                std::thread::sleep(Duration::from_micros(200));
             }
-            if i == commit {
-                wait_for(&radio, |r| {
-                    r.sent.join(" ") == read_back
-                        && !r.keyer_busy()
-                        && !r.is_transmitting().unwrap()
-                });
-            }
-            std::thread::sleep(Duration::from_micros(500));
             let block = Block {
                 at: Instant::now(),
                 samples: b,
@@ -144,6 +124,9 @@ fn field_message_over_the_air_is_sent() {
             }
         }
     });
+
+    let mut session = node::build_session(&cfg).unwrap();
+    let mut svc = Fake::default();
 
     let end = node::run(&cfg, &mut station, &rx, &mut session, &mut svc).unwrap_err();
     assert!(end.to_string().contains("audio source ended"));
