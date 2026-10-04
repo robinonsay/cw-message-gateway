@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore, Verifier};
 use civ::Rig;
 use cw::{events_to_text, DecodeEvent, Decoder, DecoderConfig};
-use protocol::{sanitize, Vocabulary};
+use protocol::{sanitize, Vocabulary, OVERS};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -214,10 +214,6 @@ impl TxGuard {
         true
     }
 }
-
-/// Over prosigns that end a field transmission, as decoded (`+` is AR); the same
-/// set that `protocol::parse` strips.
-const OVERS: [&str; 5] = ["K", "KN", "+", "AR", "SK"];
 
 /// Silence before a word, in dits, below which it follows the word before at the
 /// sender's rhythm (a word gap is 7 dits; hand keyers stretch it): it is more of
@@ -586,6 +582,39 @@ mod tests {
     }
 
     #[test]
+    fn kn_ends_a_transmission_and_a_final_word_k_is_kept() {
+        let k = Keyer::new(8000, 610.0, 18.0);
+        let burst = k.render("E", 0.0);
+        // The message ends in the word K, then the over K; the commit ends in KN
+        // keyed run together. A noise burst follows each.
+        let mut audio = k.render(
+            &format!("W5XXX 42 {} TX MOM BRING VITAMIN K K", code(42)),
+            3000.0,
+        );
+        audio.extend(ms(1500));
+        audio.extend(&burst);
+        audio.extend(ms(cw::duration_ms(
+            "R 42 TX MOM BRING VITAMIN K ? DE N0DE K",
+            18,
+        ) + 6000));
+        audio.extend(k.render(&format!("OK 43 {} (", code(43)), 0.0));
+        audio.extend(ms(1500));
+        audio.extend(&burst);
+        audio.extend(ms(8000));
+        let h = run_node(noisy(audio, &k, 15.0));
+        assert_eq!(
+            h.sent,
+            [("MOM".into(), "BRING VITAMIN K".into())],
+            "{}",
+            h.rx_log
+        );
+        assert_eq!(
+            h.keyed,
+            "R 42 TX MOM BRING VITAMIN K ? DE N0DE K SENT 43 DE N0DE K"
+        );
+    }
+
+    #[test]
     fn short_words_after_an_over_word_are_still_the_message() {
         // AR (a state), SK and K are over words, and I, AM, IN, A... could be noise
         // bursts; sent in rhythm, they are the operator still sending.
@@ -646,9 +675,13 @@ mod tests {
         assert_eq!(over_end(&ev("HOME SUN AR ")), Some(12));
         // No gap after the K yet: it may still become another word.
         assert_eq!(over_end(&ev("OK 43 ABCDEFGH K")), None);
-        // Real words after a K: it was not the over ("AGN K K" asks for chunk K).
+        // KN keyed run together decodes as "(".
+        assert_eq!(over_end(&ev("OK 43 ABCDEFGH ( E ")), Some(17));
+        // Real words after a K: it was not the over (AGN <line> <code> K K asks
+        // for chunk K).
         assert_eq!(over_end(&ev("AGN K ")), Some(6));
         assert_eq!(over_end(&ev("AGN K K ")), Some(8));
+        assert_eq!(over_end(&ev("AGN 44 ABCDEFGH K K E ")), Some(20));
         assert_eq!(over_end(&ev("TX MOM K SEE ")), None);
         assert_eq!(over_end(&ev("TX MOM K * ")), None);
         assert_eq!(over_end(&ev("")), None);

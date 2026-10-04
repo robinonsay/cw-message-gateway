@@ -35,7 +35,8 @@ down each column):
 
 ```
 N0CALL code table, sequence 43-142
-Use each line once, in order; skipping lines is fine. Two lines per message.
+Use each line once, in order; skipping lines is fine.
+Two lines per message (open, OK), and one more for each NO or AGN.
 
    43  WBNF HJGC         77  ....              111  ....
    44  ....              78  ....              112  ....

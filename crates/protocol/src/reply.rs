@@ -67,7 +67,7 @@ impl Reply {
 }
 
 /// One piece of a long transmission. The operator can ask for it again with
-/// `AGN <letter>` instead of the whole batch.
+/// `AGN <line> <code> <letter>` instead of the whole batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub letter: char,

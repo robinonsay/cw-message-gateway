@@ -143,7 +143,8 @@ OK 2 YAAWUURC K
 ```
 
 Use the codes from your own table. Inside `sim`, `/code N` shows the code for line
-N, `/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
+N: `NO` and `AGN` take the next line and its code too (`NO 3 <code 3> K`).
+`/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
 `/quit` exits. Without `--offline`, `sim` really sends email and calls the weather
 service, so it needs the `[email]` settings and `HFNODE_EMAIL_PASSWORD`.
 

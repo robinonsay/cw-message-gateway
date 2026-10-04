@@ -291,7 +291,9 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
         cfg.station.node_call,
         from + count - 1
     );
-    println!("Use each line once, in order; skipping lines is fine. Two lines per message.");
+    for line in SHEET_RULES {
+        println!("{line}");
+    }
     println!();
     let rows: Vec<String> = book
         .table(from, count)
@@ -319,6 +321,12 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
     }
     Ok(())
 }
+
+/// The rules printed under the code table's title; docs/operating.md shows them too.
+const SHEET_RULES: [&str; 2] = [
+    "Use each line once, in order; skipping lines is fine.",
+    "Two lines per message (open, OK), and one more for each NO or AGN.",
+];
 
 /// The `[weather]` presets as printed under the code table, one per line.
 fn preset_lines(cfg: &Config) -> Vec<String> {
@@ -871,6 +879,17 @@ mod tests {
         sim_add(&mut ib, "mom", "second", 1000).unwrap();
         let ready: Vec<String> = ib.ready().into_iter().map(|m| m.raw).collect();
         assert_eq!(ready, ["first", "second"]);
+    }
+
+    #[test]
+    fn the_operating_guide_shows_the_code_sheet_as_printed() {
+        let guide = include_str!("../../../docs/operating.md");
+        for line in SHEET_RULES {
+            assert!(
+                guide.contains(line),
+                "docs/operating.md does not show {line:?}"
+            );
+        }
     }
 
     #[test]

@@ -204,7 +204,7 @@ impl Default for RadioSetup {
 pub enum Step {
     /// Key an open and wait for the read-back, repeating the open (exactly, as the
     /// operating guide says) if none comes. A read-back other than `read_back` is
-    /// answered `NO K` and fails the scenario.
+    /// answered `NO` on the next unused line and fails the scenario.
     Open {
         text: String,
         read_back: String,
@@ -245,8 +245,9 @@ pub enum Step {
 /// key the open, repeating it exactly while no read-back comes; on the expected
 /// read-back answer `OK`, repeating it while no result comes. A read-back other
 /// than the expected one (text garbled into something that still parsed) is
-/// answered `NO`, and the operator starts over on fresh lines, at most `restarts`
-/// times. The operator never commits a read-back that is not exactly right.
+/// answered `NO` on the line the `OK` would have used, and the operator starts
+/// over on fresh lines, at most `restarts` times. The operator never commits a
+/// read-back that is not exactly right.
 #[derive(Debug, Clone)]
 pub struct Exchange {
     /// What follows the code in the open: `TX MOM HOME SUN`, `RX`.
@@ -557,6 +558,15 @@ fn mix(parts: &[u64]) -> u64 {
     z
 }
 
+/// The highest line `n` whose code `{n}` (or `{ng}`) `text` asks for.
+fn highest_line(text: &str) -> Option<u64> {
+    text.split('{')
+        .skip(1)
+        .filter_map(|t| t.split_once('}'))
+        .filter_map(|(n, _)| n.strip_suffix('g').unwrap_or(n).parse().ok())
+        .max()
+}
+
 /// Replace `{n}` with the code for line `n`.
 pub fn with_codes(text: &str, book: &CodeBook) -> String {
     let mut out = String::new();
@@ -625,7 +635,8 @@ struct Air {
     deaf: bool,
     over_end: String,
     log: Vec<String>,
-    /// The next unused line, for [`Step::Exchange`].
+    /// The next unused line: above every line keyed so far, for [`Step::Exchange`]
+    /// and a `NO`.
     line: u64,
     /// Everything keyed, codes filled in.
     sent: Vec<String>,
@@ -745,6 +756,7 @@ impl Air {
 
     /// Wait for a quiet frequency, then key `text` after a short lead-in.
     fn key(&mut self, text: &str) -> Result<(), String> {
+        self.line = self.line.max(highest_line(text).map_or(0, |n| n + 1));
         let text = with_codes(text, &self.book);
         self.wait_quiet()?;
         self.tx_index += 1;
@@ -843,7 +855,8 @@ impl Air {
                         Heard::Over(o) if o == *read_back => return Ok(()),
                         Heard::Over(o) => {
                             self.note("OP    (read-back wrong)");
-                            self.key("NO K")?;
+                            let no = self.line;
+                            self.key(&format!("NO {no} {{{no}}} K"))?;
                             self.listen()?;
                             return Err(format!("read-back {o:?}, expected {read_back:?}"));
                         }
@@ -964,7 +977,7 @@ impl Air {
                 let no = de("R NO");
                 for _ in 0..2 {
                     self.extra += 1;
-                    self.key("NO K")?;
+                    self.key(&format!("NO {commit} {{{commit}}} K"))?;
                     if matches!(self.listen()?, Heard::Over(o) if o == no) {
                         break;
                     }
@@ -1741,15 +1754,16 @@ pub fn scenarios() -> Vec<Scenario> {
         };
         let b = de("GAME WAS POSTPONED TO NEXT SATURDAY AT NOON NR 3 FM MOM LOVE = B");
         s.script.push(Step::Say {
-            text: "AGN B K".into(),
+            text: "AGN 44 {44} B K".into(),
             expect: Some(b.clone()),
         });
         s.script.push(Step::Say {
-            text: "AGN K".into(),
+            text: "AGN 45 {45} K".into(),
             expect: Some(all.clone()),
         });
         s.expect.keyed.extend(full(&[&b, &all]));
         s.expect.read = vec![1, 2, 3];
+        s.expect.last_seq = 45;
         s
     });
     v.push({
@@ -1780,6 +1794,30 @@ pub fn scenarios() -> Vec<Scenario> {
         };
         s.expect.keyed[1] = Over::Full(result);
         s.expect.read = vec![1];
+        s
+    });
+    v.push({
+        // 13 chunks of at most 20 characters, keyed at 25 wpm to keep it short.
+        let text = "TEST ".repeat(50);
+        let chunks = protocol::chunk(&format!("NR 1 FM MOM {}", text.trim()), 20);
+        let all: Vec<String> = chunks.iter().map(protocol::Chunk::render).collect();
+        let mut s = rx(
+            "agn-chunk-k",
+            "AGN K K asks for chunk K of a 13-chunk readout",
+            &[("MOM", text.trim())],
+            "1 MSG",
+            &all.join(" "),
+        );
+        s.node.chunk_chars = 20;
+        s.node.key_wpm = 25;
+        let k = de(&all[10]);
+        s.script.push(Step::Say {
+            text: "AGN 44 {44} K K".into(),
+            expect: Some(k.clone()),
+        });
+        s.expect.keyed.push(Over::Full(k));
+        s.expect.read = vec![1];
+        s.expect.last_seq = 44;
         s
     });
     v.push({
@@ -1972,7 +2010,8 @@ pub fn scenarios() -> Vec<Scenario> {
     v.push({
         let mut s = base(
             "no-abort",
-            "NO after the read-back: R NO, and the OK that follows is ignored",
+            "NO on the next line after the read-back: R NO, and an OK after it commits nothing; \
+             a bare NO is ignored",
         );
         let rb = rb_tx(42, "MOM", "WRONG WORDS");
         let no = de("R NO");
@@ -1983,34 +2022,48 @@ pub fn scenarios() -> Vec<Scenario> {
             },
             Step::Say {
                 text: "NO K".into(),
+                expect: None,
+            },
+            Step::Say {
+                text: "NO 43 {43} K".into(),
                 expect: Some(no.clone()),
             },
             Step::Say {
-                text: "OK 43 {43} K".into(),
+                text: "OK 44 {44} K".into(),
                 expect: None,
             },
         ];
         s.expect.keyed = full(&[&rb, &no]);
-        s.expect.last_seq = 42;
+        s.expect.last_seq = 43;
         s
     });
     v.push({
         let mut s = tx(
             "agn",
-            "AGN repeats the last over; AGN for a chunk that does not exist is ignored",
+            "AGN on the next line repeats the last over, and a lost repeat is asked for again \
+             on the same line; a bare AGN and AGN for a chunk that does not exist are ignored",
             "MOM",
             "HOME SUN",
         );
         let done = de("SENT 43");
+        s.script.push(Step::MissNext);
         s.script.push(Step::Say {
-            text: "AGN K".into(),
+            text: "AGN 44 {44} K".into(),
             expect: Some(done.clone()),
         });
         s.script.push(Step::Say {
-            text: "AGN C K".into(),
+            text: "AGN K".into(),
             expect: None,
         });
-        s.expect.keyed.push(Over::Full(done));
+        s.script.push(Step::Say {
+            text: "AGN 45 {45} C K".into(),
+            expect: None,
+        });
+        s.expect.keyed.extend(full(&[&done, &done]));
+        s.expect.last_seq = 45;
+        // A clean signal: the AGNs that get silence are copied for certain, and
+        // the line the last one used shows it.
+        s.fist.snr_db = None;
         s
     });
     // The session's 10-minute windows, in radio time.
@@ -2040,12 +2093,17 @@ pub fn scenarios() -> Vec<Scenario> {
             "HOME SUN",
         );
         s.script.push(Step::Wait(ten_minutes));
-        for text in ["AGN K", "OK 43 {43} K"] {
+        for text in ["AGN 44 {44} K", "OK 43 {43} K"] {
             s.script.push(Step::Say {
                 text: text.into(),
                 expect: None,
             });
         }
+        // A clean signal: in noise the decoder's speed drifts over the ten
+        // minutes and the first transmissions after it are miscopied, which
+        // would also get silence. The AGN's used line shows it was copied.
+        s.fist.snr_db = None;
+        s.expect.last_seq = 44;
         s
     });
     v.push({
@@ -2195,6 +2253,66 @@ pub fn scenarios() -> Vec<Scenario> {
         "MOM",
         "BACK IN SK I AM IN A MINE TOWN",
     ));
+    v.push(tx(
+        "final-word-k",
+        "a message whose last word is K, keyed before the over K: the word is kept",
+        "MOM",
+        "BRING VITAMIN K",
+    ));
+    v.push({
+        let mut s = tx(
+            "kn-over",
+            "every transmission ends in KN keyed run together, with a noise burst after it",
+            "MOM",
+            "HOME SUN",
+        );
+        let done = de("SENT 43");
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN ( ~"),
+                read_back: rb_tx(42, "MOM", "HOME SUN"),
+            },
+            Step::Say {
+                text: "OK 43 {43} ( ~".into(),
+                expect: Some(done.clone()),
+            },
+            Step::Say {
+                text: "AGN 44 {44} ( ~".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed.push(Over::Full(done));
+        s.expect.last_seq = 44;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "agn-read-back",
+            "AGN after the read-back repeats it and uses a line, so the OK comes on the line after",
+            "MOM",
+            "HOME SUN",
+        );
+        let rb = rb_tx(42, "MOM", "HOME SUN");
+        let done = de("SENT 44");
+        s.script = vec![
+            s.script[0].clone(),
+            Step::Say {
+                text: "AGN 43 {43} K".into(),
+                expect: Some(rb.clone()),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: None,
+            },
+            Step::Say {
+                text: "OK 44 {44} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb, &rb, &done]);
+        s.expect.last_seq = 44;
+        s
+    });
 
     for wpm in [10, 15, 20, 25, 30] {
         v.push(with_fist(
@@ -2444,15 +2562,16 @@ pub fn scenarios() -> Vec<Scenario> {
                 kind: ReplyFault::Ng,
             }),
             Step::Say {
-                text: "AGN K".into(),
+                text: "AGN 43 {43} K".into(),
                 expect: None,
             },
             Step::Unanswered {
-                text: "OK 43 {43} K".into(),
+                text: "OK 44 {44} K".into(),
                 tries: 2,
             },
         ];
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.last_seq = 44;
         s.expect.inhibited = true;
         s.expect.forced_receive = true;
         s
@@ -3383,36 +3502,36 @@ pub fn vectors() -> Vec<Vector> {
             "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0DE K",
         ),
         v("commit-tx", "OK 43 {43} K", "SENT 43 DE N0DE K"),
-        v("again", "AGN K", "SENT 43 DE N0DE K"),
+        v("again", "AGN 44 {44} K", "SENT 43 DE N0DE K"),
         v(
             "replayed-open",
             "W5XXX 42 {42} TX MOM RUNNING LATE HOME SUN K",
             "(silence: line 42 is used)",
         ),
-        v("open-rx", "W5XXX 44 {44} RX K", "R 44 <n> MSGS ? DE N0DE K"),
+        v("open-rx", "W5XXX 45 {45} RX K", "R 45 <n> MSGS ? DE N0DE K"),
         v(
             "commit-rx",
-            "OK 45 {45} K",
-            "the messages, or R 45 NIL DE N0DE K",
+            "OK 46 {46} K",
+            "the messages, or R 46 NIL DE N0DE K",
         ),
         v(
             "again-chunk",
-            "AGN A K",
+            "AGN 47 {47} A K",
             "chunk A again (silence if there was none)",
         ),
-        v("open-wx", "W5XXX 46 {46} WX K", "R 46 WX DL89 ? DE N0DE K"),
-        v("commit-wx", "OK 47 {47} K", "the forecast"),
+        v("open-wx", "W5XXX 48 {48} WX K", "R 48 WX DL89 ? DE N0DE K"),
+        v("commit-wx", "OK 49 {49} K", "the forecast"),
         v(
             "open-wx-grid",
-            "W5XXX 48 {48} WX DL88 K",
-            "R 48 WX DL88 ? DE N0DE K",
+            "W5XXX 50 {50} WX DL88 K",
+            "R 50 WX DL88 ? DE N0DE K",
         ),
         v(
             "open-wx-preset",
-            "W5XXX 49 {49} WX 2 K",
-            "R 49 WX 2 DL89ME ? DE N0DE K",
+            "W5XXX 51 {51} WX 2 K",
+            "R 51 WX 2 DL89ME ? DE N0DE K",
         ),
-        v("abort", "NO K", "R NO DE N0DE K"),
+        v("abort", "NO 52 {52} K", "R NO DE N0DE K"),
         v(
             "stale-line",
             "W5XXX 41 {41} RX K",
@@ -3420,20 +3539,26 @@ pub fn vectors() -> Vec<Vector> {
         ),
         v(
             "wrong-code",
-            "W5XXX 50 {51} RX K",
-            "(silence: the code is line 51's)",
+            "W5XXX 53 {54} RX K",
+            "(silence: the code is line 54's)",
         ),
         v(
             "garbled-call",
-            "W5XKX 50 {50} TX MOM HI K",
-            "R 50 TX MOM HI ? DE N0DE K",
+            "W5XKX 53 {53} TX MOM HI K",
+            "R 53 TX MOM HI ? DE N0DE K",
         ),
         v(
             "over-word",
-            "W5XXX 52 {52} TX MOM BACK IN SK I AM IN A MINE TOWN K",
-            "R 52 TX MOM BACK IN SK I AM IN A MINE TOWN ? DE N0DE K",
+            "W5XXX 54 {54} TX MOM BACK IN SK I AM IN A MINE TOWN K",
+            "R 54 TX MOM BACK IN SK I AM IN A MINE TOWN ? DE N0DE K",
         ),
-        v("commit-over-word", "OK 53 {53} K", "SENT 53 DE N0DE K"),
+        v("commit-over-word", "OK 55 {55} K", "SENT 55 DE N0DE K"),
+        v(
+            "open-kn",
+            "W5XXX 56 {56} TX MOM BRING VITAMIN K (",
+            "R 56 TX MOM BRING VITAMIN K ? DE N0DE K",
+        ),
+        v("commit-kn", "OK 57 {57} (", "SENT 57 DE N0DE K"),
     ]
 }
 
