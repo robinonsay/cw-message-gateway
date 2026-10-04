@@ -367,17 +367,20 @@ impl Session {
                 }
             }
             Command::Wx { place } => {
-                // The operator confirmed the place they named: `WX` alone means it
-                // from now on. Only a convenience, so a failed save is just logged.
-                if let (Some(_), Some(grid)) = (&place, &p.wx_grid) {
-                    if let Err(e) = self.places.set(&p.call, grid) {
-                        log::warn!("cannot remember {grid} for {}: {e:#}", p.call);
-                    }
-                }
                 let result = match &p.wx_grid {
                     Some(grid) => svc.weather(grid),
                     None => Err(WxError::Unavailable("no grid square to forecast".into())),
                 };
+                // The operator confirmed the place they named: `WX` alone means it
+                // from now on, unless the NWS has nothing for it. Only a convenience,
+                // so a failed save is just logged.
+                if let (Some(_), Some(grid)) = (&place, &p.wx_grid) {
+                    if result != Err(WxError::NoCoverage) {
+                        if let Err(e) = self.places.set(&p.call, grid) {
+                            log::warn!("cannot remember {grid} for {}: {e:#}", p.call);
+                        }
+                    }
+                }
                 match result {
                     Ok(text) => self.chunked(&format!("WX {text}"), &call),
                     Err(e) => {
@@ -640,7 +643,7 @@ mod tests {
 
         fn send(&mut self, secs: u64, text: &str) -> Outcome {
             let mut text = text.to_string();
-            for n in 42..=55 {
+            for n in 42..=57 {
                 text = text.replace(&format!("{{{n}}}"), &self.book.code(n));
             }
             self.session
@@ -874,20 +877,27 @@ mod tests {
             "R 50 WX DL89ME ? DE N0DE K"
         );
         assert!(tx(&r.send(90, "OK 51 {51} K")).starts_with("WX DL89ME TODAY"));
-        // So is a confirmed grid, even when its forecast then fails.
+        // A place the NWS has nothing for is not.
         r.svc.weather_error = Some(WxError::NoCoverage);
         tx(&r.send(100, "W5XXX 52 {52} WX IO91 K"));
         tx(&r.send(110, "OK 53 {53} K"));
+        // A confirmed grid whose forecast fails for another reason is.
+        r.svc.weather_error = Some(WxError::Unavailable("timed out".into()));
+        tx(&r.send(120, "W5XXX 54 {54} WX DL89IG K"));
+        tx(&r.send(130, "OK 55 {55} K"));
         r.svc.weather_error = None;
         assert_eq!(
-            tx(&r.send(120, "W5XXX 54 {54} WX K")),
-            "R 54 WX IO91 ? DE N0DE K"
+            tx(&r.send(140, "W5XXX 56 {56} WX K")),
+            "R 56 WX DL89IG ? DE N0DE K"
         );
-        assert_eq!(r.svc.weather_calls, ["EM10", "DL89ME", "DL89ME", "IO91"]);
+        assert_eq!(
+            r.svc.weather_calls,
+            ["EM10", "DL89ME", "DL89ME", "IO91", "DL89IG"]
+        );
 
         // It survives a restart.
         let places = LastPlaces::open(r._dir.path().join("wx_last.json"));
-        assert_eq!(places.get("W5XXX"), Some("IO91"));
+        assert_eq!(places.get("W5XXX"), Some("DL89IG"));
     }
 
     #[test]

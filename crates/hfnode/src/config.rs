@@ -171,8 +171,9 @@ pub struct Contact {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Weather {
-    /// Grid square used when `WX` is sent without a place, e.g. where the field
-    /// operator is headed.
+    /// Grid square for `WX` sent without a place, until the field callsign has
+    /// confirmed a place of its own (then `WX` alone is that place, kept in
+    /// `<state_dir>/wx_last.json`). E.g. where the field operator is headed.
     pub default_grid: String,
     /// api.weather.gov asks for a contact in the User-Agent.
     pub user_agent: String,

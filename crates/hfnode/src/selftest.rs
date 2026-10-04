@@ -3409,8 +3409,8 @@ pub fn vectors() -> Vec<Vector> {
         ),
         v(
             "open-wx-preset",
-            "W5XXX 48 {48} WX 2 K",
-            "R 48 WX 2 DL89ME ? DE N0DE K",
+            "W5XXX 49 {49} WX 2 K",
+            "R 49 WX 2 DL89ME ? DE N0DE K",
         ),
         v("abort", "NO K", "R NO DE N0DE K"),
         v(
@@ -3487,8 +3487,9 @@ pub fn write_vectors(
          #   field_calls = [\"{FIELD_CALL}\"], contacts MOM and BOB, weather.default_grid\n\
          #   = \"{WX_DEFAULT_GRID}\" with presets 1 = DL89IG and 2 = DL89ME, auth.key_file =\n\
          #   test-only.key, and a scratch state_dir whose last_seq is {START_SEQ} (or no\n\
-         #   last_seq file at all). Play the files of one speed and noise level in\n\
-         #   order, waiting for each reply; `reply` is what the node should key.\n\
+         #   last_seq file at all) and no wx_last.json. Play the files of one speed and\n\
+         #   noise level in order, waiting for each reply; `reply` is what the node\n\
+         #   should key.\n\
          #\n\
          # Mono 16-bit {SAMPLE_RATE} Hz, {pitch} Hz tone, 1 s of silence before and after.\n\
          #\n\
@@ -3539,6 +3540,37 @@ pub fn write_vectors(
 mod tests {
     use super::*;
     use civ::mock::Keyed;
+
+    /// Played in order into a node configured as the manifest says, each vector
+    /// gets the reply the manifest gives (where that is a literal over or silence).
+    #[test]
+    fn test_vectors_get_the_manifest_replies_when_played_in_order() {
+        use crate::session::Outcome as Answer;
+        let dir = Scratch::new("vectors").unwrap();
+        let cfg = config(&base("vectors", "manifest config"), &dir.0, 1.0).unwrap();
+        let mut session = node::build_session(&cfg).unwrap();
+        let mut svc = FakeServices::default();
+        let book = CodeBook::new(TEST_KEY);
+        let t0 = Instant::now();
+        for (i, v) in vectors().iter().enumerate() {
+            let got = session.handle(
+                &with_codes(v.text, &book),
+                t0 + Duration::from_secs(10 * i as u64),
+                &mut svc,
+            );
+            if v.reply.starts_with("(silence") {
+                assert!(matches!(got, Answer::Silent(_)), "{}: {got:?}", v.label);
+            } else if !v
+                .reply
+                .contains(|c: char| c == '<' || c.is_ascii_lowercase())
+            {
+                match got {
+                    Answer::Transmit(t) => assert_eq!(t.text(), v.reply, "{}", v.label),
+                    Answer::Silent(why) => panic!("{}: silent ({why})", v.label),
+                }
+            }
+        }
+    }
 
     #[test]
     fn codes_are_substituted() {

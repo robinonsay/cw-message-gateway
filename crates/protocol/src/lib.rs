@@ -250,8 +250,11 @@ pub fn parse(decoded: &str, vocab: &Vocabulary) -> Result<FieldMsg, ParseError> 
 ///
 /// Neither is snapped to anything: the read-back shows the grid (and the preset
 /// number) so the operator can catch a miscopy. A grid split in two by a stretched
-/// gap (`DL89 IG`) is rejoined, as codes are. A preset must match one the node has
-/// exactly; anything else gets silence, like an unknown contact.
+/// gap (`DL89 IG`) is rejoined, as codes are, except when a whole 4-character grid
+/// is followed by what a noise burst or a garbled `K` decodes as (`DL89 EE`,
+/// `DL89 TA`): that would invent a subsquare, so it gets silence and the operator
+/// repeats. A preset must match one the node has exactly; anything else gets
+/// silence, like an unknown contact.
 fn wx_place(args: &[String], presets: &[u32]) -> Result<Option<Place>, ParseError> {
     match args {
         [] => Ok(None),
@@ -264,7 +267,9 @@ fn wx_place(args: &[String], presets: &[u32]) -> Result<Option<Place>, ParseErro
             .map(|p| Some(Place::Preset(p)))
             .ok_or_else(|| ParseError::UnknownPreset(n.clone())),
         [g] => Err(ParseError::BadGrid(g.clone())),
-        [a, b] if is_grid(&format!("{a}{b}")) => Ok(Some(Place::Grid(format!("{a}{b}")))),
+        [a, b] if is_grid(&format!("{a}{b}")) && !(is_grid(a) && is_noise(b)) => {
+            Ok(Some(Place::Grid(format!("{a}{b}"))))
+        }
         rest => Err(ParseError::TrailingGarbage(rest.join(" "))),
     }
 }
@@ -312,7 +317,7 @@ fn expect_end(rest: &[String]) -> Result<(), ParseError> {
     }
 }
 
-/// A 4- or 6-character Maidenhead locator such as `DL88` or `DL88AF`.
+/// A 4- or 6-character Maidenhead locator such as `DL89` or `DL89IG`.
 pub fn is_grid(s: &str) -> bool {
     let b = s.as_bytes();
     let field = |c: u8| (b'A'..=b'R').contains(&c);
@@ -424,6 +429,25 @@ mod tests {
         );
         // Three pieces are too many to guess at.
         assert!(parse("W5XXX 46 ABCDEFGH WX DL 88 AF K", &vocab()).is_err());
+        // Noise after a whole 4-character grid is not made into a subsquare.
+        for text in [
+            "W5XXX 46 ABCDEFGH WX DL89 EE K",
+            "W5XXX 46 ABCDEFGH WX DL89 IT K",
+            "W5XXX 46 ABCDEFGH WX DL89 TA",
+            "W5XXX 46 ABCDEFGH WX DL89 NT",
+        ] {
+            assert!(
+                matches!(parse(text, &vocab()), Err(ParseError::TrailingGarbage(_))),
+                "{text}"
+            );
+        }
+        // A split inside the 4-character part is still rejoined whatever follows.
+        assert_eq!(
+            open("W5XXX 46 ABCDEFGH WX DL8 9ME K"),
+            Command::Wx {
+                place: Some(Place::Grid("DL89ME".into()))
+            }
+        );
     }
 
     #[test]

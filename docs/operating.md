@@ -149,8 +149,9 @@ Name the place you want the forecast for after `WX`:
 
 - **Your grid square**, such as `WX DL89IG`. Use the 6-character square. A
   4-character square (`WX DL89`) is about 110 by 190 km and the forecast is for its
-  centre, which can be far from you and at a very different height. A square sent
-  as two words (`DL89 IG`) is joined back together.
+  centre, which can be far from you and at a very different height. Send the
+  square as one word; if a long gap splits it in two, the node usually joins it
+  back together (the read-back shows what it made of it).
 - **A preset**, such as `WX 1`. Presets are the node's numbered places
   (`[[weather.presets]]` in its config), printed under the code table. Send the
   digits in full, not as cut numbers.
@@ -158,7 +159,8 @@ Name the place you want the forecast for after `WX`:
   confirmed with `OK` (a grid square or a preset), which the node keeps across
   restarts. Until you have done that once, it is the node's default grid square
   (`weather.default_grid`). So once you have sent `WX DL89IG` from camp, a plain
-  `WX` gets camp's weather; after you move, name the new place once.
+  `WX` gets camp's weather; after you move, name the new place once. A place the
+  NWS has no forecast for is not remembered.
 
 **Check the read-back.** It always names the grid square the forecast will be for,
 after the preset number if you sent one. If it is not the place you meant, send

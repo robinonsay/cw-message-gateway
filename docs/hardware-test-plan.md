@@ -800,7 +800,9 @@ The second station plays the field operator, inside a listening window, using
    starts with it. Then `WX` alone: expect the read-back to name the preset's grid
    square, the last place confirmed. Then `WX IO91` (southern England): expect
    `FAIL n WX NO COVERAGE`, which shows the node tells a place the NWS does not
-   cover apart from an outage.
+   cover apart from an outage (that place is not remembered). The node keeps the
+   last place for that callsign in `state_dir/wx_last.json`; to start the trip
+   from `weather.default_grid` instead, stop the node and delete that file.
 5. Open a transaction, then `NO`: expect `R NO`, and nothing sent.
 6. Resend the open of an already-completed transaction: expect silence.
 7. Send a code from the wrong line: expect silence.

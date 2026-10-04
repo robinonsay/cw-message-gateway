@@ -63,7 +63,10 @@ name = "BOB"
 address = "bob@example.com"
 
 [weather]
-default_grid = "DL89"             # used for WX with no place; e.g. Big Bend
+# WX with no place gives the last place the field callsign confirmed (kept in
+# state_dir/wx_last.json; delete it with the node stopped to forget), and this
+# grid square until there is one.
+default_grid = "DL89"             # e.g. Big Bend
 user_agent = "hfnode (you@example.com)"
 periods = 2
 
