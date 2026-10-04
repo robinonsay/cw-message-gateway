@@ -901,11 +901,13 @@ mod tests {
         // Heard nothing back: the operator sends OK again.
         audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
         audio.extend(ms(8000));
+        // Wide margins: on a busy CI runner even the open (which saves last_seq) can
+        // take a few hundred ms.
         let slow = Fake {
-            delay: Duration::from_millis(400),
+            delay: Duration::from_millis(2500),
             ..Fake::default()
         };
-        let h = run_node_with(audio, slow, Duration::from_millis(100));
+        let h = run_node_with(audio, slow, Duration::from_millis(1200));
         assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
         assert_eq!(h.keyed, "R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K");
     }
