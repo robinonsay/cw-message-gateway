@@ -37,11 +37,21 @@
 //!   driver. The protection function's "Power down transmission" (p. 13-4) can be
 //!   modelled as a fold-back of the output above a set SWR.
 //! - The tuner (1C 01, p. 19-7) tunes for "2~3 seconds" with a carrier and reports
-//!   "02" meanwhile; it matches loads "of less than 3:1", otherwise "TUNE disappears
-//!   and the tuning circuit is automatically bypassed" (p. 11-2).
+//!   "02" meanwhile; it matches loads "of less than 3:1" and "reduces the SWR to
+//!   less than 1.5:1", otherwise "TUNE disappears and the tuning circuit is
+//!   automatically bypassed" (p. 11-2).
+//! - Command 17 and the tuner put out RF only inside the transmitter's frequency
+//!   coverage (p. 16-2); command 05 accepts the receiver's.
 //! - CI-V USB Echo Back (1A 05 00 75, "00=ON, 01=OFF", p. 19-5) repeats every frame
 //!   received. ICOM's default is OFF (p. 12-11); the mock defaults to ON so that the
 //!   driver's skipping of its own echoed frames is exercised.
+//! - CI-V Transceive is ON by default: "When you change a setting on the
+//!   transceiver, the same change is automatically set on other connected
+//!   transceivers", to "the default transceive address", 00h (p. 12-10). A change
+//!   made at the radio ([`MockRadio::turn_dial`], [`MockRadio::select_mode`]) is sent
+//!   unasked as command 00 "Send frequency data (transceive)" or 01 "Send mode data
+//!   (transceive)" (p. 19-3), with the data of p. 19-9. The manual does not say
+//!   whether a change made by CI-V command is sent too; the mock does not send one.
 //!
 //! Everything the radio puts on the air is recorded in radio time (real time
 //! multiplied by [`MockConfig::time_scale`]): the text each keyer message actually
@@ -76,13 +86,24 @@ pub struct MockConfig {
     /// whether either command cuts the delay short, so the mock assumes it does not,
     /// which is the harder case for the node.
     pub hang_after_stop: bool,
-    /// SWR the meter reads while there is output.
+    /// SWR of the load (the antenna) the radio sees with the tuner bypassed or not
+    /// yet matched to it; the meter reads it while there is output.
     pub swr: f32,
+    /// SWR the meter reads once the tuner has matched the load: "less than 1.5:1"
+    /// (p. 11-2). A load that already reads lower keeps its own.
+    pub tuned_swr: f32,
     /// Output reduction into a bad load.
     pub foldback: Option<Foldback>,
     /// How long a read waits for data before reporting a timeout (real time), as
     /// the serial port's read timeout does.
     pub read_timeout: Duration,
+    /// CI-V Transceive (p. 12-10): send changes made at the radio unasked.
+    pub transceive: bool,
+    /// The filter command 06 selects when its filter byte is skipped: "the default
+    /// filter setting of the operating mode" (p. 19-9), which the manual does not
+    /// give. The mock uses FIL2, so that a driver relying on FIL1 there reads back
+    /// something else (command 01 would select FIL1).
+    pub default_filter: u8,
 }
 
 impl Default for MockConfig {
@@ -95,8 +116,11 @@ impl Default for MockConfig {
             tune_time: Duration::from_millis(2500),
             hang_after_stop: true,
             swr: 1.2,
+            tuned_swr: 1.3,
             foldback: None,
             read_timeout: Duration::from_millis(2),
+            transceive: true,
+            default_filter: 0x02,
         }
     }
 }
@@ -273,6 +297,8 @@ struct Tune {
     start: Duration,
     end: Duration,
     never: bool,
+    /// The load SWR it was started on, if it can match it.
+    matched: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -314,6 +340,27 @@ pub struct MockRadio(Arc<Shared>);
 
 /// The radio's USB serial port, as the driver sees it.
 pub struct MockPort(MockRadio);
+
+/// "The default transceive address is “00h.”" (p. 12-10).
+const TRANSCEIVE_ADDRESS: u8 = 0x00;
+
+/// Transmitter frequency coverage in Hz, from "Transmitter 1.800000~01.999999" MHz
+/// on (p. 16-2). It is narrower "depending on the transceiver version"; the mock
+/// takes the whole list.
+const TX_RANGES: [(u64, u64); 12] = [
+    (1_800_000, 1_999_999),
+    (3_500_000, 3_999_999),
+    (5_255_000, 5_405_000),
+    (7_000_000, 7_300_000),
+    (10_100_000, 10_150_000),
+    (14_000_000, 14_350_000),
+    (18_068_000, 18_168_000),
+    (21_000_000, 21_450_000),
+    (24_890_000, 24_990_000),
+    (28_000_000, 29_700_000),
+    (50_000_000, 54_000_000),
+    (70_000_000, 70_500_000),
+];
 
 /// Meter calibration points (level, value) from the 15 11 and 15 12 rows (p. 19-3).
 const PO_POINTS: [(f32, f32); 3] = [(0.0, 0.0), (143.0, 50.0), (213.0, 100.0)];
@@ -499,14 +546,42 @@ impl State {
         self.tune.as_ref().is_some_and(|tu| tu.never || t < tu.end)
     }
 
+    /// The SWR the radio sees at `t`: the load's, unless the tuner is in line and
+    /// has finished matching this load, which "reduces the SWR to less than 1.5:1"
+    /// (p. 11-2).
+    fn swr(&self, t: Duration) -> f32 {
+        let load = self.cfg.swr;
+        let tuned = self.tune.as_ref().is_some_and(|tu| {
+            self.tuner == 0x01 && !tu.never && t >= tu.end && tu.matched == Some(load)
+        });
+        if tuned {
+            load.min(self.cfg.tuned_swr)
+        } else {
+            load
+        }
+    }
+
     /// Output in percent of full (100 W), with the key down.
-    fn po_percent(&self) -> f32 {
+    fn po_percent(&self, t: Duration) -> f32 {
         // [RF PWR] "00 00=max. CCW, 02 55=max. CW" (14 0A, p. 19-3): taken as
         // linear from 0 to 100 W, the assumption the driver makes.
         let pct = self.rf_power as f32 * 100.0 / 255.0;
         match self.cfg.foldback {
-            Some(f) if self.cfg.swr > f.above_swr => pct * f.fraction,
+            Some(f) if self.swr(t) > f.above_swr => pct * f.fraction,
             _ => pct,
+        }
+    }
+
+    fn in_tx_range(&self) -> bool {
+        TX_RANGES
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&self.frequency_hz))
+    }
+
+    /// Send a transceive frame (command 00 or 01) unasked, if CI-V Transceive is on.
+    fn transceive(&mut self, body: &[u8]) {
+        if self.cfg.transceive {
+            self.reply(TRANSCEIVE_ADDRESS, body, None);
         }
     }
 
@@ -670,12 +745,12 @@ impl State {
             // 15 11 Po and 15 12 SWR meters: read only (p. 19-3).
             [0x15, sub @ (0x11 | 0x12)] => {
                 let key_down = self.at(true, now);
-                let po = if key_down { self.po_percent() } else { 0.0 };
+                let po = if key_down { self.po_percent(now) } else { 0.0 };
                 let value = match sub {
                     0x11 => meter_level(&PO_POINTS, po),
                     // With no forward power there is nothing to measure.
                     _ if po <= 0.0 => 0,
-                    _ => meter_level(&SWR_POINTS, self.cfg.swr),
+                    _ => meter_level(&SWR_POINTS, self.swr(now)),
                 };
                 Ok([&[0x15, *sub][..], &bcd_be(value as u64, 2)].concat())
             }
@@ -725,6 +800,19 @@ impl State {
                 if self.keyer_busy(now) {
                     self.violation(now, body, "tune started while the keyer is sending");
                 }
+                if !self.in_tx_range() {
+                    // No carrier outside the transmitter's coverage (p. 16-2). The
+                    // manual does not say how the radio answers; OK, as for 17.
+                    self.violation(
+                        now,
+                        body,
+                        format!(
+                            "tune started on {} Hz, outside the transmit ranges (p. 16-2)",
+                            self.frequency_hz
+                        ),
+                    );
+                    return Ok(vec![OK]);
+                }
                 // Matches loads "of less than 3:1"; otherwise "TUNE disappears and the
                 // tuning circuit is automatically bypassed" (p. 11-2).
                 let matched = self.cfg.swr < 3.0;
@@ -736,6 +824,7 @@ impl State {
                     start: now,
                     end: now + self.cfg.tune_time,
                     never,
+                    matched: matched.then_some(self.cfg.swr),
                 });
                 self.tuner = if matched { 0x01 } else { 0x00 };
                 self.tunes += 1;
@@ -774,12 +863,13 @@ impl State {
     }
 
     /// 06 "Operating mode selection for transceive" (p. 19-3): mode 00-05, 07, 08
-    /// and filter 01-03; "Filter setting (2) can be skipped" (p. 19-9).
+    /// and filter 01-03; "Filter setting (2) can be skipped", and then "the default
+    /// filter setting of the operating mode is automatically selected" (p. 19-9).
     fn set_mode(&mut self, data: &[u8]) -> Result<Vec<u8>, String> {
         let mode_ok = |m: &u8| matches!(m, 0x00..=0x05 | 0x07 | 0x08);
         let filter_ok = |f: &u8| matches!(f, 0x01..=0x03);
         match data {
-            [m] if mode_ok(m) => (self.mode, self.filter) = (*m, 0x01),
+            [m] if mode_ok(m) => (self.mode, self.filter) = (*m, self.cfg.default_filter),
             [m, f] if mode_ok(m) && filter_ok(f) => (self.mode, self.filter) = (*m, *f),
             _ => return Err(format!("06 {data:02X?}: mode or filter not on p. 19-9")),
         }
@@ -809,8 +899,15 @@ impl State {
         // Break-in function is ON, a message will be transmitted" (*2, p. 19-8).
         let cw_mode = matches!(self.mode, 0x03 | 0x07);
         let tx_on = self.forced.iter().any(|f| f.1 == OPEN);
-        let on_air = cw_mode && (self.break_in != 0x00 || tx_on);
-        if !on_air {
+        let in_range = self.in_tx_range();
+        let on_air = cw_mode && (self.break_in != 0x00 || tx_on) && in_range;
+        if !in_range {
+            let why = format!(
+                "17 sent on {} Hz, outside the transmit ranges (p. 16-2): not transmitted",
+                self.frequency_hz
+            );
+            self.violation(now, &raw, why);
+        } else if !on_air {
             self.violation(
                 now,
                 &raw,
@@ -991,6 +1088,28 @@ impl MockRadio {
         f(&mut self.lock().cfg);
     }
 
+    /// Someone at the radio tunes it to `hz`. With CI-V Transceive on, the radio
+    /// sends "00 Send frequency data (transceive)" (p. 19-3) to 00h (p. 12-10), with
+    /// the frequency as on p. 19-9.
+    pub fn turn_dial(&self, hz: u64) {
+        let mut s = self.lock();
+        s.frequency_hz = hz;
+        let body = [&[0x00][..], &bcd_le(hz, 5)].concat();
+        s.transceive(&body);
+        drop(s);
+        self.0.arrived.notify_all();
+    }
+
+    /// Someone at the radio selects a mode and filter: "01 Send mode data
+    /// (transceive)" (p. 19-3), with the mode and filter as on p. 19-9.
+    pub fn select_mode(&self, mode: u8, filter: u8) {
+        let mut s = self.lock();
+        (s.mode, s.filter) = (mode, filter);
+        s.transceive(&[0x01, mode, filter]);
+        drop(s);
+        self.0.arrived.notify_all();
+    }
+
     /// End any stuck transmit, recoverable or not, as a hardware PTT timer or a
     /// power cycle would.
     pub fn clear_stuck(&self) {
@@ -1060,8 +1179,18 @@ impl MockRadio {
 
     /// Key-down runs (radio time) that overlap `from..to`, clipped to it.
     pub fn key_down_between(&self, from: Duration, to: Duration) -> Vec<(Duration, Duration)> {
+        self.between(true, from, to)
+    }
+
+    /// Transmit periods (radio time) that overlap `from..to`, clipped to it: while
+    /// on transmit the radio does not receive.
+    pub fn transmit_between(&self, from: Duration, to: Duration) -> Vec<(Duration, Duration)> {
+        self.between(false, from, to)
+    }
+
+    fn between(&self, carrier: bool, from: Duration, to: Duration) -> Vec<(Duration, Duration)> {
         let s = self.lock();
-        merge(s.intervals(true), s.now().min(to))
+        merge(s.intervals(carrier), s.now().min(to))
             .into_iter()
             .filter(|&(a, b)| b > from && a < to)
             .map(|(a, b)| (a.max(from), b.min(to)))
@@ -1435,6 +1564,130 @@ mod tests {
         thread::sleep(Duration::from_millis(40));
         assert!(r.tuner_busy().unwrap());
         assert!(!r.is_transmitting().unwrap(), "the carrier still ends");
+    }
+
+    #[test]
+    fn a_matched_load_reads_below_1_5_after_tuning() {
+        let (m, mut r) = radio(100.0);
+        setup(&mut r);
+        let max_swr = |m: &MockRadio, r: &mut Ic7300<MockPort>| {
+            r.send_cw("TTTTT").unwrap();
+            let mut swr = 0.0f32;
+            while m.busy() {
+                swr = swr.max(r.read_swr().unwrap());
+            }
+            swr
+        };
+        let tune = |r: &mut Ic7300<MockPort>| {
+            r.start_tune().unwrap();
+            while r.tuner_busy().unwrap() {
+                thread::sleep(Duration::from_millis(1));
+            }
+        };
+        // 2.5:1 is within the tuner's range: "less than 1.5:1" once tuned (p. 11-2).
+        m.configure(|c| c.swr = 2.5);
+        assert!((max_swr(&m, &mut r) - 2.5).abs() < 0.02, "not tuned yet");
+        tune(&mut r);
+        assert_eq!(m.settings().tuner, 0x01);
+        let swr = max_swr(&m, &mut r);
+        assert!(swr < 1.5 && (swr - 1.3).abs() < 0.02, "{swr}");
+        // The load changes: the old match no longer holds.
+        m.configure(|c| c.swr = 2.8);
+        assert!((max_swr(&m, &mut r) - 2.8).abs() < 0.02);
+        // 3.5:1 is beyond it: bypassed, the load's own SWR.
+        m.configure(|c| c.swr = 3.5);
+        tune(&mut r);
+        assert_eq!(m.settings().tuner, 0x00);
+        assert!((max_swr(&m, &mut r) - 3.5).abs() < 0.02);
+        assert!(m.report().violations.is_empty());
+    }
+
+    #[test]
+    fn nothing_goes_out_outside_the_transmit_ranges() {
+        let (m, mut r) = radio(100.0);
+        setup(&mut r);
+        // 6.5 MHz: received (0.03-74.8 MHz) but not an amateur band (p. 16-2).
+        r.set_frequency(6_500_000).unwrap();
+        r.send_cw("TEST").unwrap();
+        r.start_tune().unwrap();
+        let rep = m.report();
+        assert!(!rep.keyed[0].on_air && rep.transmissions.is_empty());
+        assert_eq!(rep.tunes, 0);
+        assert_eq!(rep.violations.len(), 2, "{:?}", rep.violations);
+        // The edges of a band are inside it.
+        r.set_frequency(14_350_000).unwrap();
+        r.send_cw("E").unwrap();
+        assert!(m.report().keyed[1].on_air);
+    }
+
+    #[test]
+    fn mode_without_a_filter_gets_the_modes_default() {
+        let m = MockRadio::new(MockConfig::default());
+        let f = raw(&m, &[0xFE, 0xFE, 0x94, 0xE0, 0x06, 0x03, 0xFD]);
+        assert!(f.last().unwrap().is_ok());
+        assert_eq!((m.settings().mode, m.settings().filter), (0x03, 0x02));
+        let f = raw(&m, &[0xFE, 0xFE, 0x94, 0xE0, 0x04, 0xFD]);
+        assert_eq!(f.last().unwrap().body, [0x04, 0x03, 0x02]);
+        assert!(m.report().violations.is_empty());
+    }
+
+    #[test]
+    fn changes_at_the_radio_are_sent_unasked() {
+        let m = MockRadio::new(MockConfig::default());
+        let mut p = m.port();
+        m.turn_dial(7_031_250);
+        m.select_mode(0x03, 0x02);
+        let mut buf = vec![0u8; 64];
+        let n = p.read(&mut buf).unwrap();
+        // FE FE 00 94 00 <frequency> FD, then FE FE 00 94 01 <mode> <filter> FD.
+        assert_eq!(
+            buf[..n],
+            [
+                0xFE, 0xFE, 0x00, 0x94, 0x00, 0x50, 0x12, 0x03, 0x07, 0x00, 0xFD, 0xFE, 0xFE, 0x00,
+                0x94, 0x01, 0x03, 0x02, 0xFD
+            ]
+        );
+        m.configure(|c| c.transceive = false);
+        m.turn_dial(7_030_000);
+        assert!(p.read(&mut buf).is_err(), "Transceive OFF: nothing");
+        assert_eq!(m.settings().frequency_hz, 7_030_000);
+    }
+
+    #[test]
+    fn the_driver_skips_transceive_frames() {
+        let (m, mut r) = radio(1.0);
+        setup(&mut r);
+        // Someone at the radio keeps nudging the dial while the driver works.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let knob = {
+            let (m, stop) = (m.clone(), stop.clone());
+            thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    m.turn_dial(7_030_010);
+                    m.turn_dial(7_030_000);
+                    thread::sleep(Duration::from_micros(200));
+                }
+            })
+        };
+        for _ in 0..50 {
+            assert_eq!(r.frequency().unwrap(), 7_030_000);
+            assert!(!r.is_transmitting().unwrap());
+            r.set_break_in(true).unwrap();
+        }
+        // A lost reply: the driver reads until quiet before the next command, which
+        // the transceive frames keep from happening; it still gets the right reply.
+        m.inject(Fault::Reply {
+            cmd: vec![0x03],
+            skip: 0,
+            times: 1,
+            kind: ReplyFault::Drop,
+        });
+        assert!(matches!(r.frequency(), Err(RigError::Timeout)));
+        assert!(!r.is_transmitting().unwrap());
+        assert_eq!(r.frequency().unwrap(), 7_030_000);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        knob.join().unwrap();
+        assert!(m.report().violations.is_empty());
     }
 
     #[test]

@@ -148,13 +148,15 @@ const SLOWEST_DOT: Duration = Duration::from_millis(200);
 /// With semi break-in the radio "returns to receive after a preset time after you
 /// stop keying" (p. 4-15), and the receive command may not cut that short, so the
 /// attempts go on for the longest break-in delay at the keyer's speed before giving
-/// up.
+/// up. That time counts from when the first stop and receive commands have gone
+/// out: after a CI-V timeout the driver first waits for the link to go quiet (up to
+/// four reply timeouts), and the radio cannot start its delay before then.
 pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
     let dot = r.dot_duration().unwrap_or(SLOWEST_DOT);
-    let deadline = Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS);
+    let mut deadline = None;
     let mut last = RigError::Timeout;
     for attempt in 0.. {
-        if attempt >= FORCE_RX_ATTEMPTS && Instant::now() >= deadline {
+        if attempt >= FORCE_RX_ATTEMPTS && deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
         if attempt > 0 {
@@ -166,6 +168,7 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
         if let Err(e) = r.set_transmit(false) {
             log::warn!("forcing receive: set receive: {e}");
         }
+        deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS));
         match r.is_transmitting() {
             Ok(false) => return Ok(()),
             Ok(true) => last = RigError::Protocol("radio still reports transmit".into()),
@@ -637,6 +640,9 @@ mod tests {
         foldback: bool,
         hang_after_stop: bool,
         hang_until: Option<Instant>,
+        /// Time the next stop command spends before reaching the radio, as the
+        /// driver's read-until-quiet after a CI-V timeout does.
+        stop_lag: Option<Duration>,
     }
 
     impl Radio {
@@ -646,6 +652,7 @@ mod tests {
                 foldback: false,
                 hang_after_stop: false,
                 hang_until: None,
+                stop_lag: None,
             }
         }
 
@@ -708,6 +715,9 @@ mod tests {
             self.sim.send_cw(text)
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
+            if let Some(lag) = self.stop_lag.take() {
+                thread::sleep(lag);
+            }
             self.hang()?;
             self.sim.stop_cw()
         }
@@ -751,6 +761,21 @@ mod tests {
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        assert!(!st.tx_inhibited());
+        assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
+    }
+
+    #[test]
+    fn forced_receive_waits_out_the_break_in_delay_after_a_slow_stop() {
+        // Real time: the stop reaches the radio 700 ms late (the driver draining the
+        // link after a timeout), and only then does the 600 ms break-in delay start.
+        let mut rig = Radio::new(SimRig::new());
+        rig.hang_after_stop = true;
+        let st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().sim.set_transmit(true).unwrap();
+        st.rig().lock().unwrap().stop_lag = Some(Duration::from_millis(700));
+        assert_eq!(st.force_rx(), Ok(()));
         assert!(!st.tx_inhibited());
         assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
     }

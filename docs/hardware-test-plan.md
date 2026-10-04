@@ -99,23 +99,34 @@ IC-7300 that answers every command the driver uses exactly as Section 19 of the
 manual says, and flags anything else as a protocol violation. A scripted field
 operator keys CW audio (with noise and hand-keying jitter) into the node's audio
 queue, listens to what the mock radio actually keyed and reacts: it opens, checks
-the read-back, then answers `OK`, `NO` or `AGN`, and repeats an open that got no
-read-back. Every scenario checks the exact text keyed, the gateway side effects
+the read-back, then answers `OK`, `NO` or `AGN`, and repeats an open or an `OK` that
+got no answer. While the mock radio is on transmit, the node hears nothing of the
+operator. Every scenario checks the exact text keyed, the gateway side effects
 (messages sent, inbox marked read, weather requests), `last_seq`, zero CI-V
-violations, and safety bounds (longest key-down, longest transmit, duty cycle,
-receive at the end, nothing keyed after a lockout or inhibit).
+violations, the radio's settings as the node left them, that the node forced
+receive after a fault and never otherwise, and safety bounds (longest key-down,
+longest transmit, no transmit past the break-in delay plus the stuck margin, duty
+cycle, receive when the node stops, the tuner cycles expected).
 
-The scenarios cover the whole field grammar (TX, RX with one to many messages and
-truncation, WX, NO, AGN, AGN with a chunk letter), lost read-backs, replayed and
-wrong codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm,
-SNR 20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand key, the radio's sidetone in the
-receive audio, USB echo off, and radio faults: high SWR, power fold-back, stuck
-transmit, stuck key, a transmitter that will not unkey, NG and lost or late CI-V
-replies, and a tuner that never finishes.
+The scenarios cover the field grammar end to end: TX, RX with one to many messages,
+the five-message cap and truncation, WX with 4- and 6-character grids, `FAIL`
+replies, NO, AGN and AGN with a chunk letter, codes sent in two groups, a repeated
+`OK` after a lost result, an open on fresh lines replacing a pending one, and the
+10-minute pending-commit and `AGN` windows. Also lost read-backs, replayed and wrong
+codes, garbled callsigns, noise bursts after `K`, sending speeds 10 to 30 wpm, SNR
+20, 6, 3 and 0 dB in 2500 Hz, a sloppy hand key, the radio's sidetone in the receive
+audio, USB echo off, CI-V Transceive frames from someone at the radio, a load the
+tuner matches, listening windows (a high-SWR lockout cleared by the next window's
+tune), and radio faults: high SWR, power fold-back, stuck transmit or key (also
+after the last over), a transmitter that will not unkey, one that only the watchdog
+gets off transmit, refused status commands, NG and lost or late CI-V replies, a
+readout the radio refuses (left unread), and a tuner that never finishes.
 
-It runs 100 times faster than real time by default (about 15 s for all of them on a
+It runs 100 times faster than real time by default (about 30 s for all of them on a
 laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
-depend on it.
+depend on it (any scale from 1 to 200). `--scale 1` runs everything at real speed, including the CI-V reply
+timeout, the watchdog and the forced-receive retries, which stay in real time in a
+time-scaled run (about 17 minutes with `--jobs 64`).
 
 **Test vectors for later steps.** Write the field operator's side of a session as
 WAV files, with a manifest of what each should decode to and what the node should
@@ -130,6 +141,8 @@ The codes in them come from a fixed **test-only** key (`test-only.key`, written
 alongside), which anyone can compute: never use it as a node's key on the air.
 They are for steps 2, 3 and 11 (play them from a second device into the radio's
 receive audio or a dummy-load setup with a scratch config, as the manifest says).
+The manifest gives what each file decodes to: some noisy ones lose a callsign,
+number or code to the noise, and for those it gives no reply to expect.
 
 **Pass:** `hfnode selftest` ends with `0 failed`, and the clean vectors decode to
 their manifest text. **Fail:** any scenario fails: do not go on to step 4. Run the
@@ -142,9 +155,9 @@ It has no RF, so nothing about real SWR, power output, the tuner's actual timing
 the radio's keyer timing, RF getting into USB or audio, the USB serial link or the
 sound card. Its CW is synthetic and its noise is white Gaussian: real band noise,
 QSB, QRM and real fists are only tested from step 2 on. Watchdog and forced-receive
-behaviour runs on real timers inside a time-scaled test, so it shows the logic, not
-the real-time margins (step 9 measures those). The hardware PTT timer (step 10)
-cannot be tested in software at all.
+margins are exercised at the mock's speed only with `--scale 1`, and only against
+the manual's figures; step 9 measures them on the radio. The hardware PTT timer
+(step 10) cannot be tested in software at all.
 
 ## Step 0: check every CI-V command against ICOM's IC-7300 guide
 
@@ -187,7 +200,8 @@ answers `FE FE E0 94 ... FD`. All examples use address 94h.
 | 0.17 | `1C 01` tuner, start | `1C 01 02` = tune | p. 19-7: 00 = tuner OFF, 01 = ON, 02 = "Send/read to tuning" | ☐ |
 | 0.18 | `1C 01` tuner, read | Treats a reply of `02` as still tuning, anything else as finished; gives up after 15 s and forces receive | p. 19-7. The manual does not say how long `02` is reported; step 5 confirms it on the radio | ☐ |
 | 0.19 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
-| 0.20 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` test match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
+| 0.20 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10; commands 00 and 01, p. 19-3 | ☐ |
+| 0.21 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` test match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
