@@ -9,11 +9,13 @@ use hfnode::gateway::OfflineServices;
 use hfnode::inbox::Inbox;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
+use hfnode::storm::StormHold;
 use hfnode::{audio, gateway, node, selftest};
 use protocol::sanitize;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(version, about = "HF CW message gateway node for the IC-7300")]
@@ -83,6 +85,12 @@ enum Cmd {
     },
     /// Run the node.
     Run {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Ask the NWS once whether the storm stand-down would hold now, for the
+    /// station's location in `[storm]`. Never touches the radio.
+    Storm {
         #[arg(long)]
         config: PathBuf,
     },
@@ -210,6 +218,7 @@ fn main() -> Result<()> {
         Cmd::Listen { config } => listen(&Config::load(&config)?),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&Config::load(&config)?),
+        Cmd::Storm { config } => storm_check(&Config::load(&config)?),
         Cmd::Selftest {
             sweep: true,
             scale,
@@ -596,8 +605,61 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     Ok(())
 }
 
+/// The storm stand-down for `run`: the `[storm]` section is required, so that
+/// running without it is a choice made in the config (`enabled = false`).
+fn start_storm_watch(cfg: &Config) -> Result<Option<Arc<StormHold>>> {
+    let Some(st) = &cfg.storm else {
+        bail!(
+            "no [storm] section: add one with the station's latitude and longitude (see \
+             hfnode.example.toml), or set `enabled = false` in it to run without the storm \
+             stand-down"
+        );
+    };
+    if !st.enabled {
+        log::warn!("storm stand-down is off (storm.enabled = false)");
+        return Ok(None);
+    }
+    let ua = cfg.storm_user_agent().context("storm user agent")?;
+    let hold = hfnode::storm::spawn(st, ua, Some(cfg.state_dir.join("health.csv")))?;
+    log::info!(
+        "storm stand-down on: no transmitting while thunder is forecast within {} h of \
+         {:.4},{:.4}",
+        st.lookahead_hours,
+        st.latitude.unwrap_or_default(),
+        st.longitude.unwrap_or_default()
+    );
+    Ok(Some(hold))
+}
+
+fn storm_check(cfg: &Config) -> Result<()> {
+    let st = cfg
+        .storm
+        .as_ref()
+        .context("no [storm] section in the config")?;
+    let ua = cfg
+        .storm_user_agent()
+        .context("storm.user_agent or weather.user_agent is required")?;
+    let mut nws = hfnode::storm::NwsStorm::new(st, ua)?;
+    let found = nws
+        .check(gateway::unix_now() as i64)
+        .context("storm check failed, so `run` would hold: no tune, no transmit")?;
+    match found {
+        Some(why) => println!("storm: {why}\nthe node would not tune or transmit now"),
+        None => println!(
+            "clear: no thunder forecast in the next {} h and no storm alerts at the station",
+            st.lookahead_hours
+        ),
+    }
+    if !st.enabled {
+        println!("(storm.enabled = false: `run` does not use this check)");
+    }
+    Ok(())
+}
+
 fn run(cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
+    // First, so the first check is likely back before the first window.
+    let storm = start_storm_watch(cfg)?;
     let inbox = node::open_inbox(cfg)?;
     let mut session = node::build_session(cfg)?;
     let mut svc = node::live_services(cfg, inbox.clone())?;
@@ -608,6 +670,14 @@ fn run(cfg: &Config) -> Result<()> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
+    if let Some(hold) = storm {
+        // So the start-up tune is not skipped just because the first answer (up
+        // to three NWS requests of at most 20 s each) is still on its way.
+        if !hold.wait_for_first_check(Duration::from_secs(60)) {
+            log::warn!("no storm check yet: not tuning or transmitting until one clears");
+        }
+        station.set_storm_hold(hold);
+    }
     station.configure()?;
     verify_setup(cfg, &station)?;
     let cap = audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?;

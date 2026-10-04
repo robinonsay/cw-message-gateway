@@ -736,6 +736,14 @@ with your own email address, and the `[email]` settings. Print a few codes:
 hfnode codes --config $C --count 10
 ```
 
+`run` also needs a `[storm]` section with the station's latitude and longitude (see
+`hfnode.example.toml`). Check it reads the forecast; it must print `clear:` before
+the node will transmit:
+
+```sh
+hfnode storm --config $C
+```
+
 This is the first `run` (it needs stage `done`, and runs the preflight first,
 including the Time-Out Timer check). Run the node in the foreground, with the
 secrets loaded:

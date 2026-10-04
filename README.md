@@ -42,6 +42,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
 | Station safety: reduced power, tune at window start, SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
+| Storm stand-down: no tune or transmit while thunder is forecast or warned at the station, fails closed | `[storm]` in the config, `crates/hfnode/src/storm.rs` |
 | Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
 The hardware PTT timer in the design is external hardware, not part of this
@@ -313,6 +314,7 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. |
 | `hfnode run --config C` | **yes** | Run the node. |
 
 Logging goes to stderr; set `RUST_LOG=debug` for more detail.
