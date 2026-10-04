@@ -257,7 +257,7 @@ rules) screens it. The filter never rewrites or summarises a message. It can onl
 - **Withhold the whole message.** You receive `MSG WITHHELD BY FILTER` in place of the
   text, for example for spam or a message that is mostly unfit to transmit. The
   node also withholds a message if the filter's answer could not be applied exactly,
-  rather than guess.
+  or was not a clear verdict, rather than guess.
 
 A reply that has not been screened yet (for example because the filter service was
 unreachable) is not counted in `RX` and is never transmitted. It will be read out
