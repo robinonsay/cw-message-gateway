@@ -41,8 +41,8 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
-| Station safety: reduced power, tune at window start, SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
-| Scheduled listening windows | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
+| Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
+| Listening all the time (default) or in scheduled windows; radio set up again while idle | `[schedule]` in the config, `crates/hfnode/src/node.rs` |
 
 The hardware PTT timer in the design is external hardware, not part of this
 repository. See the [hardware test plan](docs/hardware-test-plan.md#step-10-hardware-ptt-timer)
@@ -188,7 +188,10 @@ pending and `AGN` windows), lost read-backs and results, replayed and wrong code
 garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB
 echo off, CI-V Transceive frames from someone at the radio, a load the tuner matches
 and one beyond its range (the window stays silent), listening windows (a high-SWR
-lockout cleared by the next window's tune), and radio faults (SWR rising after the
+lockout cleared by the next window's tune), listening all the time (a re-tune before
+a reply once the last tune is old, a high-SWR lockout cleared by it, split switched
+on at the radio, the dial and mode changed while the node is idle, band noise and
+other stations calling), and radio faults (SWR rising after the
 tune, fold-back, stuck transmit or key, also on the last over, a transmitter that
 will not unkey, one that only the watchdog gets off transmit, refused status
 commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner

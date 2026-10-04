@@ -94,12 +94,14 @@ pub struct Auth {
     pub alphabet: Option<String>,
 }
 
-/// When the node listens. Outside a window it neither decodes nor transmits.
+/// When the node listens, and how it looks after the radio while it does. By default
+/// it listens all the time; with `always = false` only in windows, and outside a
+/// window it neither decodes nor transmits.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
-    /// Listen all the time, ignoring the fields below.
-    #[serde(default)]
+    /// Listen all the time (the default), ignoring the three window fields below.
+    #[serde(default = "yes")]
     pub always: bool,
     /// Windows repeat with this period, aligned to the top of the UTC hour.
     #[serde(default = "default_every")]
@@ -108,15 +110,27 @@ pub struct Schedule {
     pub offset_minutes: u32,
     #[serde(default = "default_window")]
     pub window_minutes: u32,
+    /// While listening and hearing nothing, set the radio up again and check it this
+    /// often, as at a window start but without tuning: nothing is transmitted. It is
+    /// also done before every transmission.
+    #[serde(default = "default_check")]
+    pub check_minutes: u32,
+    /// Before a reply, tune again if the last tune (at start-up, at a window start or
+    /// before an earlier reply) is older than this. A lockout after a high SWR or a
+    /// tuner that could not match lasts until then, or until the next window.
+    #[serde(default = "default_retune")]
+    pub retune_minutes: u32,
 }
 
 impl Default for Schedule {
     fn default() -> Self {
         Self {
-            always: false,
+            always: true,
             every_minutes: default_every(),
             offset_minutes: 0,
             window_minutes: default_window(),
+            check_minutes: default_check(),
+            retune_minutes: default_retune(),
         }
     }
 }
@@ -277,6 +291,12 @@ fn default_every() -> u32 {
 fn default_window() -> u32 {
     10
 }
+fn default_check() -> u32 {
+    10
+}
+fn default_retune() -> u32 {
+    60
+}
 fn default_smtp_port() -> u16 {
     465
 }
@@ -434,11 +454,23 @@ impl Config {
                 }
             }
         }
-        if self.schedule.window_minutes > self.schedule.every_minutes {
+        let sch = &self.schedule;
+        if sch.window_minutes == 0 {
+            bail!("schedule.window_minutes must be at least 1");
+        }
+        if sch.window_minutes > sch.every_minutes {
             bail!("schedule.window_minutes is longer than schedule.every_minutes");
         }
-        if self.schedule.offset_minutes >= self.schedule.every_minutes {
+        if sch.offset_minutes >= sch.every_minutes {
             bail!("schedule.offset_minutes must be less than schedule.every_minutes");
+        }
+        if !(1..=1440).contains(&sch.check_minutes) {
+            bail!("schedule.check_minutes must be 1-1440");
+        }
+        // Not below 10: each tune is a carrier of a few seconds that does not
+        // identify the station.
+        if !(10..=1440).contains(&sch.retune_minutes) {
+            bail!("schedule.retune_minutes must be 10-1440");
         }
         // Bad audio settings would leave the decoder silently deaf.
         self.decoder_config()
@@ -646,12 +678,45 @@ mod tests {
     }
 
     #[test]
+    fn listens_all_the_time_by_default() {
+        let mut cfg = example();
+        cfg.schedule = toml::from_str("").unwrap();
+        cfg.validate().unwrap();
+        let s = &cfg.schedule;
+        assert!(s.always);
+        assert!((0..3 * 86_400).step_by(37).all(|t| s.is_open(t)));
+        assert_eq!((s.check_minutes, s.retune_minutes), (10, 60));
+    }
+
+    #[test]
+    fn rejects_bad_schedule_intervals() {
+        for (check, retune, ok) in [
+            (10, 60, true),
+            (1, 10, true),
+            (1440, 1440, true),
+            (0, 60, false),
+            (1441, 60, false),
+            (10, 9, false),
+            (10, 1441, false),
+        ] {
+            let mut cfg = example();
+            cfg.schedule.check_minutes = check;
+            cfg.schedule.retune_minutes = retune;
+            assert_eq!(cfg.validate().is_ok(), ok, "{check} {retune}");
+        }
+        let mut cfg = example();
+        cfg.schedule.window_minutes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn schedule_windows() {
         let s = Schedule {
             always: false,
             every_minutes: 60,
             offset_minutes: 0,
             window_minutes: 10,
+            ..Schedule::default()
         };
         assert!(s.is_open(0));
         assert!(s.is_open(9 * 60 + 59));

@@ -33,8 +33,12 @@ bandwidth_hz = 150
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
 
 [schedule]
-always = false
-every_minutes = 60                # first ten minutes of every hour (UTC)
+always = true                     # listen all the time
+check_minutes = 10                # while idle, set the radio up again this often (no transmit)
+retune_minutes = 60               # tune before a reply if the last tune is older than this
+# To listen only in windows instead, set always = false; then, for example, the
+# first ten minutes of every hour (UTC):
+every_minutes = 60
 offset_minutes = 0
 window_minutes = 10
 

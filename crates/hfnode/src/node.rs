@@ -1,4 +1,12 @@
 //! The running node: audio in, decode, session, transmit, on a listening schedule.
+//!
+//! By default the node listens all the time ([`crate::config::Schedule`]). It tunes
+//! when it starts listening, at start-up or at the top of a window, and again
+//! before a reply once that tune is older than `retune_minutes`, so a node that
+//! listens all day puts out no carriers of its own until there is something to
+//! send. While it hears nothing it sets the radio up again and checks it every
+//! `check_minutes`, without transmitting, and the station does the same before
+//! every transmission.
 
 use crate::audio::{Block, BlockReceiver};
 use crate::config::Config;
@@ -270,6 +278,12 @@ fn listening(
     scheduled || pending || (was_open && (decoder.has_partial() || !events.is_empty()))
 }
 
+/// Seconds from `since` to `now` on the node's clock. A clock set back (a time
+/// sync after boot) counts as a long time, so that what is due is not put off.
+fn secs_since(since: u64, now: u64) -> u64 {
+    now.checked_sub(since).unwrap_or(u64::MAX)
+}
+
 fn log_rx(rx_log: &Path, text: &str) {
     let _ = OpenOptions::new()
         .create(true)
@@ -313,6 +327,12 @@ pub fn run_with_clock<R: Rig + 'static>(
     let mut max_idle: u64 = 0;
     let mut guard = TxGuard::default();
     let mut was_open = false;
+    let check_secs = u64::from(cfg.schedule.check_minutes) * 60;
+    let retune_secs = u64::from(cfg.schedule.retune_minutes) * 60;
+    // Clock times of the last tune (or try at one) and of the last time the radio
+    // was set up and checked.
+    let mut tuned_at: Option<u64> = None;
+    let mut checked_at = 0;
     loop {
         let block = match audio.recv_timeout(Duration::from_secs(5)) {
             Ok(b) => b,
@@ -334,10 +354,18 @@ pub fn run_with_clock<R: Rig + 'static>(
             &events,
         );
         if open && !was_open {
-            log::info!("listening window open");
+            log::info!(
+                "{}",
+                if cfg.schedule.always {
+                    "listening"
+                } else {
+                    "listening window open"
+                }
+            );
             if let Err(e) = station.start_window() {
                 log::error!("tune failed at window start: {e}");
             }
+            (tuned_at, checked_at) = (Some(clock()), clock());
             guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
             events.clear();
@@ -361,6 +389,21 @@ pub fn run_with_clock<R: Rig + 'static>(
             }
             was_open = false;
             continue;
+        }
+
+        // Nothing being received or waited for: a moment to see that the radio is
+        // still on the node's frequency and mode, in case someone at the front panel,
+        // another program or a power cycle has changed it. Nothing is transmitted,
+        // and no audio is dropped.
+        let idle = !decoder.key_down()
+            && !decoder.has_partial()
+            && events.is_empty()
+            && !session.has_pending(now);
+        if idle && secs_since(checked_at, clock()) >= check_secs {
+            if let Err(e) = station.check() {
+                log::error!("radio check failed: {e}");
+            }
+            checked_at = clock();
         }
 
         let before = events.len();
@@ -409,7 +452,23 @@ pub fn run_with_clock<R: Rig + 'static>(
             match session.handle(&text, Instant::now(), svc) {
                 Outcome::Silent(why) => log::info!("no reply: {why}"),
                 Outcome::Transmit(t) => {
+                    if tuned_at.is_none_or(|at| secs_since(at, clock()) >= retune_secs) {
+                        // The last tune is too old to trust, and any lockout since it
+                        // is due to end: tune again first. Doing it here rather than on
+                        // a timer puts the tuner's carrier where the frequency is in
+                        // use, just before a transmission that identifies the node.
+                        log::info!(
+                            "last tune over {} minutes ago: tuning before the reply",
+                            cfg.schedule.retune_minutes
+                        );
+                        if let Err(e) = station.start_window() {
+                            log::error!("tune before the reply failed: {e}");
+                        }
+                        tuned_at = Some(clock());
+                    }
                     log::info!("sending: {}", t.text());
+                    // Sets the radio up and checks it before keying.
+                    checked_at = clock();
                     match station.transmit(&t) {
                         // Only messages that actually went out are marked read.
                         Ok(()) if !t.read_ids.is_empty() => svc.mark_read(&t.read_ids),
@@ -652,6 +711,13 @@ mod tests {
         assert_eq!(over_end(&ev("TX MOM K SEE ")), None);
         assert_eq!(over_end(&ev("TX MOM K * ")), None);
         assert_eq!(over_end(&ev("")), None);
+    }
+
+    #[test]
+    fn a_clock_set_back_makes_checks_due() {
+        assert_eq!(secs_since(1000, 1600), 600);
+        assert_eq!(secs_since(1000, 1000), 0);
+        assert_eq!(secs_since(1000, 400), u64::MAX);
     }
 
     #[test]

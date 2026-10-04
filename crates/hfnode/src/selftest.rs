@@ -155,6 +155,9 @@ pub struct NodeSetup {
     /// Listening windows as (`every_minutes`, `window_minutes`), from the top of
     /// the hour at radio time zero; `None` listens all the time.
     pub schedule: Option<(u32, u32)>,
+    /// `schedule.check_minutes` and `schedule.retune_minutes`, in radio time.
+    pub check_minutes: u32,
+    pub retune_minutes: u32,
 }
 
 impl Default for NodeSetup {
@@ -166,6 +169,8 @@ impl Default for NodeSetup {
             weather_error: None,
             inbox: Vec::new(),
             schedule: None,
+            check_minutes: 10,
+            retune_minutes: 60,
         }
     }
 }
@@ -236,9 +241,22 @@ pub enum Step {
     WaitReceive,
     /// Listen until the node tunes at the top of its next window, and that is over.
     NextWindow,
+    /// Someone at the radio changes it.
+    Panel(Panel),
     /// A whole transaction on the next two unused lines, as the operating guide
     /// says to work one; see [`Exchange`].
     Exchange(Exchange),
+}
+
+/// A change made at the radio's front panel, behind the node's back.
+#[derive(Debug, Clone)]
+pub enum Panel {
+    /// Tune the dial to this frequency.
+    Dial(u64),
+    /// Select a mode and filter, as CI-V numbers them (p. 19-9).
+    Mode(u8, u8),
+    /// Switch split on, transmitting on this frequency, or off.
+    Split(Option<u64>),
 }
 
 /// A transaction the operator works on the next two unused lines (from line 42):
@@ -276,7 +294,8 @@ pub struct Expect {
     /// Weather requests, by grid square.
     pub weather: Vec<String>,
     pub last_seq: u64,
-    /// Tuner cycles: one per listening window, none after an inhibit.
+    /// Tuner cycles: one when the node starts listening (at start-up or a window),
+    /// one before each reply due a re-tune, none after an inhibit.
     pub tunes: u32,
     /// The node forced the radio to receive (stopped the keyer with `17 FF`) while
     /// it ran, as it must after any fault and never otherwise.
@@ -926,6 +945,15 @@ impl Air {
                 self.note("NODE  (tuning: the next window)");
                 self.wait_quiet()
             }
+            Step::Panel(p) => {
+                self.note(format!("RADIO front panel: {p:?}"));
+                match *p {
+                    Panel::Dial(hz) => self.radio.turn_dial(hz),
+                    Panel::Mode(mode, filter) => self.radio.select_mode(mode, filter),
+                    Panel::Split(tx_hz) => self.radio.set_split(tx_hz),
+                }
+                Ok(())
+            }
             Step::Exchange(x) => self.exchange(x),
         }
     }
@@ -1040,6 +1068,8 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         key_file = "{key}"
         [schedule]
         {schedule}
+        check_minutes = {check}
+        retune_minutes = {retune}
         [[contacts]]
         name = "MOM"
         address = "mom@example.com"
@@ -1062,11 +1092,13 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         chunk = s.node.chunk_chars,
         pause = ((2000.0 / scale) as u64).max(1),
         schedule = match s.node.schedule {
-            Some((every, window)) => {
-                format!("every_minutes = {every}\n        window_minutes = {window}")
-            }
+            Some((every, window)) => format!(
+                "always = false\n        every_minutes = {every}\n        window_minutes = {window}"
+            ),
             None => "always = true".into(),
         },
+        check = s.node.check_minutes,
+        retune = s.node.retune_minutes,
     ))?;
     cfg.validate()?;
     SeqStore::new(cfg.state_dir.join("last_seq")).save(START_SEQ)?;
@@ -2556,6 +2588,152 @@ pub fn scenarios() -> Vec<Scenario> {
             |r| r.faults.push(Fault::TuneNeverFinishes),
         );
         s.expect.forced_receive = true;
+        s
+    });
+
+    // Listening all the time, as the node does by default.
+    v.push({
+        let mut s = base(
+            "retune",
+            "listening all the time: the node answers on its start-up tune, then tunes again \
+             before a read-back once that tune is older than retune_minutes (10 here), and not \
+             before the SENT that follows it",
+        );
+        s.node.retune_minutes = 10;
+        let (rb42, sent43) = (rb_tx(42, "MOM", "HOME SUN"), de("SENT 43"));
+        let (rb44, sent45) = (rb_tx(44, "BOB", "CALL ME"), de("SENT 45"));
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+                read_back: rb42.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(sent43.clone()),
+            },
+            Step::Wait(600.0),
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX BOB CALL ME K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(sent45.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb42, &sent43, &rb44, &sent45]);
+        s.expect.sent = [sent("MOM", "HOME SUN"), sent("BOB", "CALL ME")].concat();
+        s.expect.last_seq = 45;
+        s.expect.tunes = 2;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-high-swr-retune",
+            "listening all the time, SWR 3.5 after the start-up tune locks the node out, also \
+             once the antenna recovers; when retune_minutes (10 here) have passed, the node \
+             tunes before its next read-back, clears the lockout and works",
+        );
+        s.node.retune_minutes = 10;
+        let open42 = format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K");
+        let rb44 = rb_tx(44, "MOM", "HOME SUN");
+        let done = de("SENT 45");
+        s.script = vec![
+            Step::SetSwr(3.5),
+            Step::Unanswered {
+                text: open42.clone(),
+                tries: 2,
+            },
+            Step::SetSwr(1.2),
+            Step::Unanswered {
+                text: open42,
+                tries: 1,
+            },
+            Step::Wait(600.0),
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM HOME SUN K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = vec![
+            Over::Cut(rb_tx(42, "MOM", "HOME SUN")),
+            Over::Full(rb44),
+            Over::Full(done),
+        ];
+        s.expect.sent = sent("MOM", "HOME SUN");
+        s.expect.last_seq = 45;
+        s.expect.tunes = 2;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "front-panel-split",
+            "someone at the radio switches split on after the start-up tune: the node checks \
+             before keying and keys nothing while it is on, then answers the same open once it \
+             is off",
+            "MOM",
+            "HOME SUN",
+        );
+        let Step::Open { text, .. } = s.script[0].clone() else {
+            unreachable!()
+        };
+        s.script.splice(
+            0..0,
+            [
+                Step::Panel(Panel::Split(Some(FREQUENCY_HZ + 10_000))),
+                Step::Unanswered { text, tries: 2 },
+                Step::Panel(Panel::Split(None)),
+            ],
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "front-panel-idle",
+            "someone at the radio tunes away and selects USB while the node is idle: within \
+             check_minutes (10) the node sets the radio up again, transmitting nothing",
+        );
+        s.script = vec![
+            Step::Panel(Panel::Dial(14_074_000)),
+            Step::Panel(Panel::Mode(0x01, 0x01)),
+            Step::Wait(660.0),
+        ];
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "other-stations",
+            "listening all the time through 16 minutes of band noise and other stations, some \
+             calling the node, sending AGN and NO, or an open with a wrong code: nothing is \
+             keyed or tuned; then an exchange works",
+            "MOM",
+            "HOME SUN",
+        );
+        let quiet = |text: &str| Step::Say {
+            text: text.into(),
+            expect: None,
+        };
+        s.script.splice(
+            0..0,
+            [
+                quiet("CQ CQ CQ DE K1ABC K1ABC K"),
+                Step::Wait(200.0),
+                quiet("K1ABC DE W1XYZ GM OM UR RST 599 599 NAME ED HW? K1ABC DE W1XYZ K"),
+                Step::Wait(200.0),
+                quiet(&format!("{NODE_CALL} DE K1ABC QSL? K")),
+                quiet("AGN K"),
+                quiet("NO K"),
+                Step::Wait(300.0),
+                quiet(&format!("{FIELD_CALL} 42 ABCDEFGH TX MOM HI K")),
+                Step::Wait(300.0),
+            ],
+        );
         s
     });
     v

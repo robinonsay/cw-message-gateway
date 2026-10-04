@@ -22,14 +22,19 @@
 //! - **SWR check.** SWR is sampled repeatedly during the first second or so of
 //!   each transmission, counting only samples taken with the Po meter showing
 //!   output, and the highest is used; above the limit the node stops and stays
-//!   silent until the next window. If the first piece is keyed without one such
+//!   silent until it next tunes. If the first piece is keyed without one such
 //!   sample, the node also stops and stays silent: the radio's own protection cuts
 //!   its output into a bad load, so missing output is itself a sign of one.
 //!   Each SWR sample also reads the transmit status: if the radio reads receive
 //!   while the Po meter shows output, its status cannot be trusted for the checks
 //!   above, and transmitting is inhibited as above.
-//! - **Reduced power**, set at start-up.
-//! - **Tuning** at start-up and at the top of each listening window.
+//! - **The radio set up again before every transmission**: the settings are sent
+//!   again, and split, ∂TX and the transmit frequency are checked, since the front
+//!   panel, another program or a power cycle may have changed them. The node also
+//!   does this every few minutes while it listens, without transmitting.
+//! - **Reduced power**, set at start-up and with the other settings.
+//! - **Tuning** at start-up, at the top of each listening window, and before a
+//!   reply once the last tune is older than `schedule.retune_minutes`.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
 
@@ -100,7 +105,8 @@ impl StationConfig {
 
 #[derive(Debug, PartialEq)]
 pub enum TxError {
-    /// SWR was too high earlier in this window; transmitting is suspended.
+    /// SWR was too high, or the tuner could not match, since the last tune;
+    /// transmitting is suspended until the next one.
     SwrLockout,
     /// SWR was too high just now; the transmission was cut off.
     HighSwr(f32),
@@ -112,6 +118,9 @@ pub enum TxError {
     /// The radio could not be confirmed back on receive; nothing more is sent until
     /// the node is restarted.
     Inhibited,
+    /// The radio could not be set up again before keying, or would not transmit on
+    /// the configured frequency (split or ∂TX on); nothing was keyed.
+    NotReady(String),
     Rig(String),
 }
 
@@ -127,6 +136,7 @@ impl std::fmt::Display for TxError {
                 "radio not confirmed on receive: transmit inhibited until the node is \
                  restarted with {INHIBIT_FILE} removed from the state directory"
             ),
+            Self::NotReady(e) => write!(f, "radio not ready to transmit: {e}"),
             Self::Rig(e) => write!(f, "radio error: {e}"),
         }
     }
@@ -378,10 +388,43 @@ impl<R: Rig + 'static> Station<R> {
         })
     }
 
-    /// Set the radio up again and run the internal tuner. Call at start-up and at
-    /// the top of each listening window; clears any SWR lockout from the last window,
-    /// and locks out transmitting for this one if the radio could not be set up or
-    /// the tuner could not match.
+    /// The radio is on receive, set up as configured, and would transmit on the
+    /// configured frequency. It should be on receive already; if it is not,
+    /// something else is keying it. Split and ∂TX are not set by the node, so they
+    /// are only checked.
+    fn prepare(&self) -> civ::Result<()> {
+        self.with_rig(|r| r.is_transmitting())
+            .and_then(|tx| match tx {
+                false => self.apply_settings(),
+                true => Err(RigError::Protocol(
+                    "on transmit without the node keying it".into(),
+                )),
+            })
+            .and_then(|()| self.check_transmit_frequency())
+    }
+
+    /// Set the radio up again and check it, as at a window start but without the
+    /// tune: while the node listens for hours, the front panel, another program or a
+    /// power cycle may change it, and leave the node deaf on another frequency or
+    /// mode. Transmits nothing. If it fails, receive is forced; transmitting is not
+    /// locked out, since every transmission sets the radio up and checks it again
+    /// first.
+    pub fn check(&self) -> civ::Result<()> {
+        if let Err(e) = self.prepare() {
+            self.health("check", "failed");
+            log::error!("could not set the radio up ({e}): checked again before transmitting");
+            self.force_rx()
+                .map_err(|e| RigError::Protocol(e.to_string()))?;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Set the radio up again and run the internal tuner. Call at start-up, at the
+    /// top of each listening window, and before a reply when the last tune is too
+    /// old to trust; clears any SWR lockout from before, and locks out transmitting
+    /// until the next call if the radio could not be set up or the tuner could not
+    /// match.
     pub fn start_window(&mut self) -> civ::Result<()> {
         if self.tx_inhibited() {
             // Tuning transmits.
@@ -390,19 +433,10 @@ impl<R: Rig + 'static> Station<R> {
         self.swr_lockout = false;
         self.swr_checked = false;
         // Set the radio up again: the front panel, another program or a power cycle
-        // may have changed it since the last window, and the tune transmits. It
-        // should be on receive already; if it is not, something else is keying it.
-        // Split and ∂TX are not set by the node, so they are only checked.
-        let ready = self
-            .with_rig(|r| r.is_transmitting())
-            .and_then(|tx| match tx {
-                false => self.apply_settings(),
-                true => Err(RigError::Protocol("on transmit at window start".into())),
-            })
-            .and_then(|()| self.check_transmit_frequency());
-        if let Err(e) = ready {
+        // may have changed it since the last window, and the tune transmits.
+        if let Err(e) = self.prepare() {
             self.swr_lockout = true;
-            log::error!("could not set the radio up ({e}): silent until next window");
+            log::error!("could not set the radio up ({e}): silent until the next tune");
             self.force_rx()
                 .map_err(|e| RigError::Protocol(e.to_string()))?;
             return Err(e);
@@ -419,7 +453,7 @@ impl<R: Rig + 'static> Station<R> {
             // The tuner bypassed itself: the antenna is beyond its 3:1 range.
             self.health("tune", "no-match");
             self.swr_lockout = true;
-            log::error!("tuner could not match the antenna: silent until next window");
+            log::error!("tuner could not match the antenna: silent until the next tune");
             return Err(RigError::Protocol("tuner could not match the load".into()));
         }
         self.health("tune", &format!("{}ms", t0.elapsed().as_millis()));
@@ -482,6 +516,13 @@ impl<R: Rig + 'static> Station<R> {
 
     fn transmit_inner(&mut self, tx: &Transmission) -> Result<(), TxError> {
         self.watchdog_fired.store(false, Ordering::SeqCst);
+        // Set the radio up again and check it before keying anything: the front
+        // panel, another program or a power cycle may have changed it since the
+        // window started, which for a node listening all the time can be hours ago.
+        self.wait_for_receive(Instant::now() + Duration::from_secs(2))?;
+        self.apply_settings()
+            .and_then(|()| self.check_transmit_frequency())
+            .map_err(|e| TxError::NotReady(e.to_string()))?;
         for (si, segment) in tx.segments.iter().enumerate() {
             if si > 0 {
                 thread::sleep(self.cfg.segment_pause);
@@ -558,7 +599,7 @@ impl<R: Rig + 'static> Station<R> {
                     self.health("swr", &format!("{swr:.2}"));
                     self.swr_lockout = true;
                     log::error!(
-                        "SWR {swr:.2} above {:.1}: silent until next window",
+                        "SWR {swr:.2} above {:.1}: silent until the next tune",
                         self.cfg.swr_limit
                     );
                     return Err(TxError::HighSwr(swr));
@@ -575,7 +616,7 @@ impl<R: Rig + 'static> Station<R> {
             None => {
                 self.health("swr", "no-output");
                 self.swr_lockout = true;
-                log::error!("no output on the Po meter while keying: silent until next window");
+                log::error!("no output on the Po meter while keying: silent until the next tune");
                 Err(TxError::NoOutput)
             }
         }
@@ -883,6 +924,95 @@ mod tests {
         st.rig().lock().unwrap().split_tx_hz = None;
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
+    fn each_transmission_sets_the_radio_up_again() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        // Someone at the front panel after the window started.
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.frequency_hz = 14_074_000;
+            r.power_watts = 100;
+            r.cw_mode = false;
+        }
+        st.transmit(&tx(&["TEST"])).unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!(
+            (r.frequency_hz, r.power_watts, r.cw_mode),
+            (7_030_000, 40, true)
+        );
+        assert_eq!(r.tunes, 1, "no tune for a transmission");
+    }
+
+    #[test]
+    fn nothing_is_keyed_while_split_is_on() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        // Someone at the radio switches split on after the window started.
+        st.rig().lock().unwrap().split_tx_hz = Some(7_040_000);
+        assert!(matches!(
+            st.transmit(&tx(&["TEST"])),
+            Err(TxError::NotReady(_))
+        ));
+        assert!(st.rig().lock().unwrap().sent.is_empty(), "nothing keyed");
+        assert!(!st.tx_inhibited());
+        // Not locked out: once split is off again the next transmission goes.
+        st.rig().lock().unwrap().split_tx_hz = None;
+        st.transmit(&tx(&["TEST"])).unwrap();
+        assert_eq!(st.rig().lock().unwrap().sent, ["TEST"]);
+    }
+
+    #[test]
+    fn a_check_sets_the_radio_up_again_without_transmitting() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.frequency_hz = 14_074_000;
+            r.power_watts = 100;
+            r.cw_mode = false;
+        }
+        st.check().unwrap();
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            assert_eq!(
+                (r.frequency_hz, r.power_watts, r.cw_mode),
+                (7_030_000, 40, true)
+            );
+            assert_eq!((r.tunes, r.sent.len()), (1, 0));
+            assert!(!r.is_transmitting().unwrap());
+        }
+        // A check that finds split on fails, and keeps nothing from transmitting
+        // later: the transmission checks for itself.
+        st.rig().lock().unwrap().split_tx_hz = Some(7_040_000);
+        assert!(st.check().is_err());
+        st.rig().lock().unwrap().split_tx_hz = None;
+        st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
+    fn a_check_on_a_radio_switched_off_inhibits_transmitting() {
+        let rig = Switchable {
+            on: true,
+            rig: fast_rig(),
+        };
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        st.rig().lock().unwrap().on = false;
+        assert!(st.check().is_err());
+        assert!(st.tx_inhibited(), "as at a window start");
+        st.rig().lock().unwrap().on = true;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
     }
 
     #[test]

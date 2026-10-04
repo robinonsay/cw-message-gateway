@@ -62,13 +62,20 @@ These hold whatever the stage or config, and are covered by unit tests:
   refuses to send `1C 00 01` (force transmit), refuses frequencies outside the
   radio's 30 kHz-74.8 MHz, and treats any reply that is not exactly the documented
   shape as an error, never as a guess.
-- **Every listening window starts from a known state.** Before its tune the node
-  checks the radio reads receive, sends the settings again (someone may have used
-  the front panel since), and checks that split and ∂TX are still off and `1C 03`
-  reads the configured frequency. If any of that fails it forces receive and stays
-  silent until the next window.
+- **Every tune and every transmission starts from a known state.** Before each
+  tune, and again before each transmission, the node checks the radio reads
+  receive, sends the settings again (someone may have used the front panel since),
+  and checks that split and ∂TX are still off and `1C 03` reads the configured
+  frequency. If any of that fails before a tune it forces receive and stays silent
+  until the next tune; before a transmission it forces receive and keys nothing,
+  and the next transmission checks again. While it listens and hears nothing it
+  does the same every `schedule.check_minutes` (10), without transmitting.
+- **When it tunes.** At start-up, at the top of each listening window if it uses
+  them, and just before a reply once the last tune is older than
+  `schedule.retune_minutes` (60). Listening all the time (the default), an idle
+  node transmits nothing at all.
 - **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
-  5917); the node then stays silent for that listening window. Any tuner error
+  5917); the node then stays silent until its next tune. Any tuner error
   forces receive. SWR is measured at the start of every transmission. Every SWR
   sample also reads `1C 00`: output on the Po meter while the radio reads receive
   means none of the node's receive confirmations can be trusted.
@@ -88,8 +95,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 - The radio is transmitting (TX indicator lit, power output on the meter) when
   nothing should be keying it, or keeps transmitting after an `hfnode` command has
   exited.
-- A command listed as not transmitting (`check`, `status`, `rx`, `setup`, `listen`,
-  `run` outside a window) makes the radio transmit.
+- A command listed as not transmitting (`check`, `status`, `rx`, `setup`, `listen`)
+  makes the radio transmit, or `run` transmits anything but its tune (at start-up,
+  at a window start, or just before a reply) and its replies.
 - `radio check`, or the preflight in front of any command, prints a FAIL you did not
   expect, or a value that differs from the radio's own screen.
 - SWR on the radio's own meter is above 2:1, or the SWR the node logs differs from
@@ -219,7 +227,10 @@ lost read-backs, replayed and wrong codes, garbled callsigns, noise bursts after
 key, the radio's sidetone in the receive audio, USB echo off, CI-V Transceive frames
 from someone at the radio, a load the tuner matches and one beyond its range (the
 window stays silent), listening windows (a high-SWR lockout cleared by the next
-window's tune), and radio faults: SWR rising after the tune, power fold-back, stuck
+window's tune), listening all the time (a re-tune before a reply once the last tune
+is old, a high-SWR lockout cleared by it, split switched on at the radio, the dial
+and mode changed while the node is idle, band noise and other stations calling),
+and radio faults: SWR rising after the tune, power fold-back, stuck
 transmit or key (also after the last over), a transmitter that will not unkey, one
 that only the watchdog gets off transmit, refused status commands, NG and lost or
 late CI-V replies, a readout the radio refuses (left unread), and a tuner that never
@@ -729,7 +740,8 @@ A complete transaction with no signal on the air: the field rig transmits into i
 own dummy load a few metres from the node, at its lowest power, so the node hears it
 by leakage. Use the bench key and state.
 
-In `~/bench.toml` set `schedule.always = true`, configure one `[[contacts]]` entry
+In `~/bench.toml` leave `schedule.always = true` (the default) and set
+`schedule.check_minutes = 1` for this step, configure one `[[contacts]]` entry
 with your own email address, and the `[email]` settings. Print a few codes:
 
 ```sh
@@ -751,6 +763,14 @@ the exact formats in [operating.md](operating.md).
 **Pass:** the node logs `heard: ...`, keys the read-back into the dummy load (start-up
 tune and SWR logged), keys `SENT n` after the commit, and the email arrives.
 `<state_dir>/last_seq` holds the commit's sequence number.
+
+Then, with the node still running and idle, check the idle radio check without
+transmitting: at the radio turn the dial off the node's frequency and select USB.
+**Pass:** within about a minute (`check_minutes = 1`) the display is back on the
+node's frequency in CW, and nothing transmitted. Then switch SPLIT on and send an
+open: **Pass:** nothing is keyed and the node logs `radio not ready to transmit`.
+Switch SPLIT off, repeat the same open, and expect the read-back. Set
+`check_minutes` back to 10 afterwards.
 
 ## Step 12: on the air, low power, with a second station
 
@@ -787,8 +807,8 @@ Keep `power_watts` low for the first session. Run the node in the foreground the
 first time (`sudo systemctl stop hfnode` if it is running), or start the service and
 watch `journalctl -u hfnode -f`.
 
-The second station plays the field operator, inside a listening window, using
-[operating.md](operating.md). Work through:
+The second station plays the field operator, using [operating.md](operating.md).
+Work through:
 
 1. `TX` to a contact you control. Expect the read-back, then `SENT n` after `OK`,
    and the email or text to arrive.
@@ -808,6 +828,10 @@ The second station plays the field operator, inside a listening window, using
 7. Send a code from the wrong line: expect silence.
 8. Optional: reply with a word the filter should remove, and check that `RX` shows
    `REDACTED` in its place.
+9. Leave the node idle for longer than `schedule.retune_minutes` (set it to 10 for
+   this session), then open a transaction: expect a few seconds of tuner carrier
+   just before the read-back, a new `tune` line in `health.csv`, and no tune before
+   the `SENT` that follows.
 
 **Look for:** in the log, `heard:`, `opened transaction`, `committed transaction`,
 `sending:`, and `no reply:` with a reason for each silent case. In `state_dir`:
