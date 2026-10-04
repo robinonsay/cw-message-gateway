@@ -11,3 +11,4 @@ pub mod places;
 pub mod selftest;
 pub mod session;
 pub mod station;
+pub mod storm;

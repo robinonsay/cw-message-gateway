@@ -439,3 +439,23 @@ fn the_duty_cycle_paces_a_long_transmission_on_receive() {
         );
     }
 }
+
+#[test]
+fn a_storm_hold_keeps_a_handheld_off_the_air() {
+    let (h, ptt, out) = rig();
+    let mut st = Station::new(Scaled(h), station_cfg(), None);
+    let hold = crate::storm::StormHold::new(Duration::from_secs(60));
+    st.set_storm_hold(hold.clone());
+    st.configure().unwrap();
+    hold.set(Some("thunder forecast".into()));
+    assert_eq!(
+        st.transmit(&tx(&["TEST"])),
+        Err(TxError::Storm("thunder forecast".into()))
+    );
+    assert!(out.played().is_empty());
+    assert!(ptt.events().iter().all(|e| !e.1), "never keyed");
+    hold.set(None);
+    st.transmit(&tx(&["TEST"])).unwrap();
+    assert_eq!(out.played().len(), 1);
+    assert!(!ptt.keyed());
+}
