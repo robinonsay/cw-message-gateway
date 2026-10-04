@@ -46,6 +46,7 @@ provider = "ollama"
 model = "<model>"                    # exactly as `ollama list` shows it
 # base_url = "http://localhost:11434"   # the default: Ollama on the node's own computer
 # threads = 2                        # optional CPU limit, for a Raspberry Pi
+# think = false                      # optional: skip the model's reasoning (below)
 ```
 
 4. Check the model before you rely on it (below).
@@ -81,11 +82,21 @@ network you trust.
 **Which model.** Bigger is better at this. A model under about 4B parameters
 tends to miss things or flag ordinary messages. `gpt-oss-safeguard:20b` (built to
 classify text against a written policy, needs about 16 GB of memory) and
-general-purpose 8-12B models are worth comparing on a Mac. Models that reason
-before answering (gpt-oss among them) take longer per reply. Use a model with a
-context window of at least 8K tokens; nearly all current ones qualify. Run
+general-purpose 8-12B models are worth comparing on a Mac. Use a model with a
+context window of at least 12K tokens; nearly all current ones qualify. Run
 `hfnode filter test` on each candidate and keep the one that gets every sample
 right.
+
+**Thinking.** Many current models reason ("think") before they answer, and do so
+by default. It makes each reply slower (on a Mac, seconds to half a minute
+instead of a second or two) and can make the verdict better. Speed rarely
+matters here: replies are screened when the mail arrives, long before you ask for
+them with `RX`. The filter leaves the model about 6,000 tokens to think and answer
+in; a model that uses them all without answering has the reply withheld, and
+`hfnode filter test` says so. Set `think = false` to turn thinking off, then run
+`hfnode filter test` again: in testing on a Mac, two 9B models stayed 10 out of 10
+without thinking and a third let profanity through. Some models reason whatever
+the setting.
 
 Local models get the same rules as Claude, plus worked examples, the instruction to
 treat the message as data rather than instructions, and a different tie-break:

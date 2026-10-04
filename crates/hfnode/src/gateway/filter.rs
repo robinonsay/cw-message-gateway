@@ -258,7 +258,16 @@ impl Screener {
     pub fn describe(&self) -> String {
         match self {
             Self::Claude(f) => format!("Claude model {} at {}", f.model, f.base),
-            Self::Ollama(f) => format!("Ollama model {} at {}", f.model, f.base),
+            Self::Ollama(f) => format!(
+                "Ollama model {} at {}{}",
+                f.model,
+                f.base,
+                match f.think {
+                    Some(true) => ", thinking on",
+                    Some(false) => ", thinking off",
+                    None => "",
+                }
+            ),
         }
     }
 }
@@ -326,10 +335,11 @@ impl ClaudeFilter {
 }
 
 /// Context window asked of Ollama, in tokens.
-const NUM_CTX: usize = 8192;
-/// Cap on the answer, reasoning included, so a model that rambles stops; a cut-off
-/// answer is withheld.
-const NUM_PREDICT: usize = 2048;
+const NUM_CTX: usize = 12288;
+/// Cap on what the model writes, so one that rambles stops; a cut-off answer is
+/// withheld. Models that reason before answering ("thinking") spend this on the
+/// reasoning too, so it leaves them plenty: a verdict alone is under 100 tokens.
+const NUM_PREDICT: usize = 6144;
 /// Room for the chat template's own tokens.
 const TEMPLATE_ROOM: usize = 512;
 /// Message room a local model's prompt must leave, whatever `extra_policy` adds: a
@@ -354,6 +364,7 @@ pub struct OllamaFilter {
     agent: ureq::Agent,
     model: String,
     threads: Option<u32>,
+    think: Option<bool>,
     extra_policy: String,
     base: String,
 }
@@ -367,6 +378,7 @@ impl OllamaFilter {
             agent: agent(cfg),
             model: model.to_string(),
             threads: cfg.threads,
+            think: cfg.think,
             extra_policy: cfg.extra_policy.clone(),
             base: cfg.base_url(),
         })
@@ -382,7 +394,7 @@ impl OllamaFilter {
         if let Some(t) = self.threads {
             options["num_thread"] = json!(t);
         }
-        json!({
+        let mut request = json!({
             "model": self.model,
             "stream": false,
             "format": verdict_schema(),
@@ -396,7 +408,12 @@ impl OllamaFilter {
                 {"role": "system", "content": system_prompt(&self.extra_policy, true)},
                 {"role": "user", "content": user_prompt(from, text)}
             ]
-        })
+        });
+        // Unset, the model decides: those that can reason first do.
+        if let Some(t) = self.think {
+            request["think"] = json!(t);
+        }
+        request
     }
 
     /// Screen one message; see [`Screener::screen`].
@@ -434,6 +451,19 @@ pub fn parse_ollama(v: &Value) -> Result<Verdict> {
     let Some(content) = v["message"]["content"].as_str() else {
         bail!("Ollama response has no message");
     };
+    if v["done_reason"] == "length" {
+        return Ok(withhold(format!(
+            "answer cut off at {NUM_PREDICT} tokens{}",
+            if v["message"]["thinking"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty())
+            {
+                ", most of them spent thinking (see filter.think)"
+            } else {
+                ""
+            }
+        )));
+    }
     if v["done"] != true || v["done_reason"].as_str().is_some_and(|r| r != "stop") {
         return Ok(withhold(format!(
             "answer incomplete ({})",
@@ -674,11 +704,24 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<message>\nSEE YOU SUN\n</message>"));
-        // Without a thread limit, Ollama decides.
+        // Without a thread limit or a thinking setting, Ollama and the model decide.
         let r = OllamaFilter::new(&ollama_cfg("http://x"))
             .unwrap()
             .request("MOM", "X");
         assert!(r["options"].get("num_thread").is_none());
+        assert!(r.get("think").is_none());
+        for think in [false, true] {
+            let cfg = config::Filter {
+                think: Some(think),
+                ..ollama_cfg("http://x")
+            };
+            let f = Screener::new(&cfg).unwrap();
+            let Screener::Ollama(o) = &f else { panic!() };
+            assert_eq!(o.request("MOM", "X")["think"], think);
+            assert!(f
+                .describe()
+                .contains(if think { "thinking on" } else { "thinking off" }));
+        }
     }
 
     #[test]
@@ -737,6 +780,14 @@ mod tests {
         let mut cut = ollama_answer(r#"{"action":"keep","spans":[],"reason":"x"}"#);
         cut["done_reason"] = json!("length");
         assert_eq!(parse_ollama(&cut).unwrap().action, Action::Drop);
+        assert!(!parse_ollama(&cut).unwrap().reason.contains("thinking"));
+        // A model that thought until it ran out of room says so.
+        let mut thought = ollama_answer("");
+        thought["done_reason"] = json!("length");
+        thought["message"]["thinking"] = json!("Let me consider each word...");
+        let v = parse_ollama(&thought).unwrap();
+        assert_eq!(v.action, Action::Drop);
+        assert!(v.reason.contains("filter.think"), "{}", v.reason);
         let mut unfinished = ollama_answer(r#"{"action":"keep","spans":[],"reason":"x"}"#);
         unfinished["done"] = json!(false);
         assert_eq!(parse_ollama(&unfinished).unwrap().action, Action::Drop);

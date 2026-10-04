@@ -223,6 +223,11 @@ pub struct Filter {
     /// Raspberry Pi, leave cores free for the CW decoder.
     #[serde(default)]
     pub threads: Option<u32>,
+    /// Ollama only: whether a model that can reason before answering does so.
+    /// Unset, the model decides (those that can, do). `false` is much faster, but
+    /// some models then judge worse: check with `hfnode filter test`.
+    #[serde(default)]
+    pub think: Option<bool>,
     /// How long one screening may take. A message is held and tried again after a
     /// timeout, and withheld after the third. Defaults to 120 s for Claude and 600 s
     /// for Ollama, which may first have to load the model.
@@ -250,6 +255,7 @@ impl Default for Filter {
             model: None,
             base_url: None,
             threads: None,
+            think: None,
             timeout_secs: None,
             extra_policy: String::new(),
         }
@@ -316,6 +322,9 @@ impl Filter {
             if !(1..=256).contains(&t) {
                 bail!("filter.threads must be 1-256");
             }
+        }
+        if self.think.is_some() && self.provider != Provider::Ollama {
+            bail!("filter.think only applies with provider = \"ollama\"");
         }
         if self.timeout_secs.is_some_and(|t| !(1..=3600).contains(&t)) {
             bail!("filter.timeout_secs must be 1-3600");
@@ -764,6 +773,11 @@ mod tests {
         .filter;
         assert_eq!(f.base_url(), "http://mac.local:11434");
         assert_eq!((f.threads, f.timeout_secs()), (Some(2), 900));
+        assert_eq!(f.think, None);
+        let f = parse("[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nthink = false\n")
+            .unwrap()
+            .filter;
+        assert_eq!(f.think, Some(false));
         for bad in [
             "[filter]\nprovider = \"ollama\"\n",
             "[filter]\nprovider = \"ollama\"\nmodel = \" \"\n",
@@ -772,6 +786,7 @@ mod tests {
             "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nbase_url = \"http://\"\n",
             "[filter]\nprovider = \"ollama\"\nmodel = \"m\"\nthreads = 0\n",
             "[filter]\nthreads = 2\n",
+            "[filter]\nthink = false\n",
             "[filter]\ntimeout_secs = 0\n",
             "[filter]\nmodel = \"\"\n",
             "[filter]\nmodel = \" claude-opus-5-5\"\n",
