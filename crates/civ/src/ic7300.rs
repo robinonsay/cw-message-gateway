@@ -47,7 +47,7 @@ use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 /// CI-V addresses the radio can be set to: "CI-V Address (Default: 94h) ... Range:
-/// 02h ~ 94h ~ DFh" (p. 12-10; manual text line 6823).
+/// 02h ~ 94h ~ DFh" (p. 12-10; manual text line 6825).
 pub const ADDRESS_RANGE: RangeInclusive<u8> = 0x02..=0xDF;
 
 /// The IC-7300's default CI-V address, which is also what it answers to `19 00`
@@ -56,11 +56,11 @@ pub const ADDRESS_RANGE: RangeInclusive<u8> = 0x02..=0xDF;
 pub const IC7300_ID: u8 = 0x94;
 
 /// "CI-V USB Baud Rate ... Options: 4800, 9600, 19200, 38400, 57600, 115200 (bps),
-/// or Auto" (p. 12-11; manual text line 6869).
+/// or Auto" (p. 12-11; manual text lines 6869-6872).
 pub const USB_BAUD_RATES: [u32; 6] = [4800, 9600, 19_200, 38_400, 57_600, 115_200];
 
 /// Frequencies the driver will set: the receiver's coverage, "0.030000~74.800000"
-/// MHz (p. 16-2; manual text line 8013). The 5-byte frequency data could not carry
+/// MHz (p. 16-2; manual text line 8014). The 5-byte frequency data could not carry
 /// 100 MHz or more anyway ("100 MHz digit: 0 (Fixed)", p. 19-9).
 pub const FREQUENCY_RANGE_HZ: RangeInclusive<u64> = 30_000..=74_800_000;
 
