@@ -12,18 +12,22 @@
 //! sounding. It reacts like a real operator: it waits for the frequency to be quiet,
 //! keys, waits for the node's over, checks a read-back and repeats a transmission
 //! that got no answer. Every scenario ends with the audio source closing, which
-//! makes `node::run` return, and an overall time limit.
+//! makes `node::run` return, and an overall time limit. While the mock radio is on
+//! transmit the node hears nothing of the operator, as a real receiver would.
 //!
 //! **Time scale.** Everything runs `scale` times faster than real time so a
 //! scenario takes a second or two: the mock radio keys at the scaled speed, the
 //! audio is paced to it, and the station's timing constants are divided by it
 //! ([`TimeScaled`] divides the driver's dot length, the only timing the station
-//! reads from the radio). The CI-V reply timeout, the watchdog tick and the forced
-//! receive retry pause stay in real time, so faults on them take longer in radio
-//! time than they would on the air. The audio is also held back while the node has
-//! not taken what was sent (it is decoding, transmitting or waiting on the radio),
-//! so a slow machine slows the operator down instead of failing scenarios; lower
-//! the scale on a slow machine (`--scale`, or `HFNODE_E2E_SCALE` for the tests).
+//! reads from the radio), and so are the session's pending-commit timeout and `AGN`
+//! window; the listening schedule follows a clock that runs in radio time. The CI-V
+//! reply timeout, the watchdog tick and the forced receive retry pause stay in real
+//! time, so faults on them take longer in radio time than they would on the air: at
+//! `--scale 1` everything runs at its real speed. The audio is also held back while
+//! the node has not taken what was sent (it is decoding, transmitting or waiting on
+//! the radio), so a slow machine slows the operator down instead of failing
+//! scenarios; lower the scale on a slow machine (`--scale`, or `HFNODE_E2E_SCALE`
+//! for the tests).
 //!
 //! Codes come from [`TEST_KEY`], a fixed key for tests only.
 
@@ -36,9 +40,10 @@ use crate::station::{Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
 use civ::ic7300::Ic7300;
-use civ::mock::{Fault, Foldback, MockConfig, MockPort, MockRadio, ReplyFault, Report};
+use civ::mock::{Fault, Foldback, MockConfig, MockPort, MockRadio, ReplyFault, Report, Settings};
 use civ::Rig;
 use cw::{Keyer, Noise};
+use protocol::{parse, Vocabulary};
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -56,6 +61,11 @@ pub const FIELD_CALL: &str = "W5XXX";
 pub const START_SEQ: u64 = 41;
 /// Default time scale.
 pub const DEFAULT_SCALE: f32 = 100.0;
+/// Highest time scale. The driver's 500 ms CI-V reply timeout and its read-until-
+/// quiet afterwards stay in real time; much above this they last longer in radio
+/// time than the session's (time-scaled) 10-minute pending window, and a scenario
+/// with a lost or late reply could no longer finish its transaction.
+pub const MAX_SCALE: f32 = 200.0;
 
 const SAMPLE_RATE: u32 = 8000;
 const PITCH_HZ: f32 = 600.0;
@@ -83,6 +93,24 @@ const BUDGET: Duration = Duration::from_secs(1800);
 /// Peak amplitude of the operator's signal and of the radio's sidetone.
 const AMPLITUDE: f32 = 0.5;
 const SIDETONE: f32 = 0.3;
+/// Unix time at radio time zero, for the listening schedule: the top of a UTC hour,
+/// so a scenario starts at the beginning of a window.
+const CLOCK_START: u64 = 1_699_999_200;
+/// The node's frequency in every scenario.
+const FREQUENCY_HZ: u64 = 7_030_000;
+/// How often someone at the radio nudges the dial, in blocks, with
+/// [`RadioSetup::dial_nudges`].
+const NUDGE_BLOCKS: u64 = 10;
+/// The station's stuck margin ([`StationConfig::from_config`]), copied so that the
+/// safety check does not move with it: a radio left on transmit after its last
+/// element is forced back to receive within the break-in delay plus this.
+const STUCK_MARGIN: Duration = Duration::from_secs(3);
+/// The station's semi break-in delay in dots, copied likewise.
+const BREAK_IN_DOTS: f32 = 10.0;
+/// Seconds of radio time [`Step::WaitReceive`] waits at most, and real time: the
+/// watchdog's tick and forced receive pauses run in real time.
+const RECEIVE_WAIT: f32 = 300.0;
+const RECEIVE_WAIT_REAL: Duration = Duration::from_secs(5);
 
 /// The field operator's sending.
 #[derive(Debug, Clone)]
@@ -121,6 +149,9 @@ pub struct NodeSetup {
     pub fail_weather: bool,
     /// Inbound messages ready to read, as (contact, text).
     pub inbox: Vec<(String, String)>,
+    /// Listening windows as (`every_minutes`, `window_minutes`), from the top of
+    /// the hour at radio time zero; `None` listens all the time.
+    pub schedule: Option<(u32, u32)>,
 }
 
 impl Default for NodeSetup {
@@ -131,6 +162,7 @@ impl Default for NodeSetup {
             fail_send: false,
             fail_weather: false,
             inbox: Vec::new(),
+            schedule: None,
         }
     }
 }
@@ -144,6 +176,9 @@ pub struct RadioSetup {
     pub faults: Vec<Fault>,
     /// Mix the radio's own keying into the receive audio, as sidetone.
     pub sidetone: bool,
+    /// Someone at the radio keeps nudging the dial 10 Hz up and back, so that CI-V
+    /// Transceive frames arrive unasked all through the scenario.
+    pub dial_nudges: bool,
 }
 
 impl Default for RadioSetup {
@@ -154,12 +189,14 @@ impl Default for RadioSetup {
             foldback: None,
             faults: Vec::new(),
             sidetone: false,
+            dial_nudges: false,
         }
     }
 }
 
-/// One thing the operator does. In texts, `{n}` is the code for line `n`, and a
-/// trailing ` ~` keys a noise burst (a lone dit) 1.5 s after the over.
+/// One thing the operator does. In texts, `{n}` is the code for line `n` (`{ng}` in
+/// the two printed groups of four), and a trailing ` ~` keys a noise burst (a lone
+/// dit) 1.5 s after the over.
 #[derive(Debug, Clone)]
 pub enum Step {
     /// Key an open and wait for the read-back, repeating the open (exactly, as the
@@ -190,6 +227,12 @@ pub enum Step {
     ClearStuck,
     /// Seconds of listening.
     Wait(f32),
+    /// Listen until the radio is back on receive, for at most [`RECEIVE_WAIT`] s of
+    /// radio time or [`RECEIVE_WAIT_REAL`] of real time, whichever is longer.
+    /// For timing the script only: an operator cannot hear a carrier-less transmit.
+    WaitReceive,
+    /// Listen until the node tunes at the top of its next window, and that is over.
+    NextWindow,
 }
 
 /// One of the node's overs, as the radio keyed it.
@@ -210,8 +253,11 @@ pub struct Expect {
     /// Weather requests, by grid.
     pub weather: Vec<Option<String>>,
     pub last_seq: u64,
-    /// Transmitting stopped for the rest of the window at the first over cut short.
-    pub lockout: bool,
+    /// Tuner cycles: one per listening window, none after an inhibit.
+    pub tunes: u32,
+    /// The node forced the radio to receive (stopped the keyer with `17 FF`) while
+    /// it ran, as it must after any fault and never otherwise.
+    pub forced_receive: bool,
     /// The node inhibited transmitting until restart.
     pub inhibited: bool,
 }
@@ -457,7 +503,17 @@ pub fn with_codes(text: &str, book: &CodeBook) -> String {
     while let Some(i) = rest.find('{') {
         let Some(j) = rest[i..].find('}') else { break };
         out.push_str(&rest[..i]);
-        match rest[i + 1..i + j].parse::<u64>() {
+        let inner = &rest[i + 1..i + j];
+        let (num, grouped) = match inner.strip_suffix('g') {
+            Some(n) => (n, true),
+            None => (inner, false),
+        };
+        match num.parse::<u64>() {
+            Ok(n) if grouped => {
+                let code = book.code(n);
+                let (a, b) = code.split_at(code.len() / 2);
+                out.push_str(&format!("{a} {b}"));
+            }
             Ok(n) => out.push_str(&book.code(n)),
             Err(_) => out.push_str(&rest[i..=i + j]),
         }
@@ -465,6 +521,11 @@ pub fn with_codes(text: &str, book: &CodeBook) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The sample of an `n`-sample block starting at radio time `from` that falls at `t`.
+fn at(from: Duration, t: Duration, n: usize) -> usize {
+    ((t - from).as_secs_f32() / BLOCK_SECS * n as f32) as usize
 }
 
 /// What the operator made of the node's next over.
@@ -484,6 +545,8 @@ struct Air {
     fist: Fist,
     sigma: f32,
     sidetone: bool,
+    /// The frequency to nudge the dial around, with [`RadioSetup::dial_nudges`].
+    nudge_hz: Option<u64>,
     block_real: Duration,
     next_due: Instant,
     deadline: Instant,
@@ -538,6 +601,13 @@ impl Air {
         }
         self.next_due = self.next_due.max(Instant::now()) + self.block_real;
 
+        if let Some(hz) = self
+            .nudge_hz
+            .filter(|_| self.blocks.is_multiple_of(NUDGE_BLOCKS))
+        {
+            self.radio.turn_dial(hz + 10);
+            self.radio.turn_dial(hz);
+        }
         let mut samples: Vec<f32> = (0..BLOCK)
             .map(|_| self.keying.pop_front().unwrap_or(0.0))
             .collect();
@@ -549,8 +619,15 @@ impl Air {
             };
             Noise::new(seed).add(&mut samples, self.sigma);
         }
+        let to = self.radio.now();
+        let from = to.saturating_sub(Duration::from_secs_f32(BLOCK_SECS));
+        // On transmit the radio receives nothing: the operator's signal is lost.
+        for (a, b) in self.radio.transmit_between(from, to) {
+            let n = samples.len();
+            samples[at(from, a, n).min(n)..at(from, b, n).min(n)].fill(0.0);
+        }
         if self.sidetone {
-            self.add_sidetone(&mut samples);
+            self.add_sidetone(&mut samples, from, to);
         }
         if self.in_tx {
             self.tx_block += 1;
@@ -564,21 +641,17 @@ impl Air {
         Ok(())
     }
 
-    /// Mix in the radio's keying over the last block's worth of radio time.
-    fn add_sidetone(&self, samples: &mut [f32]) {
-        let span = Duration::from_secs_f32(BLOCK_SECS);
-        let to = self.radio.now();
-        let from = to.saturating_sub(span);
+    /// Mix in the radio's keying over `from..to`, the block's radio time.
+    fn add_sidetone(&self, samples: &mut [f32], from: Duration, to: Duration) {
         let n = samples.len();
-        let at = |t: Duration| ((t - from).as_secs_f32() / BLOCK_SECS * n as f32) as usize;
         let w = 2.0 * std::f32::consts::PI * PITCH_HZ / SAMPLE_RATE as f32;
         for (a, b) in self.radio.key_down_between(from, to) {
             let start = from.as_secs_f32() * SAMPLE_RATE as f32;
             for (i, s) in samples
                 .iter_mut()
                 .enumerate()
-                .take(at(b).min(n))
-                .skip(at(a))
+                .take(at(from, b, n).min(n))
+                .skip(at(from, a, n))
             {
                 *s += SIDETONE * (w * (start + i as f32)).sin();
             }
@@ -763,6 +836,25 @@ impl Air {
                 Ok(())
             }
             Step::Wait(s) => self.idle(*s),
+            Step::WaitReceive => {
+                let (until, t0) = (self.secs() + RECEIVE_WAIT, Instant::now());
+                while self.radio.transmitting() {
+                    if self.secs() > until && t0.elapsed() > RECEIVE_WAIT_REAL {
+                        return Err(format!("radio still on transmit after {RECEIVE_WAIT} s"));
+                    }
+                    self.tick()?;
+                }
+                self.note("RADIO back on receive");
+                Ok(())
+            }
+            Step::NextWindow => {
+                let tunes = self.radio.tunes();
+                while self.radio.tunes() == tunes {
+                    self.tick()?;
+                }
+                self.note("NODE  (tuning: the next window)");
+                self.wait_quiet()
+            }
         }
     }
 
@@ -803,7 +895,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [station]
         node_call = "{NODE_CALL}"
         field_calls = ["{FIELD_CALL}"]
-        frequency_hz = 7030000
+        frequency_hz = {FREQUENCY_HZ}
         serial_port = "mock"
         power_watts = 40
         key_speed_wpm = {wpm}
@@ -815,7 +907,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [auth]
         key_file = "{key}"
         [schedule]
-        always = true
+        {schedule}
         [[contacts]]
         name = "MOM"
         address = "mom@example.com"
@@ -828,6 +920,12 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         wpm = s.node.key_wpm,
         chunk = s.node.chunk_chars,
         pause = ((2000.0 / scale) as u64).max(1),
+        schedule = match s.node.schedule {
+            Some((every, window)) => {
+                format!("every_minutes = {every}\n        window_minutes = {window}")
+            }
+            None => "always = true".into(),
+        },
     ))?;
     cfg.validate()?;
     SeqStore::new(cfg.state_dir.join("last_seq")).save(START_SEQ)?;
@@ -974,7 +1072,7 @@ pub fn run(s: &Scenario, scale: f32) -> Outcome {
 }
 
 fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
-    let scale = scale.clamp(1.0, 1000.0);
+    let scale = scale.clamp(1.0, MAX_SCALE);
     let dir = Scratch::new(&s.name).context("scratch directory")?;
     let cfg = config(s, &dir.0, scale)?;
     let book = node::load_codebook(&cfg)?;
@@ -998,7 +1096,10 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         Some(cfg.state_dir.join("health.csv")),
     );
     station.configure().context("configuring the mock radio")?;
-    let session = node::build_session(&cfg)?;
+    let mut sc = node::session_config(&cfg);
+    sc.pending_timeout = sc.pending_timeout.div_f32(scale);
+    sc.again_window = sc.again_window.div_f32(scale);
+    let session = node::build_session_with(&cfg, sc)?;
     let svc = FakeServices {
         inbox: inbox(&s.node),
         fail_send: s.node.fail_send,
@@ -1009,9 +1110,13 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     let (tx, rx) = audio::queue(usize::MAX);
     let (done_tx, done_rx) = mpsc::channel::<Finished>();
     let node_cfg = cfg.clone();
+    let clock_radio = radio.clone();
     thread::spawn(move || {
         let (mut station, mut session, mut svc) = (station, session, svc);
-        let end = node::run(&node_cfg, &mut station, &rx, &mut session, &mut svc);
+        // The listening schedule runs in radio time.
+        let clock = move || CLOCK_START + clock_radio.now().as_secs();
+        let end =
+            node::run_with_clock(&node_cfg, &mut station, &rx, &mut session, &mut svc, &clock);
         drop(rx);
         let _ = done_tx.send((end, station, session, svc));
     });
@@ -1024,6 +1129,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         fist: s.fist.clone(),
         sigma: Noise::sigma_for_snr(AMPLITUDE, snr, SAMPLE_RATE, 2500.0),
         sidetone: s.radio.sidetone,
+        nudge_hz: s.radio.dial_nudges.then_some(FREQUENCY_HZ),
         block_real: Duration::from_secs_f32(BLOCK_SECS / scale),
         next_due: Instant::now(),
         deadline: Instant::now() + BUDGET.div_f32(scale) + Duration::from_secs(30),
@@ -1072,7 +1178,15 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     let inhibited = station.tx_inhibited();
     let last_seq = session.last_seq();
     let stored = SeqStore::new(cfg.state_dir.join("last_seq")).load()?;
-    // Dropping the station forces receive, as on shutdown.
+    // How the node left the radio, before dropping the station forces receive (as
+    // on shutdown) and would hide it.
+    let left = radio.report();
+    let settings = radio.settings();
+    let stops = radio
+        .commands()
+        .iter()
+        .filter(|(_, body)| body[..] == [0x17, 0xFF])
+        .count();
     drop(station);
     let r = radio.report();
     out.radio_time = r.now;
@@ -1132,7 +1246,17 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
 
-    out.checks.push(safety(&cfg, e, &r, inhibited));
+    out.checks.push(settings_check(&cfg, &settings));
+    out.checks.push(check(
+        "forced receive",
+        (stops > 0) == e.forced_receive,
+        format!(
+            "17 FF sent {stops} times while the node ran, expected {}",
+            if e.forced_receive { "some" } else { "none" }
+        ),
+    ));
+    out.checks
+        .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
 
     let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
     let own = format!("DE {NODE_CALL}");
@@ -1152,9 +1276,62 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     Ok(())
 }
 
-/// Bounds that hold whatever the scenario: transmit runs, duty, receive at the end,
-/// and nothing keyed after a lockout or inhibit.
-fn safety(cfg: &Config, e: &Expect, r: &Report, inhibited: bool) -> Check {
+/// The radio as the node left it: on the configured frequency, in CW with FIL1, semi
+/// break-in, and the power, keyer speed and break-in delay the node sets. Levels are
+/// read back on the mock's own scales (p. 19-3): 0-100 W, 6-48 wpm, 2-13 dots.
+fn settings_check(cfg: &Config, s: &Settings) -> Check {
+    let st = &cfg.station;
+    let watts = s.rf_power_level as f32 * 100.0 / 255.0;
+    let wpm = 6.0 + s.key_speed_level as f32 * 42.0 / 255.0;
+    let dots = 2.0 + s.break_in_delay_level as f32 * 11.0 / 255.0;
+    let want_wpm = st.key_speed_wpm.clamp(6, 48) as f32;
+    let mut bad = Vec::new();
+    if s.frequency_hz != st.frequency_hz {
+        bad.push(format!("{} Hz, not {}", s.frequency_hz, st.frequency_hz));
+    }
+    if (s.mode, s.filter) != (0x03, 0x01) {
+        bad.push(format!(
+            "mode {:02X} filter {:02X}, not CW FIL1",
+            s.mode, s.filter
+        ));
+    }
+    if s.break_in != 0x01 {
+        bad.push(format!("BK-IN {:02X}, not semi", s.break_in));
+    }
+    // Within half a level of what was asked for.
+    if (watts - st.power_watts as f32).abs() > 0.25 {
+        bad.push(format!("{watts:.1} W, not {}", st.power_watts));
+    }
+    if (wpm - want_wpm).abs() > 0.1 {
+        bad.push(format!("keyer {wpm:.1} wpm, not {want_wpm}"));
+    }
+    if (dots - BREAK_IN_DOTS).abs() > 0.03 {
+        bad.push(format!(
+            "break-in delay {dots:.2} dots, not {BREAK_IN_DOTS}"
+        ));
+    }
+    let detail = format!(
+        "{} Hz, CW FIL{}, {watts:.0} W, {wpm:.1} wpm, semi break-in {dots:.1} dots",
+        s.frequency_hz, s.filter
+    );
+    if bad.is_empty() {
+        check("settings", true, detail)
+    } else {
+        check("settings", false, format!("{}; {detail}", bad.join("; ")))
+    }
+}
+
+/// Bounds that hold whatever the scenario: transmit runs, duty, receive at the end
+/// (as the node left it, in `left`), and the tuner cycles expected.
+fn safety(
+    cfg: &Config,
+    e: &Expect,
+    left: &Report,
+    r: &Report,
+    s: &Settings,
+    inhibited: bool,
+    scale: f32,
+) -> Check {
     let mut bad = Vec::new();
     let max_key = Duration::from_secs(cfg.station.max_key_seconds);
     if r.max_key_down > max_key {
@@ -1172,12 +1349,39 @@ fn safety(cfg: &Config, e: &Expect, r: &Report, inhibited: bool) -> Check {
             max_key.as_secs()
         ));
     }
+    // The radio stays on transmit after its last element for the break-in delay;
+    // anything longer is a stuck transmitter, which the node must end within its
+    // stuck margin. Allow for the station's real-time polling and CI-V round trips,
+    // which take `scale` times longer in radio time.
+    let dot = 1.2 / (6.0 + s.key_speed_level as f32 * 42.0 / 255.0);
+    let hang = dot * (2.0 + s.break_in_delay_level as f32 * 11.0 / 255.0);
+    let overhang_limit = Duration::from_secs_f32(hang + 0.5 + 0.02 * scale) + STUCK_MARGIN;
+    let mut overhang = Duration::ZERO;
+    for t in &r.transmissions {
+        let end = t.end.unwrap_or(r.now);
+        let last = r
+            .keyed
+            .iter()
+            .filter(|k| k.on_air && k.start >= t.start && k.start < end)
+            .map(|k| k.end)
+            .max();
+        if let Some(last) = last {
+            overhang = overhang.max(end.saturating_sub(last));
+        }
+    }
+    if !e.inhibited && overhang > overhang_limit {
+        bad.push(format!(
+            "on transmit {:.1} s after the last element (limit {:.1} s: break-in delay and stuck margin)",
+            overhang.as_secs_f32(),
+            overhang_limit.as_secs_f32()
+        ));
+    }
     let duty = r.total_key_down.as_secs_f32() / r.now.as_secs_f32().max(1.0);
     if duty > 0.5 {
         bad.push(format!("key-down duty {:.0}%", duty * 100.0));
     }
-    if r.transmitting || r.keyer_busy {
-        bad.push("radio not back on receive at the end".into());
+    if left.transmitting || left.keyer_busy {
+        bad.push("radio not back on receive when the node stopped".into());
     }
     if inhibited != e.inhibited {
         bad.push(format!(
@@ -1185,13 +1389,14 @@ fn safety(cfg: &Config, e: &Expect, r: &Report, inhibited: bool) -> Check {
             e.inhibited
         ));
     }
-    if (e.lockout || e.inhibited) && r.tunes > 1 {
-        bad.push(format!("tuned {} times after the lockout", r.tunes - 1));
+    if r.tunes != e.tunes {
+        bad.push(format!("tuned {} times, expected {}", r.tunes, e.tunes));
     }
     let detail = format!(
-        "longest key-down {:.1} s, longest transmit {:.1} s, {} transmissions, {:.0} s on transmit, duty {:.0}%",
+        "longest key-down {:.1} s, longest transmit {:.1} s, {:.1} s on transmit after the last element at most, {} transmissions, {:.0} s on transmit, duty {:.0}%",
         r.max_key_down.as_secs_f32(),
         r.max_tx.as_secs_f32(),
+        overhang.as_secs_f32(),
         r.transmissions.len(),
         r.total_tx.as_secs_f32(),
         duty * 100.0
@@ -1239,7 +1444,8 @@ fn base(name: &str, about: &str) -> Scenario {
             read: Vec::new(),
             weather: Vec::new(),
             last_seq: START_SEQ,
-            lockout: false,
+            tunes: 1,
+            forced_receive: false,
             inhibited: false,
         },
     }
@@ -1412,6 +1618,44 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.read = vec![1];
         s
     });
+    v.push({
+        let inbox: Vec<(&str, &str)> = (0..6)
+            .map(|i| (if i % 2 == 0 { "MOM" } else { "BOB" }, "HI"))
+            .collect();
+        let mut s = rx(
+            "rx-max",
+            "RX with six messages waiting: five are read out, then 1 MORE",
+            &inbox,
+            "6 MSGS",
+            "NR 1 FM MOM HI NR 2 FM BOB HI NR 3 FM MOM HI NR 4 FM BOB HI = A \
+             NR 5 FM MOM HI 1 MORE = B",
+        );
+        s.expect.read = vec![1, 2, 3, 4, 5];
+        s
+    });
+    v.push({
+        let mut s = rx(
+            "rx-readout-refused",
+            "RX whose readout the radio refuses (NG to every CW message after the read-back): \
+             nothing is keyed, so the message stays unread",
+            &[("MOM", "DRIVE SAFE CALL WHEN YOU CAN")],
+            "1 MSG",
+            "",
+        );
+        s.radio.faults.push(Fault::Reply {
+            cmd: vec![0x17],
+            skip: 1,
+            times: 100,
+            kind: ReplyFault::Ng,
+        });
+        s.script[1] = Step::Unanswered {
+            text: "OK 43 {43} K".into(),
+            tries: 2,
+        };
+        s.expect.keyed.truncate(1);
+        s.expect.forced_receive = true;
+        s
+    });
 
     let wx = |name: &str, about: &str, grid: Option<&str>| {
         let rb = match grid {
@@ -1440,6 +1684,26 @@ pub fn scenarios() -> Vec<Scenario> {
     };
     v.push(wx("wx-home", "WX for the default location", None));
     v.push(wx("wx-grid", "WX for a grid square", Some("DL88")));
+    v.push(wx(
+        "wx-grid6",
+        "WX for a 6-character grid square",
+        Some("DL88AF"),
+    ));
+    v.push({
+        let mut s = wx(
+            "wx-fail",
+            "WX whose forecast cannot be fetched: FAIL 43 WX",
+            None,
+        );
+        s.node.fail_weather = true;
+        let fail = de("FAIL 43 WX");
+        s.script[1] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: Some(fail.clone()),
+        };
+        s.expect.keyed[1] = Over::Full(fail);
+        s
+    });
 
     v.push({
         let mut s = base(
@@ -1483,6 +1747,100 @@ pub fn scenarios() -> Vec<Scenario> {
             expect: None,
         });
         s.expect.keyed.push(Over::Full(done));
+        s
+    });
+    // The session's 10-minute windows, in radio time.
+    let ten_minutes = 620.0;
+    v.push({
+        let mut s = tx(
+            "pending-timeout",
+            "an OK more than 10 minutes after the read-back gets silence; nothing is sent",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.insert(1, Step::Wait(ten_minutes));
+        s.script[2] = Step::Say {
+            text: "OK 43 {43} K".into(),
+            expect: None,
+        };
+        s.expect.keyed.truncate(1);
+        s.expect.sent = Vec::new();
+        s.expect.last_seq = 42;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "agn-window",
+            "AGN and a repeated OK more than 10 minutes after the node's last over get silence",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.push(Step::Wait(ten_minutes));
+        for text in ["AGN K", "OK 43 {43} K"] {
+            s.script.push(Step::Say {
+                text: text.into(),
+                expect: None,
+            });
+        }
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "lost-result",
+            "SENT is lost: the operator repeats the OK and gets SENT again, the message sent once",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script.insert(1, Step::MissNext);
+        s.expect.keyed.push(Over::Full(de("SENT 43")));
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "fresh-lines",
+            "an open on fresh lines replaces the pending one; the old line's OK cannot commit it",
+            "MOM",
+            "HOME SUN",
+        );
+        let rb44 = rb_tx(44, "MOM", "HOME SUN");
+        let done = de("SENT 45");
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM WRONG WORDS K"),
+                read_back: rb_tx(42, "MOM", "WRONG WORDS"),
+            },
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM HOME SUN K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: None,
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "WRONG WORDS"), &rb44, &done]);
+        s.expect.last_seq = 45;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "code-in-groups",
+            "codes sent in the two printed groups of four letters",
+            "MOM",
+            "HOME SUN",
+        );
+        s.script[0] = Step::Open {
+            text: format!("{FIELD_CALL} 42 {{42g}} TX MOM HOME SUN K"),
+            read_back: rb_tx(42, "MOM", "HOME SUN"),
+        };
+        s.script[1] = Step::Say {
+            text: "OK 43 {43g} K".into(),
+            expect: Some(de("SENT 43")),
+        };
         s
     });
     v.push({
@@ -1645,7 +2003,7 @@ pub fn scenarios() -> Vec<Scenario> {
         }];
         s.expect.keyed = vec![Over::Cut(rb_long.clone())];
         s.expect.last_seq = 42;
-        s.expect.lockout = true;
+        s.expect.forced_receive = true;
         s
     });
     v.push({
@@ -1664,9 +2022,56 @@ pub fn scenarios() -> Vec<Scenario> {
         }];
         s.expect.keyed = vec![Over::Cut(rb_long.clone())];
         s.expect.last_seq = 42;
-        s.expect.lockout = true;
+        s.expect.forced_receive = true;
         s
     });
+    v.push({
+        let mut s = base(
+            "fault-high-swr-next-window",
+            "SWR 3.5 locks the node out of its window; the antenna recovers, and at the next \
+             window the node tunes again, clears the lockout and works",
+        );
+        s.node.schedule = Some((15, 4));
+        s.radio.swr = 3.5;
+        let rb44 = rb_tx(44, "MOM", "HOME SUN");
+        let done = de("SENT 45");
+        s.script = vec![
+            Step::Unanswered {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+                tries: 2,
+            },
+            Step::SetSwr(1.2),
+            Step::NextWindow,
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM HOME SUN K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = vec![
+            Over::Cut(rb_tx(42, "MOM", "HOME SUN")),
+            Over::Full(rb44),
+            Over::Full(done),
+        ];
+        s.expect.sent = sent("MOM", "HOME SUN");
+        s.expect.last_seq = 45;
+        s.expect.tunes = 2;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push(with_radio(
+        tx(
+            "tuned-load",
+            "an antenna at SWR 2.5, above the node's 2.0 limit: the tuner matches it at the start \
+             of the window and the node transmits",
+            "MOM",
+            "HOME SUN",
+        ),
+        |r| r.swr = 2.5,
+    ));
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
         s.radio.faults.push(Fault::StickInTx {
@@ -1674,6 +2079,7 @@ pub fn scenarios() -> Vec<Scenario> {
             carrier,
             recoverable: true,
         });
+        s.expect.forced_receive = true;
         s
     };
     v.push(stuck(
@@ -1688,9 +2094,27 @@ pub fn scenarios() -> Vec<Scenario> {
     ));
     v.push({
         let mut s = tx(
+            "fault-stuck-last-over",
+            "the radio stays on transmit after the node's last over (SENT); the node forces receive",
+            "MOM",
+            "HI",
+        );
+        s.script.insert(
+            1,
+            Step::Inject(Fault::StickInTx {
+                skip: 0,
+                carrier: false,
+                recoverable: true,
+            }),
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = tx(
             "fault-jammed-tx",
-            "the radio stays on transmit whatever it is told: transmit is inhibited and nothing more is \
-             keyed (the commit still reaches the gateway, unconfirmed)",
+            "the radio stays on transmit whatever it is told: transmit is inhibited, nothing more is \
+             keyed, and the OK goes unheard while the radio is on transmit",
             "MOM",
             "HI",
         );
@@ -1705,7 +2129,89 @@ pub fn scenarios() -> Vec<Scenario> {
         };
         s.script.push(Step::ClearStuck);
         s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.sent = Vec::new();
+        s.expect.last_seq = 42;
         s.expect.inhibited = true;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        // Refused once the read-back is out: the status read before the node's next
+        // over, then the receive command and status read of more forced receive
+        // tries than the node makes (about 9 at 1x real time, 3 when time-scaled);
+        // the watchdog's later tries get through. NG rather than lost replies: a
+        // lost one costs the driver's 500 ms reply timeout in real time, which
+        // time-scaled is longer than the pending commit stays open.
+        let refused = 1 + 12 * 2;
+        let mut s = tx(
+            "fault-status-refused",
+            "the radio answers NG to its status commands for a while after the read-back: the \
+             node cannot confirm receive before repeating it and inhibits, but the radio is on \
+             receive, so the OK is heard and the commit reaches the gateway, unconfirmed",
+            "MOM",
+            "HI",
+        );
+        s.script = vec![
+            s.script[0].clone(),
+            Step::Inject(Fault::Reply {
+                cmd: vec![0x1C, 0x00],
+                skip: 0,
+                times: refused,
+                kind: ReplyFault::Ng,
+            }),
+            Step::Say {
+                text: "AGN K".into(),
+                expect: None,
+            },
+            Step::Unanswered {
+                text: "OK 43 {43} K".into(),
+                tries: 2,
+            },
+        ];
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.inhibited = true;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        // The radio refuses the stop and receive commands more often than the
+        // node's forced receive tries (about 9 pairs at 1x real time, 3 when
+        // time-scaled), so the node inhibits; only the watchdog's later tries can
+        // take it off transmit.
+        let refused = 12;
+        let mut s = tx(
+            "fault-watchdog",
+            "the radio stays on transmit and refuses to unkey until the node has given up: the \
+             watchdog keeps trying and takes it off transmit",
+            "MOM",
+            "HI",
+        );
+        s.radio.faults.extend([
+            Fault::StickInTx {
+                skip: 0,
+                carrier: false,
+                recoverable: true,
+            },
+            Fault::Reply {
+                cmd: vec![0x17, 0xFF],
+                skip: 0,
+                times: refused,
+                kind: ReplyFault::Ng,
+            },
+            // The first 1C 00 00 is the node's set-up.
+            Fault::Reply {
+                cmd: vec![0x1C, 0x00, 0x00],
+                skip: 1,
+                times: refused,
+                kind: ReplyFault::Ng,
+            },
+        ]);
+        s.script = vec![s.script[0].clone(), Step::WaitReceive];
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
+        s.expect.sent = Vec::new();
+        s.expect.last_seq = 42;
+        s.expect.inhibited = true;
+        s.expect.forced_receive = true;
         s
     });
     let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
@@ -1719,6 +2225,7 @@ pub fn scenarios() -> Vec<Scenario> {
         if cut {
             s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
         }
+        s.expect.forced_receive = true;
         s
     };
     v.push(civ(
@@ -1742,15 +2249,31 @@ pub fn scenarios() -> Vec<Scenario> {
         ReplyFault::Delay(Duration::from_millis(700)),
         true,
     ));
-    v.push(with_radio(
-        tx(
-            "fault-tune-hang",
-            "the tuner never reports done: the node gives up on it, forces receive and still works",
-            "MOM",
-            "HOME SUN",
-        ),
-        |r| r.faults.push(Fault::TuneNeverFinishes),
-    ));
+    v.push({
+        let mut s = civ(
+            "transceive",
+            "someone at the radio keeps nudging the dial: CI-V Transceive frames to 00h arrive \
+             unasked, also while the driver resynchronises after a late SWR reading",
+            &[0x15, 0x12],
+            ReplyFault::Delay(Duration::from_millis(700)),
+            true,
+        );
+        s.radio.dial_nudges = true;
+        s
+    });
+    v.push({
+        let mut s = with_radio(
+            tx(
+                "fault-tune-hang",
+                "the tuner never reports done: the node gives up on it, forces receive and still works",
+                "MOM",
+                "HOME SUN",
+            ),
+            |r| r.faults.push(Fault::TuneNeverFinishes),
+        );
+        s.expect.forced_receive = true;
+        s
+    });
     v
 }
 
@@ -1831,6 +2354,26 @@ pub fn vectors() -> Vec<Vector> {
     ]
 }
 
+/// What `audio` decodes to, as `hfnode decode` shows it.
+pub fn decode_text(audio: &[f32], sample_rate: u32, pitch: f32) -> String {
+    let mut d = cw::Decoder::new(cw::DecoderConfig::new(sample_rate, pitch));
+    let mut ev = d.push(audio);
+    ev.extend(d.flush());
+    cw::events_to_text(&ev).trim().to_string()
+}
+
+/// What the node makes of `text` with the manifest's scratch config.
+fn parsed(text: &str) -> Option<protocol::FieldMsg> {
+    let vocab = Vocabulary {
+        field_calls: vec![FIELD_CALL.into()],
+        contacts: vec!["MOM".into(), "BOB".into()],
+    };
+    parse(text, &vocab).ok()
+}
+
+/// The manifest's reply for a vector that does not decode to what was sent.
+pub const NOT_THIS_REPLY: &str = "(not this reply: the noise changes what the node reads)";
+
 /// Write every vector at each speed and noise level as a WAV file in `dir`, with
 /// `manifest.txt` and the test key. Returns the files written.
 pub fn write_vectors(
@@ -1851,9 +2394,11 @@ pub fn write_vectors(
          # which anyone can compute. Never use it as a node's key on the air.\n\
          #\n\
          # Decode-only check:  hfnode decode <file> --pitch {pitch}\n\
-         #   A clean file should decode to exactly the `text` column. A noisy one\n\
-         #   shows the decoder's errors at that SNR: stray E, I or T from the noise\n\
-         #   before the first character are usual, and the node copes with them.\n\
+         #   Each file decodes to its `decodes_as` column: for a clean file exactly the\n\
+         #   `text`, for a noisy one with the decoder's errors at that SNR. Where those\n\
+         #   errors change what the node reads (a lost or garbled callsign, number or\n\
+         #   code; a noise character it cannot strip), `reply` says so instead of\n\
+         #   giving one: expect silence or a different reply from that file.\n\
          # Against a bench node: use a scratch config with node_call = \"{NODE_CALL}\",\n\
          #   field_calls = [\"{FIELD_CALL}\"], contacts MOM and BOB, auth.key_file =\n\
          #   test-only.key, and a scratch state_dir whose last_seq is {START_SEQ} (or no\n\
@@ -1862,7 +2407,7 @@ pub fn write_vectors(
          #\n\
          # Mono 16-bit {SAMPLE_RATE} Hz, {pitch} Hz tone, 1 s of silence before and after.\n\
          #\n\
-         # file\twpm\tsnr_db\ttext\treply\n"
+         # file\twpm\tsnr_db\ttext\tdecodes_as\treply\n"
     );
     let mut files = Vec::new();
     for &wpm in wpms {
@@ -1884,11 +2429,18 @@ pub fn write_vectors(
                 let name = format!("{:02}-{}-{wpm}wpm-{level}.wav", i + 1, vec.label);
                 let path = dir.join(&name);
                 audio::write_wav(&path, &audio, SAMPLE_RATE)?;
+                // As read back from the file, which `hfnode decode` decodes.
+                let (written, rate) = audio::read_wav(&path)?;
+                let decoded = decode_text(&written, rate, pitch);
+                let reply = if parsed(&decoded) == parsed(&text) {
+                    vec.reply
+                } else {
+                    NOT_THIS_REPLY
+                };
                 let _ = writeln!(
                     manifest,
-                    "{name}\t{wpm}\t{}\t{text}\t{}",
+                    "{name}\t{wpm}\t{}\t{text}\t{decoded}\t{reply}",
                     snr.map_or("-".to_string(), |s| s.to_string()),
-                    vec.reply
                 );
                 files.push(path);
             }

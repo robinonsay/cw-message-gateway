@@ -30,10 +30,19 @@ const NAMES: &[&str] = &[
     "rx-one",
     "rx-several",
     "rx-long",
+    "rx-max",
+    "rx-readout-refused",
     "wx-home",
     "wx-grid",
+    "wx-grid6",
+    "wx-fail",
     "no-abort",
     "agn",
+    "pending-timeout",
+    "agn-window",
+    "lost-result",
+    "fresh-lines",
+    "code-in-groups",
     "lost-read-back",
     "replayed-code",
     "wrong-code",
@@ -54,12 +63,18 @@ const NAMES: &[&str] = &[
     "echo-off",
     "fault-high-swr",
     "fault-foldback",
+    "fault-high-swr-next-window",
+    "tuned-load",
     "fault-stuck-tx",
     "fault-stuck-key",
+    "fault-stuck-last-over",
     "fault-jammed-tx",
+    "fault-status-refused",
+    "fault-watchdog",
     "fault-civ-ng",
     "fault-civ-lost-reply",
     "fault-civ-late-reply",
+    "transceive",
     "fault-tune-hang",
 ];
 
@@ -89,10 +104,19 @@ scenario_tests! {
     rx_one => "rx-one",
     rx_several => "rx-several",
     rx_long => "rx-long",
+    rx_max => "rx-max",
+    rx_readout_refused => "rx-readout-refused",
     wx_home => "wx-home",
     wx_grid => "wx-grid",
+    wx_grid6 => "wx-grid6",
+    wx_fail => "wx-fail",
     no_abort => "no-abort",
     agn => "agn",
+    pending_timeout => "pending-timeout",
+    agn_window => "agn-window",
+    lost_result => "lost-result",
+    fresh_lines => "fresh-lines",
+    code_in_groups => "code-in-groups",
     lost_read_back => "lost-read-back",
     replayed_code => "replayed-code",
     wrong_code => "wrong-code",
@@ -113,17 +137,24 @@ scenario_tests! {
     echo_off => "echo-off",
     fault_high_swr => "fault-high-swr",
     fault_foldback => "fault-foldback",
+    fault_high_swr_next_window => "fault-high-swr-next-window",
+    tuned_load => "tuned-load",
     fault_stuck_tx => "fault-stuck-tx",
     fault_stuck_key => "fault-stuck-key",
+    fault_stuck_last_over => "fault-stuck-last-over",
     fault_jammed_tx => "fault-jammed-tx",
+    fault_status_refused => "fault-status-refused",
+    fault_watchdog => "fault-watchdog",
     fault_civ_ng => "fault-civ-ng",
     fault_civ_lost_reply => "fault-civ-lost-reply",
     fault_civ_late_reply => "fault-civ-late-reply",
+    transceive => "transceive",
     fault_tune_hang => "fault-tune-hang",
 }
 
-/// The clean test vectors decode to exactly the text the manifest gives for them,
-/// and the noisy ones are written alongside.
+/// Every test vector decodes to what the manifest says: the clean ones to exactly
+/// their text. A noisy one whose decode the node would read differently does not
+/// promise the clean one's reply.
 #[test]
 fn test_vectors_decode_to_their_manifest_text() {
     let dir = tempfile::tempdir().unwrap();
@@ -148,12 +179,22 @@ fn test_vectors_decode_to_their_manifest_text() {
         .map(|l| l.split('\t').collect())
         .collect();
     assert_eq!(rows.len(), files.len());
-    for cols in rows.iter().filter(|c| c[2] == "-") {
-        let (file, text) = (cols[0], cols[3]);
+    let vocab = protocol::Vocabulary {
+        field_calls: vec![selftest::FIELD_CALL.into()],
+        contacts: vec!["MOM".into(), "BOB".into()],
+    };
+    for cols in &rows {
+        let (file, text, decodes_as, reply) = (cols[0], cols[3], cols[4], cols[5]);
         let (samples, rate) = hfnode::audio::read_wav(&dir.path().join(file)).unwrap();
-        let mut d = cw::Decoder::new(cw::DecoderConfig::new(rate, 600.0));
-        let mut ev = d.push(&samples);
-        ev.extend(d.flush());
-        assert_eq!(cw::events_to_text(&ev).trim(), text, "{file}");
+        assert_eq!(
+            selftest::decode_text(&samples, rate, 600.0),
+            decodes_as,
+            "{file}"
+        );
+        if cols[2] == "-" {
+            assert_eq!(decodes_as, text, "{file}");
+        }
+        let same = protocol::parse(decodes_as, &vocab).ok() == protocol::parse(text, &vocab).ok();
+        assert_eq!(reply == selftest::NOT_THIS_REPLY, !same, "{file}: {reply}");
     }
 }

@@ -92,7 +92,7 @@ enum Cmd {
         /// Run only these scenarios (exact name, or a prefix such as `fault-`).
         #[arg(long)]
         scenario: Vec<String>,
-        /// Times faster than real time; lower it on a slow machine.
+        /// Times faster than real time, 1 to 200; lower it on a slow machine.
         #[arg(long, default_value_t = selftest::DEFAULT_SCALE)]
         scale: f32,
         /// Scenarios run at once (default: one per CPU).
@@ -533,8 +533,8 @@ fn run_selftest(
         }
         return Ok(());
     }
-    if !(1.0..=1000.0).contains(&scale) {
-        bail!("--scale must be from 1 to 1000");
+    if !(1.0..=selftest::MAX_SCALE).contains(&scale) {
+        bail!("--scale must be from 1 to {}", selftest::MAX_SCALE);
     }
     let picked: Vec<_> = if names.is_empty() {
         all

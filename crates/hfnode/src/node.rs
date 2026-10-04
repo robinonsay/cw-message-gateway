@@ -31,19 +31,28 @@ pub fn load_codebook(cfg: &Config) -> Result<CodeBook> {
     })
 }
 
+pub fn session_config(cfg: &Config) -> SessionConfig {
+    SessionConfig {
+        node_call: cfg.station.node_call.to_ascii_uppercase(),
+        pending_timeout: Duration::from_secs(cfg.pending_timeout_secs),
+        chunk_chars: cfg.station.chunk_chars,
+        max_rx_messages: 5,
+        again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
+    }
+}
+
 pub fn build_session(cfg: &Config) -> Result<Session> {
+    build_session_with(cfg, session_config(cfg))
+}
+
+/// [`build_session`] with the session's settings given, e.g. time-scaled for tests.
+pub fn build_session_with(cfg: &Config, sc: SessionConfig) -> Result<Session> {
     let book = load_codebook(cfg)?;
     let store = SeqStore::new(cfg.state_dir.join("last_seq"));
     let last = store.load().context("loading last_seq")?;
     log::info!("last_seq is {last}");
     Ok(Session::new(
-        SessionConfig {
-            node_call: cfg.station.node_call.to_ascii_uppercase(),
-            pending_timeout: Duration::from_secs(cfg.pending_timeout_secs),
-            chunk_chars: cfg.station.chunk_chars,
-            max_rx_messages: 5,
-            again_window: Duration::from_secs(cfg.pending_timeout_secs.max(600)),
-        },
+        sc,
         Vocabulary {
             field_calls: cfg
                 .station
@@ -269,6 +278,19 @@ pub fn run<R: Rig + 'static>(
     session: &mut Session,
     svc: &mut dyn Services,
 ) -> Result<()> {
+    run_with_clock(cfg, station, audio, session, svc, &gateway::unix_now)
+}
+
+/// [`run`], with the listening schedule following `clock` (Unix seconds) instead of
+/// the system clock, e.g. a time-scaled one in tests.
+pub fn run_with_clock<R: Rig + 'static>(
+    cfg: &Config,
+    station: &mut Station<R>,
+    audio: &BlockReceiver,
+    session: &mut Session,
+    svc: &mut dyn Services,
+    clock: &dyn Fn() -> u64,
+) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     let rx_log = cfg.state_dir.join("rx.log");
     let sample_rate = u64::from(cfg.audio.sample_rate.max(1));
@@ -297,7 +319,7 @@ pub fn run<R: Rig + 'static>(
         }
         let now = Instant::now();
         let open = listening(
-            cfg.schedule.is_open(gateway::unix_now()),
+            cfg.schedule.is_open(clock()),
             session.has_pending(now),
             was_open,
             &decoder,

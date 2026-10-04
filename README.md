@@ -77,7 +77,7 @@ cargo build --release -p hfnode # binary at target/release/hfnode
 ```
 
 The mock-radio scenarios (`tests/mock_radio_e2e.rs`) run 100 times faster than
-real time and take about 15 s. On a slow machine such as a Pi, run them slower:
+real time and take about 30 s. On a slow machine such as a Pi, run them slower:
 `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
 
 **Building on the Pi.** This works on a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS; the
@@ -175,24 +175,37 @@ hfnode selftest --scenario fault- --scale 20   # a group, at 20x real time (for 
 
 The operator keys CW audio (`cw::Keyer` plus noise) into the node's audio queue,
 listens to what the mock radio actually keyed, and reacts: it opens, checks the
-read-back, answers `OK`, `NO` or `AGN`, and repeats an open that got no answer.
-Scenarios cover the grammar (TX, RX, WX, NO, AGN), lost read-backs, replayed and
-wrong codes, garbled callsigns, 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key,
-sidetone, USB echo off, and radio faults (high SWR, fold-back, stuck transmit or
-key, a transmitter that will not unkey, NG and lost or late CI-V replies, a tuner
-that never finishes). Each one checks the exact text keyed, what the gateway did,
-`last_seq`, that the node sent nothing the manual does not allow (any unknown,
-malformed or disallowed CI-V frame, `17` while the keyer is busy or not on the air,
-`1C 00 01`), and safety bounds: key-down and transmit lengths, duty cycle, receive
-at the end and nothing keyed after a lockout.
+read-back, answers `OK`, `NO` or `AGN`, and repeats an open or an `OK` that got no
+answer. While the mock radio is on transmit the node hears nothing of the operator.
+Scenarios cover the grammar (TX, RX up to the five-message cap and truncation, WX
+with 4- and 6-character grids, `FAIL` replies, NO, AGN, codes in two groups, an
+open on fresh lines replacing a pending one, the 10-minute pending and `AGN`
+windows), lost read-backs and results, replayed and wrong codes, garbled callsigns,
+10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V
+Transceive frames from someone at the radio, a load the tuner matches, listening
+windows (a high-SWR lockout cleared by the next window's tune), and radio faults
+(high SWR, fold-back, stuck transmit or key, also on the last over, a transmitter
+that will not unkey, one that only the watchdog gets off transmit, refused status
+commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner
+that never finishes). Each one checks the exact text keyed, what the gateway did
+(messages sent, inbox marked read only once keyed), `last_seq`, that the node sent
+nothing the manual does not allow (any unknown, malformed or disallowed CI-V frame,
+`17` while the keyer is busy, not on the air or out of band, `1C 00 01`), the
+radio's settings as the node left them (frequency, CW, power, keyer speed, break-in
+and its delay), that the node forced receive after a fault and never otherwise, and
+safety bounds: key-down and transmit lengths, no transmit past the break-in delay
+plus the 3 s stuck margin, duty cycle, the radio on receive when the node stops,
+and the tuner cycles expected.
 
 The mock answers every command the driver uses with the bytes Section 19 of the
 manual gives, keys `17` text at the set key speed (time-scaled), models semi
 break-in switch-on and hang, the `1C 00` status, Po and SWR meters that read only
-while the key is down, SWR and power fold-back, tuner timing (2 to 3 s, p. 11-2) and
-USB echo (on by default in the mock; the radio's own default is off, p. 12-11). It
-records what it keyed, with timestamps, and can drop, delay or NG a reply, stick in
-transmit, or never finish tuning.
+while the key is down, SWR and power fold-back, the tuner (2 to 3 s, matching loads
+under 3:1 to below 1.5:1, p. 11-2), the transmitter's frequency coverage (p. 16-2),
+CI-V Transceive frames to 00h for changes made at the radio (on by default,
+p. 12-10) and USB echo (on by default in the mock; the radio's own default is off,
+p. 12-11). It records what it keyed, with timestamps, and can drop, delay or NG a
+reply, stick in transmit, or never finish tuning.
 
 **What the mock cannot prove.** It is written from the same manual as the driver,
 so it cannot catch a place where the real radio differs from the manual, or a
@@ -202,14 +215,18 @@ radio). The manual gives only end points for key speed and break-in delay, so th
 mock assumes they are linear in between. There is no RF: real SWR, power output,
 the tuner's real timing, RF in the USB or audio, the serial link and the sound card
 are untested, and so is the hardware PTT timer. The CW is synthetic and the noise
-white, so real band conditions and real fists are tested only on the air. Watchdog
-and forced-receive timing runs on real-time timers inside a time-scaled run, so it
-shows the logic, not the real-time margins.
+white, so real band conditions and real fists are tested only on the air. In a
+time-scaled run the CI-V reply timeout, the watchdog tick and the forced-receive
+retry pause stay in real time, so they take `scale` times longer in radio time;
+`hfnode selftest --scale 1` runs everything at its real speed, real-time margins
+included (about 17 minutes with one job per scenario,
+`--jobs 64`).
 
 **Test vectors.** `hfnode testvectors --out DIR` writes the field operator's side of
 a session as WAV files at several speeds and noise levels, with `manifest.txt`
-giving what each decodes to and what a node should answer, for playing into a
-bench radio or checking the decoder (`hfnode decode`). Their codes come from a
+giving what each decodes to and what a node should answer (or, for a noisy file
+whose decode the node would read differently, that it will not give that answer),
+for playing into a bench radio or checking the decoder (`hfnode decode`). Their codes come from a
 fixed, public test-only key (written alongside as `test-only.key`): never use it on
 the air.
 
