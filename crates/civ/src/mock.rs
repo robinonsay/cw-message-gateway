@@ -312,6 +312,9 @@ struct State {
     /// Bytes still on their way (a delayed reply), by real arrival time.
     in_flight: Vec<(Instant, Vec<u8>)>,
     frequency_hz: u64,
+    /// Split on, transmitting on this frequency (the other VFO).
+    split_tx_hz: Option<u64>,
+    delta_tx: bool,
     mode: u8,
     filter: u8,
     rf_power: u16,
@@ -726,6 +729,17 @@ impl State {
             [0x03] => Ok([&[0x03][..], &bcd_le(self.frequency_hz, 5)].concat()),
             // 04 "Read operating mode" (p. 19-3): mode and filter (p. 19-9).
             [0x04] => Ok(vec![0x04, self.mode, self.filter]),
+            // 0F "Read Split setting (00=OFF, 01=ON)" (p. 19-3).
+            [0x0F] => Ok(vec![0x0F, u8::from(self.split_tx_hz.is_some())]),
+            // 21 02 "Send/read ∂TX setting (00=OFF, 01=ON)" (p. 19-7).
+            [0x21, 0x02] => Ok(vec![0x21, 0x02, u8::from(self.delta_tx)]),
+            // 1C 03 "Read transmit frequency" (p. 19-7), as for 03 (p. 19-9). The
+            // manual does not say whether a ∂TX offset is included; the mock leaves
+            // it out.
+            [0x1C, 0x03] => {
+                let hz = self.split_tx_hz.unwrap_or(self.frequency_hz);
+                Ok([&[0x1C, 0x03][..], &bcd_le(hz, 5)].concat())
+            }
             [0x05, data @ ..] => self.set_frequency(data),
             [0x06, data @ ..] => self.set_mode(data),
             // 14 0A [RF PWR], 14 0C [KEY SPEED], 14 0F Break-IN Delay: "00 00 to
@@ -1037,6 +1051,8 @@ impl MockRadio {
                 // As if left in USB on 20 m at full power, keyer 20 wpm, break-in
                 // off: the node has to set everything it relies on.
                 frequency_hz: 14_200_000,
+                split_tx_hz: None,
+                delta_tx: false,
                 mode: 0x01,
                 filter: 0x01,
                 rf_power: 255,
@@ -1098,6 +1114,17 @@ impl MockRadio {
         s.transceive(&body);
         drop(s);
         self.0.arrived.notify_all();
+    }
+
+    /// Someone at the radio switches split on, transmitting on `tx_hz` (the other
+    /// VFO), or off with `None`. The IC-7300 sends no transceive frame for it.
+    pub fn set_split(&self, tx_hz: Option<u64>) {
+        self.lock().split_tx_hz = tx_hz;
+    }
+
+    /// Someone at the radio switches ∂TX on or off.
+    pub fn set_delta_tx(&self, on: bool) {
+        self.lock().delta_tx = on;
     }
 
     /// Someone at the radio selects a mode and filter: "01 Send mode data
@@ -1651,6 +1678,21 @@ mod tests {
         m.turn_dial(7_030_000);
         assert!(p.read(&mut buf).is_err(), "Transceive OFF: nothing");
         assert_eq!(m.settings().frequency_hz, 7_030_000);
+    }
+
+    #[test]
+    fn split_and_delta_tx_read_as_set_at_the_radio() {
+        let (m, mut r) = radio(1.0);
+        setup(&mut r);
+        assert!(!r.split_or_delta_tx().unwrap());
+        assert_eq!(Rig::transmit_frequency(&mut r).unwrap(), 7_030_000);
+        m.set_split(Some(7_040_000));
+        assert!(r.split_or_delta_tx().unwrap());
+        assert_eq!(Rig::transmit_frequency(&mut r).unwrap(), 7_040_000);
+        m.set_split(None);
+        m.set_delta_tx(true);
+        assert!(r.split_or_delta_tx().unwrap());
+        assert!(m.report().violations.is_empty());
     }
 
     #[test]

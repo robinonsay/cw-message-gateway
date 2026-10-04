@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 cw = { path = "../cw" }
+log = "0.4"
 serialport = { version = "4", default-features = false }

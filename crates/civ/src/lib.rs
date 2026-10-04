@@ -3,11 +3,13 @@
 //! [`Rig`] is everything the node asks of the radio. [`sim::SimRig`] implements it
 //! in memory for tests and `hfnode sim`; the IC-7300 implementation over CI-V lives
 //! in [`ic7300`], and [`mock`] is a byte-level IC-7300 behind a fake serial port for
-//! testing that implementation and the node above it.
+//! testing that implementation and the node above it. [`preflight`] holds the
+//! read-only checks made before the node writes to a real radio.
 
 pub mod frame;
 pub mod ic7300;
 pub mod mock;
+pub mod preflight;
 pub mod sim;
 
 use std::fmt;
@@ -69,6 +71,24 @@ pub trait Rig: Send {
     fn start_tune(&mut self) -> Result<()>;
     /// Whether a tuner cycle is still running.
     fn tuner_busy(&mut self) -> Result<bool>;
+    /// After a tuner cycle: whether the tuner matched the load. One that cannot
+    /// (SWR of 3:1 or more) does not report an error: "TUNE disappears and the
+    /// tuning circuit is automatically bypassed" (p. 11-2). Rigs that cannot tell
+    /// answer `true`, leaving the SWR check on the first transmission to catch it.
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(true)
+    }
+    /// The frequency the radio would transmit on: with split or ∂TX on it is not
+    /// the operating frequency. Rigs that cannot tell answer the operating
+    /// frequency.
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        self.frequency()
+    }
+    /// Whether split or ∂TX is on, either of which moves the transmit frequency
+    /// away from the one set. Rigs without them answer `false`.
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(false)
+    }
     /// SWR meter reading. Only meaningful while transmitting with the key down;
     /// with no RF out it reads 1.0.
     fn read_swr(&mut self) -> Result<f32>;
@@ -90,11 +110,13 @@ pub fn split_for_keyer(text: &str) -> Vec<String> {
     let mut cur = String::new();
     for word in text.split_whitespace() {
         let mut word = word.to_string();
-        while word.len() > MAX_CW_CHARS {
+        // Split on characters, not bytes, so text that is not ASCII cannot panic
+        // here (the driver refuses to send it).
+        while let Some((at, _)) = word.char_indices().nth(MAX_CW_CHARS) {
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
             }
-            let rest = word.split_off(MAX_CW_CHARS);
+            let rest = word.split_off(at);
             out.push(std::mem::replace(&mut word, rest));
         }
         if !cur.is_empty() && cur.len() + 1 + word.len() > MAX_CW_CHARS {
@@ -122,6 +144,11 @@ mod tests {
         assert_eq!(
             p.join(" "),
             "R 42 TX MOM RUNNING LATE HOME SUN ? DE N0CALL K"
+        );
+        let wide = split_for_keyer(&"é".repeat(40));
+        assert_eq!(
+            wide.iter().map(|p| p.chars().count()).collect::<Vec<_>>(),
+            [30, 10]
         );
         let long = split_for_keyer(&"X".repeat(70));
         assert_eq!(

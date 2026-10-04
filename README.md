@@ -184,9 +184,10 @@ with 4- and 6-character grids, `FAIL` replies, NO, AGN, codes in two groups, an
 open on fresh lines replacing a pending one, the 10-minute pending and `AGN`
 windows), lost read-backs and results, replayed and wrong codes, garbled callsigns,
 10 to 30 wpm, SNR down to 0 dB, a sloppy hand key, sidetone, USB echo off, CI-V
-Transceive frames from someone at the radio, a load the tuner matches, listening
-windows (a high-SWR lockout cleared by the next window's tune), and radio faults
-(high SWR, fold-back, stuck transmit or key, also on the last over, a transmitter
+Transceive frames from someone at the radio, a load the tuner matches and one beyond
+its range (the window stays silent), listening windows (a high-SWR lockout cleared
+by the next window's tune), and radio faults (SWR rising after the tune, fold-back,
+stuck transmit or key, also on the last over, a transmitter
 that will not unkey, one that only the watchdog gets off transmit, refused status
 commands, NG and lost or late CI-V replies, a readout the radio refuses, a tuner
 that never finishes). Each one checks the exact text keyed, what the gateway did

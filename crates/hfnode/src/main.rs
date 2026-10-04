@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use auth::{format_for_print, CodeBook};
 use clap::{Parser, Subcommand};
+use hfnode::commissioning::{self, Action};
 use hfnode::config::Config;
 use hfnode::gateway::OfflineServices;
 use hfnode::inbox::Inbox;
@@ -167,6 +168,9 @@ enum Cmd {
 enum RadioCmd {
     /// Read the frequency (receive only, safe).
     Status,
+    /// Read-only preflight: identify the radio and check every setting that could
+    /// make it transmit unexpectedly. Never writes to the radio.
+    Check,
     /// Put the radio in the node's operating state (frequency, CW, power, keyer).
     Setup,
     /// Run the antenna tuner (transmits briefly).
@@ -443,27 +447,95 @@ fn open_radio(cfg: &Config) -> Result<civ::ic7300::Ic7300> {
     .with_context(|| format!("opening radio on {}", cfg.station.serial_port))
 }
 
+/// Open the radio for a command that writes to it: the bring-up stage must allow the
+/// command, and the read-only preflight must pass, before anything is written.
+fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
+    commissioning::check(cfg.station.commissioned, action, cfg.station.power_watts)?;
+    let mut rig = open_radio(cfg)?;
+    let report = civ::preflight::preflight(&mut rig, action == Action::Run);
+    for line in report.to_string().lines() {
+        log::info!("preflight: {line}");
+    }
+    if !report.passed() {
+        let failed: Vec<&str> = report.failures().map(|c| c.name).collect();
+        bail!(
+            "radio preflight failed ({}); nothing was written to the radio",
+            failed.join(", ")
+        );
+    }
+    Ok(rig)
+}
+
+/// Read the settings back after `configure`, and refuse to go on unless they are
+/// what was asked for.
+fn verify_setup(cfg: &Config, st: &Station<civ::ic7300::Ic7300>) -> Result<()> {
+    let sc = StationConfig::from_config(&cfg.station);
+    let rig = st.rig();
+    let mut r = rig.lock().unwrap_or_else(|e| e.into_inner());
+    let report = civ::preflight::verify_setup(
+        &mut r,
+        &civ::preflight::Setup {
+            frequency_hz: sc.frequency_hz,
+            power_watts: sc.power_watts,
+            key_speed_wpm: sc.key_speed_wpm,
+            break_in_delay_dots: sc.break_in_delay_dots,
+        },
+    );
+    for line in report.to_string().lines() {
+        log::info!("read-back: {line}");
+    }
+    if !report.passed() {
+        let failed: Vec<&str> = report.failures().map(|c| c.name).collect();
+        bail!(
+            "the radio's settings do not read back as set ({})",
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     use civ::Rig;
-    let mut rig = open_radio(cfg)?;
     match action {
         RadioCmd::Status => {
+            let mut rig = open_radio(cfg)?;
             println!("frequency {} Hz", rig.frequency()?);
             println!("transmitting: {}", rig.is_transmitting()?);
         }
+        RadioCmd::Check => {
+            let mut rig = open_radio(cfg)?;
+            let report = civ::preflight::preflight(&mut rig, false);
+            print!("{report}");
+            println!(
+                "bring-up stage passed (station.commissioned): {}",
+                cfg.station.commissioned
+            );
+            if !report.passed() {
+                bail!("preflight failed: fix the FAIL lines before anything else");
+            }
+            println!("preflight passed; nothing was written to the radio");
+        }
         RadioCmd::Rx => {
+            let mut rig = open_radio(cfg)?;
             hfnode::station::force_receive(&mut rig).context("radio not confirmed on receive")?;
             println!("receive (confirmed)");
         }
         RadioCmd::Setup | RadioCmd::Tune | RadioCmd::Cw { .. } => {
+            let needs = match action {
+                RadioCmd::Setup => Action::Setup,
+                RadioCmd::Tune => Action::Tune,
+                _ => Action::Cw,
+            };
+            let rig = open_for(cfg, needs)?;
             let mut st = Station::new(
                 rig,
                 StationConfig::from_config(&cfg.station),
                 Some(cfg.state_dir.join("health.csv")),
             );
             st.configure()?;
+            verify_setup(cfg, &st)?;
             println!(
-                "configured: {} Hz, CW, {} W, {} wpm",
+                "configured and read back: {} Hz, CW, {} W, {} wpm",
                 cfg.station.frequency_hz, cfg.station.power_watts, cfg.station.key_speed_wpm
             );
             if matches!(action, RadioCmd::Tune) {
@@ -488,14 +560,15 @@ fn run(cfg: &Config) -> Result<()> {
     let inbox = node::open_inbox(cfg)?;
     let mut session = node::build_session(cfg)?;
     let mut svc = node::live_services(cfg, inbox.clone())?;
+    let rig = open_for(cfg, Action::Run)?;
     node::spawn_inbound(cfg.clone(), inbox);
-    let rig = open_radio(cfg)?;
     let mut station = Station::new(
         rig,
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
     station.configure()?;
+    verify_setup(cfg, &station)?;
     let cap = audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?;
     log::info!(
         "{} listening on {} Hz",

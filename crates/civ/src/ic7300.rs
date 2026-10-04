@@ -19,16 +19,65 @@
 //! - The semi break-in delay is set with 14 0F (p. 19-3), longer than a word gap,
 //!   so the radio does not drop to receive in the gaps of a keyer message.
 //!
-//! Safety in this module: [`Ic7300::set_transmit`] is only ever called with
-//! `false` by the node, CW is keyed through the radio's own keyer (command 17), and
-//! every set command must be acknowledged with OK (FB) or it is treated as failed.
-//! Input left over from an earlier command (a late reply after a timeout) is
-//! discarded before each command, so it cannot be taken as the next one's answer.
+//! Safety in this module: CW is keyed through the radio's own keyer (command 17),
+//! [`Ic7300::set_transmit`] refuses `true` without sending anything (the driver never
+//! sends `1C 00 01`), and every set command must be acknowledged with OK (FB) or it
+//! is treated as failed. Input left over from an earlier command (a late reply after
+//! a timeout) is discarded before each command, so it cannot be taken as the next
+//! one's answer. Replies are checked for their exact length and values; anything
+//! else is an error rather than a guess.
+//!
+//! The only frames that can make the radio transmit are `17` (CW text) and `1C 01 02`
+//! (a tuner cycle). Every other command the driver can send either reads, sets a
+//! value, or returns the radio to receive. Reads are only reachable through named
+//! methods, so no caller can put an arbitrary frame on the wire.
+//!
+//! The USB serial port has two control lines, DTR and RTS, that the radio can be
+//! set to treat as a transmit (USB SEND) or CW key (USB Keying (CW)) line: "DTR:
+//! Uses the DTR terminal on the CI-V (PC) side" (USB SEND and USB Keying items,
+//! p. 12-11; manual text lines 6895-6927). Linux and macOS raise both lines when a
+//! serial port is opened, so [`Ic7300::open`] drops them again straight away and
+//! fails if it cannot. [`crate::preflight`] also reads those settings and refuses
+//! to go on unless they are OFF.
 
 use crate::frame::{bcd_be, bcd_le, from_bcd_be, from_bcd_le, take_frame, Frame, CONTROLLER};
 use crate::{Result, Rig, RigError, MAX_CW_CHARS};
 use std::io::{ErrorKind, Read, Write};
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
+
+/// CI-V addresses the radio can be set to: "CI-V Address (Default: 94h) ... Range:
+/// 02h ~ 94h ~ DFh" (p. 12-10; manual text line 6825).
+pub const ADDRESS_RANGE: RangeInclusive<u8> = 0x02..=0xDF;
+
+/// The IC-7300's default CI-V address, which is also what it answers to `19 00`
+/// "Read the transceiver ID": "“94h” is the default address of IC-7300" (p. 12-10;
+/// manual text line 6826).
+pub const IC7300_ID: u8 = 0x94;
+
+/// "CI-V USB Baud Rate ... Options: 4800, 9600, 19200, 38400, 57600, 115200 (bps),
+/// or Auto" (p. 12-11; manual text lines 6869-6872).
+pub const USB_BAUD_RATES: [u32; 6] = [4800, 9600, 19_200, 38_400, 57_600, 115_200];
+
+/// Frequencies the driver will set: the receiver's coverage, "0.030000~74.800000"
+/// MHz (p. 16-2; manual text line 8014). The 5-byte frequency data could not carry
+/// 100 MHz or more anyway ("100 MHz digit: 0 (Fixed)", p. 19-9).
+pub const FREQUENCY_RANGE_HZ: RangeInclusive<u64> = 30_000..=74_800_000;
+
+/// Whether `baud` and `addr` are settings the radio offers.
+pub fn check_link_settings(baud: u32, addr: u8) -> Result<()> {
+    if !USB_BAUD_RATES.contains(&baud) {
+        return Err(RigError::Protocol(format!(
+            "baud {baud} is not one of the radio's CI-V USB rates {USB_BAUD_RATES:?}"
+        )));
+    }
+    if !ADDRESS_RANGE.contains(&addr) {
+        return Err(RigError::Protocol(format!(
+            "CI-V address {addr:02X}h is outside the radio's 02h-DFh"
+        )));
+    }
+    Ok(())
+}
 
 /// Commands, as `[command, sub-command...]`, with citations to Section 19 of the
 /// IC-7300 Full Manual.
@@ -70,6 +119,81 @@ mod cmd {
     /// 02=Send/read to tuning" (p. 19-7).
     pub const TUNER: &[u8] = &[0x1C, 0x01];
     pub const TUNER_TUNE: u8 = 0x02;
+
+    // Read only. Each of these is sent without data, which reads the item; none of
+    // them is ever sent with data.
+
+    /// 04: "Read operating mode" (p. 19-3). Data: mode, then filter, coded as for 06
+    /// (p. 19-9).
+    pub const READ_MODE: &[u8] = &[0x04];
+    /// 0F: "Read Split setting (00=OFF, 01=ON)" (p. 19-3).
+    pub const SPLIT: &[u8] = &[0x0F];
+    /// 19 00: "Read the transceiver ID" (p. 19-4).
+    pub const TRANSCEIVER_ID: &[u8] = &[0x19, 0x00];
+    /// 21 02: "Send/read ∂TX setting (00=OFF, 01=ON)" (p. 19-7).
+    pub const DELTA_TX: &[u8] = &[0x21, 0x02];
+    /// 1A 05 00 29: "Send/read the Time-Out Timer setting (00=OFF, 01=3 min.,
+    /// 02=5 min., 03=10min., 04=20 min., 05=30 min.)" (p. 19-4).
+    pub const TIME_OUT_TIMER: &[u8] = &[0x1A, 0x05, 0x00, 0x29];
+    /// 1A 05 00 71: "Send/read the CI-V transceive setting (00=OFF, 01=ON)" (p. 19-5).
+    pub const CIV_TRANSCEIVE: &[u8] = &[0x1A, 0x05, 0x00, 0x71];
+    /// 1A 05 00 74: "Send/read the CI-V USB port setting (00=Link to [REMOTE],
+    /// 01=Unlink to [REMOTE]) (Read only)" (p. 19-5).
+    pub const CIV_USB_PORT: &[u8] = &[0x1A, 0x05, 0x00, 0x74];
+    /// 1A 05 00 75: "Send/read echo back setting for CI-V operation from USB
+    /// (00=ON, 01=OFF)" (p. 19-5).
+    pub const USB_ECHO_BACK: &[u8] = &[0x1A, 0x05, 0x00, 0x75];
+    /// 1A 05 00 78: "Send/read transmission control line setting for USB (00=OFF,
+    /// 01=DTR, 02=RTS)" (p. 19-5): the USB SEND item.
+    pub const USB_SEND: &[u8] = &[0x1A, 0x05, 0x00, 0x78];
+    /// 1A 05 00 79: "Send/read CW keying line setting for USB (00=OFF, 01= DTR,
+    /// 02=RTS)" (p. 19-5).
+    pub const USB_KEYING_CW: &[u8] = &[0x1A, 0x05, 0x00, 0x79];
+    /// 1A 05 00 80: "Send/read RTTY (FSK) line setting for USB (00=OFF, 01=DTR,
+    /// 02=RTS)" (p. 19-5).
+    pub const USB_KEYING_RTTY: &[u8] = &[0x1A, 0x05, 0x00, 0x80];
+    /// 1A 05 01 97: "Inhibit Timer at USB connection (00=OFF, 01=ON)" (p. 19-7).
+    pub const USB_INHIBIT_TIMER: &[u8] = &[0x1A, 0x05, 0x01, 0x97];
+    /// 1C 03: "Read transmit frequency" (p. 19-7), in the operating frequency format
+    /// ("Command: 00, 03, 05, 1C 03", p. 19-9).
+    pub const TX_FREQ: &[u8] = &[0x1C, 0x03];
+    /// 1A 05 00 84: "Send/read peak hold set for meter *(00=OFF, 01=ON)" (p. 19-5).
+    pub const METER_PEAK_HOLD: &[u8] = &[0x1A, 0x05, 0x00, 0x84];
+    /// 1A 05 01 61: "Send/read CW keyer dot/dash ratio (28=1:1:2.8 to 45=1:1:4.5)"
+    /// (p. 19-6).
+    pub const KEYER_RATIO: &[u8] = &[0x1A, 0x05, 0x01, 0x61];
+    /// 27 11: "Send/read the Scope wave data output (00=OFF, 01=ON)" (p. 19-14);
+    /// with it and the scope ON the radio streams 27 00 waveform data unasked.
+    pub const SCOPE_DATA_OUTPUT: &[u8] = &[0x27, 0x11];
+}
+
+/// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
+/// 100 MHz digits, "0 (Fixed)" (p. 19-9).
+fn parse_frequency(data: &[u8]) -> Result<u64> {
+    match from_bcd_le(data) {
+        Some(hz) if data.len() == 5 && data[4] == 0x00 => Ok(hz),
+        _ => Err(RigError::Protocol(format!("frequency {data:02X?}"))),
+    }
+}
+
+/// A USB control-line setting (1A 05 00 78, 00 79, 00 80): "00=OFF, 01=DTR, 02=RTS"
+/// (p. 19-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsbLine {
+    Off,
+    Dtr,
+    Rts,
+}
+
+/// What the radio is set to do with its USB serial control lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsbLines {
+    /// USB SEND: transmit while the line is raised.
+    pub send: UsbLine,
+    /// USB Keying (CW): key down while the line is raised.
+    pub keying_cw: UsbLine,
+    /// USB Keying (RTTY): FSK keying.
+    pub keying_rtty: UsbLine,
 }
 
 /// SWR meter calibration points (meter value, SWR) from the 15 12 row (p. 19-3).
@@ -155,13 +279,31 @@ pub struct Ic7300<P: Port = Box<dyn serialport::SerialPort>> {
 }
 
 impl Ic7300 {
-    /// Open the radio's USB serial port. `baud` must match the radio's CI-V USB
-    /// baud rate setting.
+    /// Open the radio's USB serial port, 8 data bits, no parity, 1 stop bit, no flow
+    /// control, for this process only. `baud` must match the radio's CI-V USB baud
+    /// rate setting.
+    ///
+    /// DTR and RTS are dropped as soon as the port is open, and the port is not used
+    /// if that fails: with USB SEND or USB Keying (CW) set to DTR or RTS, a raised
+    /// line would key the transmitter for as long as the port stays open (pp. 12-11;
+    /// manual text lines 6895-6927). The kernel still raises them for a moment while
+    /// opening; the radio's "Inhibit Timer at USB Connection" (default ON, line 6928)
+    /// covers that moment, and [`crate::preflight`] checks the settings themselves.
     pub fn open(path: &str, baud: u32, addr: u8) -> Result<Self> {
-        let port = serialport::new(path, baud)
+        check_link_settings(baud, addr)?;
+        let io = |e: serialport::Error| RigError::Io(std::io::Error::other(e));
+        let mut port = serialport::new(path, baud)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .exclusive(true)
+            .dtr_on_open(false)
             .timeout(Duration::from_millis(50))
             .open()
-            .map_err(|e| RigError::Io(std::io::Error::other(e)))?;
+            .map_err(io)?;
+        port.write_data_terminal_ready(false).map_err(io)?;
+        port.write_request_to_send(false).map_err(io)?;
         Ok(Self::with_port(port, addr))
     }
 }
@@ -210,26 +352,41 @@ impl<P: Port> Ic7300<P> {
     /// Send `body` and return the first reply that `wanted` accepts, or NG. Echoes
     /// of our own frame (USB echo back), frames addressed elsewhere and replies
     /// that do not fit this command (left over from an earlier one) are skipped.
+    ///
+    /// Every frame sent and received is logged at trace level (`RUST_LOG=civ=trace`)
+    /// with the time since the command went out, for checking on the bench what the
+    /// manual leaves open (what 1C 00 and 1C 01 read while keying and tuning, when
+    /// the OK to 17 arrives).
     fn transact(&mut self, body: &[u8], wanted: impl Fn(&Frame) -> bool) -> Result<Frame> {
         let out = Frame::new(self.addr, CONTROLLER, body).encode();
         self.drain()?;
+        // Once anything may have gone out, a failure can leave a reply on its way.
+        self.resync = true;
         self.port.write_all(&out)?;
         self.port.flush()?;
-        let deadline = Instant::now() + self.timeout;
+        let sent = Instant::now();
+        log::trace!("CI-V > {out:02X?}");
+        let deadline = sent + self.timeout;
         let mut chunk = [0u8; 64];
         loop {
             while let Some(f) = take_frame(&mut self.buf) {
+                log::trace!(
+                    "CI-V < {:02X?} after {} ms",
+                    f.encode(),
+                    sent.elapsed().as_millis()
+                );
                 if f.from == self.addr && f.to == CONTROLLER {
                     if f.is_ng() {
+                        self.resync = false;
                         return Err(RigError::Rejected);
                     }
                     if wanted(&f) {
+                        self.resync = false;
                         return Ok(f);
                     }
                 }
             }
             if Instant::now() > deadline {
-                self.resync = true;
                 return Err(RigError::Timeout);
             }
             match self.port.read(&mut chunk) {
@@ -239,6 +396,11 @@ impl<P: Port> Ic7300<P> {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> &P {
+        &self.port
     }
 
     /// A set command: the radio must answer OK.
@@ -262,15 +424,148 @@ impl<P: Port> Ic7300<P> {
             _ => Err(RigError::Protocol(format!("{cmd:02X?} level {data:02X?}"))),
         }
     }
+
+    /// Read a one-byte setting whose value must be in `valid`.
+    fn read_byte(&mut self, cmd: &[u8], valid: RangeInclusive<u8>) -> Result<u8> {
+        match self.read(cmd)?[..] {
+            [v] if valid.contains(&v) => Ok(v),
+            ref data => Err(RigError::Protocol(format!("{cmd:02X?} value {data:02X?}"))),
+        }
+    }
+
+    fn read_usb_line(&mut self, cmd: &[u8]) -> Result<UsbLine> {
+        Ok(match self.read_byte(cmd, 0x00..=0x02)? {
+            0x00 => UsbLine::Off,
+            0x01 => UsbLine::Dtr,
+            _ => UsbLine::Rts,
+        })
+    }
+
+    /// 19 00: the transceiver ID; an IC-7300 answers [`IC7300_ID`].
+    pub fn transceiver_id(&mut self) -> Result<u8> {
+        self.read_byte(cmd::TRANSCEIVER_ID, 0x00..=0xFF)
+    }
+
+    /// 04: operating mode and filter, as raw codes ("03: CW", "07: CW-R"; filter
+    /// "01: FIL1" to "03: FIL3", p. 19-9).
+    pub fn read_mode(&mut self) -> Result<(u8, u8)> {
+        match self.read(cmd::READ_MODE)?[..] {
+            [mode @ (0x00..=0x05 | 0x07 | 0x08), filter @ 0x01..=0x03] => Ok((mode, filter)),
+            ref data => Err(RigError::Protocol(format!("mode {data:02X?}"))),
+        }
+    }
+
+    /// 0F: whether split is on (transmit on the other VFO).
+    pub fn split(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::SPLIT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 21 02: whether ∂TX is on (transmit frequency shifted from the dial).
+    pub fn delta_tx(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::DELTA_TX, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 14 0A: the [RF PWR] level, 0-255.
+    pub fn rf_power_level(&mut self) -> Result<u16> {
+        self.read_level(cmd::RF_POWER)
+    }
+
+    /// 14 0C: the [KEY SPEED] level, 0-255.
+    pub fn key_speed_level(&mut self) -> Result<u16> {
+        self.read_level(cmd::KEY_SPEED)
+    }
+
+    /// 14 0F: the Break-IN Delay level, 0-255.
+    pub fn break_in_delay_level(&mut self) -> Result<u16> {
+        self.read_level(cmd::BREAK_IN_DELAY)
+    }
+
+    /// 16 47: "00=BK-IN OFF, 01=Semi BK-IN ON, 02=Full BK-IN ON".
+    pub fn break_in(&mut self) -> Result<u8> {
+        self.read_byte(cmd::BREAK_IN, 0x00..=0x02)
+    }
+
+    /// 1C 01: "00" tuner off, "01" on, "02" tuning.
+    pub fn tuner_state(&mut self) -> Result<u8> {
+        self.read_byte(cmd::TUNER, 0x00..=0x02)
+    }
+
+    /// 1A 05 00 29: the Time-Out Timer (CI-V) setting, 0 (OFF) or 1-5 (3 to 30 min).
+    pub fn time_out_timer(&mut self) -> Result<u8> {
+        self.read_byte(cmd::TIME_OUT_TIMER, 0x00..=0x05)
+    }
+
+    /// 1A 05 00 78, 00 79, 00 80: the USB control-line settings.
+    pub fn usb_lines(&mut self) -> Result<UsbLines> {
+        Ok(UsbLines {
+            send: self.read_usb_line(cmd::USB_SEND)?,
+            keying_cw: self.read_usb_line(cmd::USB_KEYING_CW)?,
+            keying_rtty: self.read_usb_line(cmd::USB_KEYING_RTTY)?,
+        })
+    }
+
+    /// 1A 05 01 97: whether the Inhibit Timer at USB Connection is on.
+    pub fn usb_inhibit_timer(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::USB_INHIBIT_TIMER, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 75, raw: "00=ON, 01=OFF" by the command table (p. 19-5). Reported,
+    /// not relied on: the driver works with echo on or off.
+    pub fn usb_echo_back_raw(&mut self) -> Result<u8> {
+        self.read_byte(cmd::USB_ECHO_BACK, 0x00..=0x01)
+    }
+
+    /// 1C 03: the frequency the radio would transmit on, which differs from the
+    /// operating frequency with split or ∂TX on.
+    pub fn transmit_frequency(&mut self) -> Result<u64> {
+        let data = self.read(cmd::TX_FREQ)?;
+        parse_frequency(&data)
+    }
+
+    /// 27 11: whether scope waveform data output is on.
+    pub fn scope_data_output(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::SCOPE_DATA_OUTPUT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 84: whether meter peak hold is on.
+    pub fn meter_peak_hold(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::METER_PEAK_HOLD, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 01 61: the keyer's dash length in dots, 2.8 to 4.5 (BCD "28" to "45").
+    pub fn keyer_ratio(&mut self) -> Result<f32> {
+        let v = self.read_byte(cmd::KEYER_RATIO, 0x28..=0x45)?;
+        match from_bcd_be(&[v]) {
+            Some(n) => Ok(n as f32 / 10.0),
+            None => Err(RigError::Protocol(format!("keyer ratio {v:02X}"))),
+        }
+    }
+
+    /// 1A 05 00 71: whether CI-V Transceive is on.
+    pub fn civ_transceive(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::CIV_TRANSCEIVE, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 74: whether the USB CI-V port is on its own ("Unlink from
+    /// [REMOTE]"), so that only this port's controller talks to the radio and the
+    /// USB baud rate and echo items apply (p. 12-10, line 6853).
+    pub fn civ_usb_unlinked(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::CIV_USB_PORT, 0x00..=0x01)? == 0x01)
+    }
 }
 
 impl<P: Port> Rig for Ic7300<P> {
     fn frequency(&mut self) -> Result<u64> {
         let data = self.read(cmd::READ_FREQ)?;
-        from_bcd_le(&data).ok_or_else(|| RigError::Protocol(format!("frequency {data:02X?}")))
+        parse_frequency(&data)
     }
 
     fn set_frequency(&mut self, hz: u64) -> Result<()> {
+        if !FREQUENCY_RANGE_HZ.contains(&hz) {
+            return Err(RigError::Protocol(format!(
+                "{hz} Hz is outside the radio's 30 kHz-74.8 MHz"
+            )));
+        }
         self.set(cmd::SET_FREQ, &bcd_le(hz, 5))
     }
 
@@ -325,7 +620,23 @@ impl<P: Port> Rig for Ic7300<P> {
     }
 
     fn tuner_busy(&mut self) -> Result<bool> {
-        Ok(self.read(cmd::TUNER)? == [cmd::TUNER_TUNE])
+        Ok(self.tuner_state()? == cmd::TUNER_TUNE)
+    }
+
+    /// The tuner reads "01" (ON) after a match, "00" (OFF) once it has bypassed
+    /// itself (1C 01, p. 19-7; p. 11-2).
+    fn tuner_matched(&mut self) -> Result<bool> {
+        Ok(self.tuner_state()? == 0x01)
+    }
+
+    /// 1C 03 "Read transmit frequency" (p. 19-7).
+    fn transmit_frequency(&mut self) -> Result<u64> {
+        Ic7300::transmit_frequency(self)
+    }
+
+    /// 0F "Read Split setting" (p. 19-3) and 21 02 "Send/read ∂TX setting" (p. 19-7).
+    fn split_or_delta_tx(&mut self) -> Result<bool> {
+        Ok(self.split()? || self.delta_tx()?)
     }
 
     fn read_swr(&mut self) -> Result<f32> {
@@ -348,11 +659,20 @@ impl<P: Port> Rig for Ic7300<P> {
     }
 
     fn is_transmitting(&mut self) -> Result<bool> {
-        Ok(self.read(cmd::TX_STATUS)? != [0x00])
+        // "00" receive, "01" transmit (p. 19-7). Anything else is an error, which
+        // callers treat as "not confirmed on receive".
+        Ok(self.read_byte(cmd::TX_STATUS, 0x00..=0x01)? == 0x01)
     }
 
+    /// Only `false` is accepted: `1C 00 01` would hold the transmitter on with no
+    /// time limit in the driver, and the node never needs it (CW is keyed with 17).
     fn set_transmit(&mut self, tx: bool) -> Result<()> {
-        self.set(cmd::TX_STATUS, &[u8::from(tx)])
+        if tx {
+            return Err(RigError::Protocol(
+                "refusing to force transmit (1C 00 01)".into(),
+            ));
+        }
+        self.set(cmd::TX_STATUS, &[0x00])
     }
 }
 
@@ -481,6 +801,49 @@ mod tests {
     }
 
     #[test]
+    fn transmit_control_and_read_frames_on_the_wire() {
+        let mut r = radio(
+            &[
+                OK,
+                OK,
+                &[0x1C, 0x00, 0x00],
+                &[0x1C, 0x01, 0x02],
+                &[0x03, 0x00, 0x00, 0x03, 0x07, 0x00],
+                &[0x1C, 0x03, 0x00, 0x00, 0x03, 0x07, 0x00],
+                &[0x15, 0x11, 0x01, 0x43],
+                &[0x15, 0x12, 0x00, 0x48],
+                &[0x19, 0x00, 0x94],
+            ],
+            false,
+        );
+        r.set_transmit(false).unwrap();
+        r.start_tune().unwrap();
+        assert!(!r.is_transmitting().unwrap());
+        assert!(r.tuner_busy().unwrap());
+        assert_eq!(r.frequency().unwrap(), 7_030_000);
+        assert_eq!(r.transmit_frequency().unwrap(), 7_030_000);
+        assert!((r.read_po().unwrap() - 50.0).abs() < 1e-3);
+        assert!((r.read_swr().unwrap() - 1.5).abs() < 1e-6);
+        assert_eq!(r.transceiver_id().unwrap(), 0x94);
+        let mut buf = r.port.written.clone();
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| take_frame(&mut buf))
+            .map(|f| f.body)
+            .collect();
+        let expected: [&[u8]; 9] = [
+            &[0x1C, 0x00, 0x00], // receive; 1C 00 01 is never sent
+            &[0x1C, 0x01, 0x02], // one tuner cycle
+            &[0x1C, 0x00],
+            &[0x1C, 0x01],
+            &[0x03],
+            &[0x1C, 0x03],
+            &[0x15, 0x11],
+            &[0x15, 0x12],
+            &[0x19, 0x00],
+        ];
+        assert_eq!(frames, expected);
+    }
+
+    #[test]
     fn dot_length_follows_the_radio_speed() {
         // Unknown speed: read 14 0C. 02 55 = 48 wpm.
         let mut r = radio(&[&[0x14, 0x0C, 0x02, 0x55], OK], false);
@@ -586,6 +949,76 @@ mod tests {
         let mut r = radio(&[], false);
         r.timeout = Duration::from_millis(20);
         assert!(matches!(r.frequency(), Err(RigError::Timeout)));
+    }
+
+    #[test]
+    fn never_forces_transmit_on() {
+        let mut r = radio(&[OK, OK], false);
+        assert!(matches!(r.set_transmit(true), Err(RigError::Protocol(_))));
+        assert!(r.port.written.is_empty(), "nothing sent");
+        r.set_transmit(false).unwrap();
+        assert_eq!(
+            r.port.written,
+            [0xFE, 0xFE, 0x94, 0xE0, 0x1C, 0x00, 0x00, 0xFD]
+        );
+    }
+
+    #[test]
+    fn frequencies_outside_the_radio_are_not_sent() {
+        let mut r = radio(&[OK, OK], false);
+        for hz in [0, 29_999, 74_800_001, 100_000_000, 10_000_000_000] {
+            assert!(r.set_frequency(hz).is_err(), "{hz}");
+        }
+        assert!(r.port.written.is_empty());
+        r.set_frequency(30_000).unwrap();
+        r.set_frequency(74_800_000).unwrap();
+        let mut w = r.port.written.clone();
+        let bodies: Vec<_> = std::iter::from_fn(|| take_frame(&mut w))
+            .map(|f| f.body)
+            .collect();
+        assert_eq!(bodies[0], [0x05, 0x00, 0x00, 0x03, 0x00, 0x00]);
+        assert_eq!(bodies[1], [0x05, 0x00, 0x00, 0x80, 0x74, 0x00]);
+    }
+
+    #[test]
+    fn replies_must_have_the_documented_shape() {
+        let mut r = radio(
+            &[
+                &[0x03, 0x00, 0x00, 0x03, 0x07],             // 4 bytes
+                &[0x03, 0x00, 0x00, 0x03, 0x07, 0x00, 0x00], // 6 bytes
+                &[0x03, 0x00, 0x00, 0x03, 0x07, 0x01],       // 100 MHz digit
+                &[0x1C, 0x00],
+                &[0x1C, 0x00, 0x02],
+                &[0x1C, 0x00, 0x00, 0x00],
+                &[0x1C, 0x01, 0x03],
+                &[0x1C, 0x01],
+            ],
+            false,
+        );
+        for _ in 0..3 {
+            assert!(matches!(r.frequency(), Err(RigError::Protocol(_))));
+        }
+        for _ in 0..3 {
+            assert!(matches!(r.is_transmitting(), Err(RigError::Protocol(_))));
+        }
+        for _ in 0..2 {
+            assert!(matches!(r.tuner_busy(), Err(RigError::Protocol(_))));
+        }
+    }
+
+    #[test]
+    fn link_settings_are_the_radios() {
+        for baud in USB_BAUD_RATES {
+            check_link_settings(baud, 0x94).unwrap();
+        }
+        assert!(check_link_settings(115_201, 0x94).is_err());
+        assert!(check_link_settings(0, 0x94).is_err());
+        check_link_settings(19_200, 0x02).unwrap();
+        check_link_settings(19_200, 0xDF).unwrap();
+        for addr in [0x00, 0x01, 0xE0, 0xFD, 0xFE] {
+            assert!(check_link_settings(19_200, addr).is_err(), "{addr:02X}");
+        }
+        assert!(Ic7300::open("/nonexistent", 19_200, 0xE0).is_err());
     }
 
     #[test]

@@ -47,6 +47,11 @@ impl Frame {
 
 /// Pull the first complete frame out of `buf`, discarding any bytes before it.
 /// Returns `None` (leaving a partial frame in place) if no complete frame is there.
+///
+/// `FE` never occurs inside a frame (addresses, BCD data, ASCII text and codes are
+/// all below it), so a preamble byte before the end code means the frame lost its
+/// end (a dropped byte or a collision): it is discarded and parsing starts again at
+/// that byte, rather than swallowing the next frame into this one.
 pub fn take_frame(buf: &mut Vec<u8>) -> Option<Frame> {
     loop {
         let start = buf.windows(2).position(|w| w == [PREAMBLE, PREAMBLE])?;
@@ -56,8 +61,12 @@ pub fn take_frame(buf: &mut Vec<u8>) -> Option<Frame> {
         while i < buf.len() && buf[i] == PREAMBLE {
             i += 1;
         }
-        let end = buf[i..].iter().position(|&b| b == END)? + i;
-        let raw: Vec<u8> = buf.drain(..=end).collect();
+        let stop = buf[i..].iter().position(|&b| b == END || b == PREAMBLE)? + i;
+        if buf[stop] == PREAMBLE {
+            buf.drain(..stop);
+            continue;
+        }
+        let raw: Vec<u8> = buf.drain(..=stop).collect();
         let inner = &raw[i..raw.len() - 1];
         if inner.len() >= 3 {
             return Some(Frame {
@@ -126,6 +135,26 @@ mod tests {
         assert!(ok.is_ok());
         assert_eq!(take_frame(&mut buf), None);
         assert_eq!(buf, [0xFE, 0xFE, 0xE0], "partial frame is kept");
+    }
+
+    #[test]
+    fn a_frame_that_lost_its_end_does_not_swallow_the_next() {
+        // Truncated "1C 00" status reply, then the real one reading receive.
+        let mut buf = vec![0xFE, 0xFE, 0xE0, 0x94, 0x1C, 0x00];
+        buf.extend([0xFE, 0xFE, 0xE0, 0x94, 0x1C, 0x00, 0x00, 0xFD]);
+        let f = take_frame(&mut buf).unwrap();
+        assert_eq!((f.to, f.from), (0xE0, 0x94));
+        assert_eq!(f.body, [0x1C, 0x00, 0x00]);
+        assert!(buf.is_empty());
+        // A truncated frame ahead of an OK leaves the OK intact.
+        let mut buf = vec![
+            0xFE, 0xFE, 0xE0, 0x94, 0x1C, 0xFE, 0xFE, 0xE0, 0x94, 0xFB, 0xFD,
+        ];
+        assert!(take_frame(&mut buf).unwrap().is_ok());
+        // A lone FE inside a frame is dropped with it; a partial frame is kept.
+        let mut buf = vec![0xFE, 0xFE, 0xE0, 0x94, 0xFE, 0x03, 0xFD, 0xFE, 0xFE, 0xE0];
+        assert_eq!(take_frame(&mut buf), None);
+        assert_eq!(buf, [0xFE, 0xFE, 0xE0]);
     }
 
     #[test]
