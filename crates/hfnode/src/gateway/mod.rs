@@ -119,16 +119,17 @@ impl LiveServices {
         self.cfg.contacts.iter().find(|c| c.name == name)
     }
 
-    /// The routes TX would try for `dest` now, or why there is none.
-    pub fn plan(&self, dest: &str) -> Result<Vec<Route>, SendError> {
+    /// The routes TX would try for `dest` now (only those of kind `only`, if given),
+    /// or why there is none.
+    pub fn plan(&self, dest: &str, only: Option<RouteKind>) -> Result<Vec<Route>, SendError> {
         let c = self
             .contact(dest)
             .ok_or_else(|| SendError::NoRoute(format!("no contact {dest}")))?;
         // Read on every send: the node's mail thread learns addresses as it goes.
         let gv = GvStore::read(&self.cfg.state_dir);
         let im = imessage_state(&self.cfg, self.imessage.as_ref().map(|s| &*s.shared));
-        route::plan(c, &avail(&self.cfg, self.mailer.is_some(), &im), &gv)
-            .map_err(SendError::NoRoute)
+        let a = avail(&self.cfg, self.mailer.is_some(), &im);
+        route::plan_only(c, a, &gv, only).map_err(SendError::NoRoute)
     }
 
     /// Send `text` to `dest` as from `from_call`, by the routes TX would use (only
@@ -140,15 +141,7 @@ impl LiveServices {
         text: &str,
         only: Option<RouteKind>,
     ) -> Result<Delivery, SendError> {
-        let mut routes = self.plan(dest)?;
-        if let Some(k) = only {
-            routes.retain(|r| RouteKind::of(r) == k);
-            if routes.is_empty() {
-                return Err(SendError::NoRoute(format!(
-                    "{dest} cannot be reached that way from here now"
-                )));
-            }
-        }
+        let routes = self.plan(dest, only)?;
         let c = self
             .contact(dest)
             .cloned()

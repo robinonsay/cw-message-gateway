@@ -13,6 +13,7 @@
 
 use super::email::is_carrier_address;
 use super::google_voice::GvStore;
+use super::RouteKind;
 use crate::config::{Contact, Handle, Phone};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,32 @@ pub fn plan(c: &Contact, a: &Avail, gv: &GvStore) -> Result<Vec<Route>, String> 
     }
     if routes.is_empty() {
         return Err(notes.join("; "));
+    }
+    Ok(routes)
+}
+
+/// [`plan`], keeping only the routes of kind `only` when it is given: for `hfnode
+/// messages send --via`.
+pub fn plan_only(
+    c: &Contact,
+    mut a: Avail,
+    gv: &GvStore,
+    only: Option<RouteKind>,
+) -> Result<Vec<Route>, String> {
+    if only == Some(RouteKind::Email) {
+        // Email is planned only when there is no Google Voice route; asked for by
+        // name, it is the one route tried.
+        a.gv_number = None;
+    }
+    let mut routes = plan(c, &a, gv)?;
+    if let Some(k) = only {
+        routes.retain(|r| RouteKind::of(r) == k);
+        if routes.is_empty() {
+            return Err(format!(
+                "{} cannot be reached that way from here now",
+                c.name
+            ));
+        }
     }
     Ok(routes)
 }
@@ -259,6 +286,35 @@ mod tests {
             email: true,
         };
         assert!(plan(&contact(false, true, None), &a, &learned()).is_err());
+    }
+
+    #[test]
+    fn one_kind_only() {
+        let n = gv_number();
+        let a = Avail {
+            imessage: Ok(()),
+            gv_number: Some(&n),
+            email: true,
+        };
+        let mom = contact(true, true, Some("mom@example.com"));
+        let only = |k| plan_only(&mom, a, &learned(), Some(k));
+        assert_eq!(
+            only(RouteKind::IMessage).unwrap(),
+            [Route::IMessage(mom.imessage[0].clone())]
+        );
+        assert_eq!(
+            only(RouteKind::GoogleVoice).unwrap(),
+            [Route::GoogleVoice(ADDR.into())]
+        );
+        // Not part of TX's plan once Google Voice is learned, but there when asked for.
+        assert_eq!(
+            only(RouteKind::Email).unwrap(),
+            [Route::Email("mom@example.com".into())]
+        );
+        assert_eq!(plan_only(&mom, a, &learned(), None).unwrap().len(), 2);
+        let bob = contact(false, false, Some("bob@example.com"));
+        let why = plan_only(&bob, a, &learned(), Some(RouteKind::IMessage)).unwrap_err();
+        assert!(why.contains("cannot be reached that way"), "{why}");
     }
 
     #[test]

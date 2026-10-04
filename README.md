@@ -39,7 +39,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Stop-and-wait ARQ, silence as NACK, idempotent retries | `crates/hfnode/src/session.rs` |
 | CW decoder | `crates/cw` (decoder plus a synthesizer used for tests) |
 | Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API, or a local model through Ollama) |
-| Email / SMS connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in; SMS through carrier email-to-SMS addresses) |
+| Email, text and iMessage connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in), `google_voice.rs` (texts from a Google Voice number, through the same mailbox), `imessage.rs` (Messages on a Mac), `route.rs` (which one TX uses); see [docs/texting.md](docs/texting.md) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
 | Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
@@ -161,8 +161,9 @@ OK 2 YAAWUURC K
 
 Use the codes from your own table. Inside `sim`, `/code N` shows the code for line
 N, `/msg NAME TEXT` adds an inbound message (so you can try `RX` and `AGN`), and
-`/quit` exits. Without `--offline`, `sim` really sends email and calls the weather
-service, so it needs the `[email]` settings and `HFNODE_EMAIL_PASSWORD`.
+`/quit` exits. Without `--offline`, `sim` really sends email (and texts or
+iMessages, if those are set up) and calls the weather service, so it needs the
+`[email]` settings and `HFNODE_EMAIL_PASSWORD`.
 
 `sim` writes `last_seq` into `state_dir` like the real node, so codes you use in
 `sim` are used up. Use a scratch `state_dir` and a scratch key, not the node's.
@@ -355,7 +356,8 @@ all the time, it puts its frequency, mode, power and keyer settings back every
 `schedule.check_minutes` (10) while idle, and before every transmission.
 
 The node keeps its state in `state_dir`: `last_seq`, `inbox.json`, `rx.log` (every
-decoded transmission) and `health.csv` (every tune and SWR reading).
+decoded transmission) and `health.csv` (every tune and SWR reading), plus the
+texting files listed in [docs/texting.md](docs/texting.md#files-in-state_dir).
 
 ## Documentation
 

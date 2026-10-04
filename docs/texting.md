@@ -40,13 +40,14 @@ For each TX the node uses the first of these that works:
    Voice number at least once (the node needs a mail from them to learn where to
    send replies).
 3. **Email** to `address`. A carrier email-to-SMS address (such as
-   `5551234567@vtext.com`) is not used when `phone` is set: most US carriers have
-   shut those gateways down.
+   `5551234567@vtext.com`) is not used when `phone` is set: AT&T and T-Mobile have
+   shut those gateways down and Verizon is shutting its down.
 
 Google Voice and email both go out through the node's mail server, so the node
 tries at most one of them: after a mail server error it does not try the other,
-which could deliver the message twice. iMessage falls through to them only when it
-failed before anything could have gone out (for example Messages is signed out).
+which could deliver the message twice. So a contact with a learned Google Voice
+address is not emailed. iMessage falls through to them only when it failed before
+anything could have gone out (for example Messages is signed out).
 
 When none of them is possible the field operator hears `FAIL 43 NO ROUTE`. See
 [operating.md](operating.md#texts-and-imessages) for what the operator hears.
@@ -58,7 +59,8 @@ and warning that replies go on the air:
 W5XXX via HF radio, replies are read on air: RUNNING LATE HOME SUN
 ```
 
-Change it with `tag` in `[google_voice]` or `[imessage]`; it must contain `{call}`.
+Change it with `tag` in `[google_voice]` or `[imessage]`: one line of at most 60
+characters, containing `{call}`.
 Email keeps its `From W5XXX` subject and footer.
 
 `hfnode codes` prints the route of each contact under the code table, by kind only
@@ -73,8 +75,8 @@ account** (the `[email]` account, not your own):
 
 1. Go to voice.google.com and pick a number. Google asks for an existing US phone
    number to verify with; it must not already back another Google Voice account
-   *(unverified)*. Your own cell phone is fine for this: Google Voice only uses it
-   to verify.
+   *(unverified)*. Your own cell phone is fine for this; Google Voice keeps it as a
+   linked number, which you can leave unused.
 2. In Google Voice settings, under Messages, turn on **Forward messages to email**,
    and leave forwarding to linked numbers off *(unverified names)*.
 3. Turn off Google Voice's spam filter, or save each contact's number in the node
@@ -101,12 +103,13 @@ account** (the `[email]` account, not your own):
 5. Have each such contact **text the node's Google Voice number once** (anything,
    "hello" is fine). Until they do, TX to them has no Google Voice route. That first
    text is a real message: it is read out on the next `RX`.
-6. Check with `hfnode messages check` (below): each contact should show
+6. Check with `hfnode messages --config C check` (below): each contact should show
    `Google Voice (learned ...)`.
 
 **Keep the number.** Google takes back a Google Voice number that is not used for
-some months *(unverified: about 3)*. `hfnode messages check` warns when the node
-has sent nothing from it for 60 days; send a text now and then:
+some months *(unverified: about 3)*. `messages check` warns once the node's last
+text from it is more than 60 days old (it cannot tell before the node has sent
+one); send a text now and then:
 
 ```sh
 hfnode messages --config C send --via google-voice MOM "Testing the radio node"
@@ -117,13 +120,15 @@ hfnode messages --config C send --via google-voice MOM "Testing the radio node"
 Google Voice forwards each text to the node's Gmail. The node:
 
 - takes only mail from Google Voice's own address that passes Gmail's DKIM check,
-  from a contact's `phone`, and only in the one-to-one format; a group text or
-  anything it does not recognise is not read out *(group format unverified)*;
+  from a contact's `phone`, with Google Voice's footer; anything else is not read
+  out;
 - strips Google Voice's footer; a text it cannot cut cleanly is not read out:
   the operator hears `FM MOM TEXT NOT READABLE SEE NODE LOG` instead, so they know
   something came;
-- shortens a phone's reaction ("Liked "RUNNING LATE"") to `LIKED YOUR MSG`;
-- learns the contact's reply address from the mail. Opening the mail in Gmail is
+- shortens a phone's reaction ("Liked "RUNNING LATE"") to `LIKED YOUR MSG`
+  *(unverified format)*;
+- learns the contact's reply address from a one-to-one text only. Opening the mail
+  in Gmail is
   fine for that, but an opened mail is no longer read out on `RX` (mark it unread to
   get it read). **Do not archive or delete** Google Voice mail before
   `messages check` shows the contact learned.
@@ -132,13 +137,16 @@ Replies from a number that is not a contact are never read out.
 
 ### Group texts
 
-Not tested yet. Until it has been, do not rely on how the node treats a group
-text that includes the node's number. To test it:
+Not tested yet. A contact's text in a group that includes the node's number is
+read out if Google Voice forwards it in the same format, but the node never learns
+a reply address from it, so its replies cannot go to the group *(unverified)*. To
+test it:
 
 1. The contact texts the node's number one-to-one: `messages check` shows `would
    learn` for them.
 2. Start a group text with the node's number, the contact, and a second phone you
-   control: `messages check` should show it `not learned`, or not at all.
+   control: `messages check` should show it `not learned`, or not at all. Note
+   whether it is read out on `RX`.
 3. `messages send` to the contact reaches only the contact.
 
 ## iMessage (Mac only)
@@ -160,7 +168,8 @@ conversation, they text the Google Voice number instead.
 ### Setting it up
 
 iMessage works only when the node is started by `hfnode.command` in **Terminal**
-(macos-setup.md section 7). The permissions it needs are Terminal's; the launchd
+(macos-setup.md section 7). The permissions it needs are given to Terminal, which
+macOS asks about for programs started in it *(unverified for this setup)*; the launchd
 agent cannot use them, and under it the node logs `iMessage not available: the
 node was started by the launchd agent` and uses the other routes.
 
@@ -168,8 +177,8 @@ node was started by the launchd agent` and uses the other routes.
    know, and check you can send one by hand.
 2. Stop the node (Ctrl-C in its window).
 3. Give Terminal **Full Disk Access**: System Settings > Privacy & Security > Full
-   Disk Access, turn on Terminal, and accept **Quit & Reopen**. This closes any
-   node running in Terminal.
+   Disk Access, turn on Terminal, and accept **Quit & Reopen** *(unverified
+   wording)*. Quitting Terminal stops any node running in it.
 4. Add to `hfnode.toml`:
 
    ```toml
@@ -205,11 +214,17 @@ apply to every script on the Mac.
 ### Sending
 
 After the field operator's `OK`, Messages gets the iMessage and the node watches
-Messages' database for up to 30 s for it to go out. It keys `SENT` once Messages
-shows it sent; `FAIL GATEWAY` when it shows an error or nothing in that time (the
-iMessage may still arrive later). Some failures turn iMessage off until it next
-checks (every 10 minutes): Messages signed out, or the Automation permission
-refused. A TX then goes by Google Voice or email.
+Messages' database for up to 30 s for it to go out:
+
+- Messages shows it sent: `SENT`.
+- Messages shows an error, or refused it (signed out, Automation permission
+  refused): nothing went out, so the node tries Google Voice or email next, and
+  keys `FAIL GATEWAY` only if there is neither.
+- Messages shows nothing in that time, or it is still queued: `FAIL GATEWAY`, and no
+  other route is tried, because the iMessage may still go out later.
+
+Being signed out or refused permission also turns iMessage off until the node next
+checks (every 10 minutes); TX goes by Google Voice or email meanwhile.
 
 ## Checking it: `hfnode messages`
 
@@ -237,14 +252,17 @@ you) for checking the format. They hold phone numbers, reply tokens and private
 texts: never commit them as they are (see [Privacy](#privacy)). `--dump ROWID`
 prints one contact message's stored text bytes, for checking the decoder.
 
-`messages send` really sends, by the route a TX would take (or only the one named
-with `--via`), tagged as from `--call` (default: the first `field_calls`). An
-iMessage opens a reply window, as a TX does. It exits 0 when sent, 1 when the route
-failed, 2 when there is no route.
+`messages send` really sends, by the route a TX would take, tagged as from
+`--call` (default: the first `field_calls`). With `--via` it uses only that kind of
+route, if the contact has it and it works now; `--via email` emails a contact even
+when TX would text them. An iMessage opens a reply window, as a TX does. It exits 0
+when sent, 1 when the route failed (or on any other error, such as a bad config),
+2 when there is no route.
 
 ## Before a trip
 
-- With the node running, `hfnode messages check`: every contact shows a route.
+- With the node running, `hfnode messages --config C check`: every contact shows a
+  route.
 - Every contact reached by Google Voice has texted the node's number once (their
   text is read out on the first `RX`).
 - One real test per route, with `messages send`, and the contact confirms it
@@ -256,10 +274,12 @@ failed, 2 when there is no route.
 
 ## Privacy
 
-- The node never logs the text of an incoming message, and never logs the number
-  or handle of anyone who is not a contact. iMessage log lines carry the contact's
-  name and Messages' row number only.
-- Google Voice reply addresses are not logged on send.
+- The node does not log the text of an incoming message when it arrives (it is
+  logged when it is keyed on air, like everything the node sends), and never logs
+  the number or handle of anyone who is not a contact. A log line about an incoming
+  iMessage carries the contact's name and Messages' row number only.
+- Contacts' handles and addresses appear in the start-up route lines and in each
+  send line; Google Voice reply addresses do not.
 - With `filter.provider = "claude"` replies go to Anthropic for screening, as email
   replies do; with Ollama they stay on your network ([reply-filter.md](reply-filter.md)).
 - Captured mail used as test data in this repository must be redacted first:
@@ -271,10 +291,10 @@ failed, 2 when there is no route.
 
 | File | What it is |
 |---|---|
-| `google_voice.json` | Each phone contact's learned Google Voice reply address, and how far the node has looked through the mailbox. |
+| `google_voice.json` | Each phone contact's learned Google Voice reply address, how far the node has looked through the mailbox, and when it last sent a text. |
 | `imessage.json` | Where in Messages' database the node has read to. It belongs to one Mac: after moving the node, expect one `rescanning` warning. |
 | `imessage_windows.json` | Each contact's reply window, and the node's recent iMessage sends. |
-| `*.lock` | Taken while one of the above is written, so the node and `messages send` do not overwrite each other. |
+| `google_voice.lock`, `imessage_windows.lock` | Taken while the file of that name is written, so the node and `messages send` do not overwrite each other. |
 
 ## First-time checks
 
@@ -299,7 +319,8 @@ Google Voice:
   no signature), from the node's number; a 200-character text arrives whole.
 - [ ] An iPhone reaction to the node's text (Like, a custom emoji, removing one) is
   read as `LIKED YOUR MSG` and so on, and a removal is not read.
-- [ ] Texts are read in the order they were sent.
+- [ ] Texts are read in the order they were sent (the node orders them by when they
+  reached the mailbox).
 
 Mac (note the macOS version, `sw_vers -productVersion`):
 

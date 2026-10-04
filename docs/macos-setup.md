@@ -275,7 +275,7 @@ that file is removed. Check the radio first.
 again. `last_seq` and the inbox stay in the node's folder. With iMessage set up,
 start it with `hfnode.command` and check its log says `iMessage ready`: after an
 update macOS may ask again for Terminal to control Messages, so run `hfnode
-messages check` in Terminal once if it does not.
+messages --config "$D/hfnode.toml" check` in Terminal once if it does not.
 
 **Moving the node to or from another computer.** First stop the old node and turn
 off its start-up (on a Pi `sudo systemctl disable --now hfnode`, on a Mac its Login
@@ -287,4 +287,5 @@ earlier copy, which would hold an older `last_seq`; before the first `hfnode run
 check that `last_seq` is at least the last line crossed off the printed table. Then
 set `station.commissioned = "none"` and redo the hardware test plan from step 1,
 since the computer changed. `state/imessage.json` belongs to the old Mac's Messages:
-on a new Mac expect one `rescanning` warning, then run `hfnode messages check`.
+on a new Mac expect one `rescanning` warning, then run `hfnode messages --config
+"$D/hfnode.toml" check`.

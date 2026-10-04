@@ -23,8 +23,8 @@ always ends with `DE <its callsign> K`.
   stripped, and only replies from the contact's configured address, phone number
   or iMessage handle are kept.
 - **Check every contact can be reached.** At home, with the node running, run
-  `hfnode messages check` and send one test by each route with `hfnode messages
-  send` ([texting.md](texting.md#before-a-trip)).
+  `hfnode messages --config C check` and send one test by each route with
+  `hfnode messages --config C send` ([texting.md](texting.md#before-a-trip)).
 
 ## The code table
 
@@ -284,14 +284,16 @@ node's Google Voice number, or an email. The code table lists each contact's rou
 
 - email: the node's mail server accepted it;
 - text: Gmail accepted it for Google Voice. If the node's Google Voice number has
-  lapsed it goes nowhere, which only a test before the trip shows;
+  lapsed it probably goes nowhere, which only a test before the trip shows;
 - iMessage: Messages on the node's Mac shows it sent.
 
 **An iMessage can take up to about 30 seconds** after your `OK` before the node
 answers `SENT` or `FAIL`. Wait for it; do not send the `OK` again meanwhile.
 
-**`FAIL 43 GATEWAY`** after an iMessage: it may still arrive. Before sending it
-again, give it time and check with `RX` whether the contact answered.
+**`FAIL 43 GATEWAY`** after an iMessage can mean Messages had not sent it after 30
+seconds: it may still arrive. Before sending it again, give it time and check with
+`RX` whether the contact answered. (When Messages refuses outright, the node tries
+the contact's other route first and keys `FAIL` only if that fails too.)
 
 **`FAIL 43 NO ROUTE`**: for example the contact has never texted the node's Google
 Voice number (so the node cannot text them yet), or iMessage is not working and the
@@ -301,7 +303,7 @@ after a fix at home, so don't spend lines retrying it.
 **Replies on `RX`:**
 
 - Texts and iMessages are read like emails (`NR 1 FM MOM ...`), all in the order
-  they were sent.
+  they arrived.
 - A phone's reaction to a text is read as `FM MOM LIKED YOUR MSG` (or `LOVED`,
   `LAUGHED AT`, `REACTED TO`, ...). A reaction to an iMessage is not read.
 - `FM MOM TEXT NOT READABLE SEE NODE LOG`: MOM texted something the node could not

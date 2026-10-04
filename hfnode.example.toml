@@ -92,7 +92,7 @@ number = "+1 555 000 1111"        # the node's Google Voice number
 #   imessage an iMessage handle, phone number or Apple ID email (Mac only); a list
 #            is fine: replies from any are read, TX goes to the first
 #   address  email
-# TX tries iMessage, then Google Voice, then email.
+# TX tries iMessage, then Google Voice, or else email (never both: see docs/texting.md).
 [[contacts]]
 name = "MOM"
 phone = "+1 555 123 4567"
