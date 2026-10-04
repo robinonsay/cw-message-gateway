@@ -341,9 +341,14 @@ impl<R: Rig + 'static> Station<R> {
 
     /// Put the radio in the node's operating state.
     pub fn configure(&self) -> civ::Result<()> {
+        self.with_rig(|r| r.set_transmit(false))?;
+        self.apply_settings()
+    }
+
+    /// Frequency, mode, power and keyer settings; none of these transmits.
+    fn apply_settings(&self) -> civ::Result<()> {
         let c = self.cfg.clone();
         self.with_rig(|r| {
-            r.set_transmit(false)?;
             // Mode first: with SSB/CW Synchronous Tuning ON, a change from SSB to CW
             // shifts the frequency by the CW pitch (p. 12-6, manual text line 6409).
             r.set_mode_cw()?;
@@ -355,9 +360,10 @@ impl<R: Rig + 'static> Station<R> {
         })
     }
 
-    /// Run the internal tuner and wait for it to finish. Call at start-up and at
+    /// Set the radio up again and run the internal tuner. Call at start-up and at
     /// the top of each listening window; clears any SWR lockout from the last window,
-    /// and locks out transmitting for this one if the tuner could not match.
+    /// and locks out transmitting for this one if the radio could not be set up or
+    /// the tuner could not match.
     pub fn start_window(&mut self) -> civ::Result<()> {
         if self.tx_inhibited() {
             // Tuning transmits.
@@ -365,6 +371,22 @@ impl<R: Rig + 'static> Station<R> {
         }
         self.swr_lockout = false;
         self.swr_checked = false;
+        // Set the radio up again: the front panel, another program or a power cycle
+        // may have changed it since the last window, and the tune transmits. It
+        // should be on receive already; if it is not, something else is keying it.
+        let ready = self
+            .with_rig(|r| r.is_transmitting())
+            .and_then(|tx| match tx {
+                false => self.apply_settings(),
+                true => Err(RigError::Protocol("on transmit at window start".into())),
+            });
+        if let Err(e) = ready {
+            self.swr_lockout = true;
+            log::error!("could not set the radio up ({e}): silent until next window");
+            self.force_rx()
+                .map_err(|e| RigError::Protocol(e.to_string()))?;
+            return Err(e);
+        }
         let t0 = Instant::now();
         if let Err(e) = self.tune(t0) {
             // The radio may have taken 1C 01 02 even if its reply was lost, or still
@@ -767,6 +789,43 @@ mod tests {
         st.start_window().unwrap();
         st.rig().lock().unwrap().swr = 3.5;
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+    }
+
+    #[test]
+    fn each_window_sets_the_radio_up_again() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        // Someone at the front panel between windows.
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.frequency_hz = 14_074_000;
+            r.power_watts = 100;
+            r.cw_mode = false;
+        }
+        st.start_window().unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!(
+            (r.frequency_hz, r.power_watts, r.cw_mode),
+            (7_030_000, 40, true)
+        );
+        assert_eq!(r.tunes, 2);
+    }
+
+    #[test]
+    fn a_radio_on_transmit_at_window_start_is_not_tuned() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        // Something other than the node has put it on transmit.
+        st.rig().lock().unwrap().set_transmit(true).unwrap();
+        assert!(st.start_window().is_err());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        assert_eq!(r.tunes, 0);
+        assert!(!r.is_transmitting().unwrap(), "receive forced");
     }
 
     #[test]
