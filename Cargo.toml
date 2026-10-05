@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/civ", "crates/auth", "crates/cw", "crates/protocol", "crates/hfnode"]
+members = ["crates/civ", "crates/auth", "crates/cw", "crates/protocol", "crates/hfnode", "crates/keyer-core"]
 
 [workspace.package]
 edition = "2021"
