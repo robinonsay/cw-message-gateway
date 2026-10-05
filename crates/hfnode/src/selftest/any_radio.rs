@@ -15,8 +15,8 @@
 //! The radio's audio runs in real time on the box's clock, never held back for
 //! the node, so these scenarios run at most [`MAX_SCALE`] times real time: the
 //! sidetone monitor times the audio against the wall clock, as on the air, and
-//! the box's link timeout (2 s) leaves a busy machine 0.2 s of real time to send
-//! its keep-alive.
+//! the box's link timeout (2 s) leaves a busy machine 0.4 s of real time to send
+//! its keep-alive (a CI runner has held a test's thread up for longer than 0.2 s).
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const FIELD_WAIT: Duration = Duration::from_millis(250);
 
 /// The fastest the keyer scenarios run, whatever scale is asked for.
-pub const MAX_SCALE: f32 = 10.0;
+pub const MAX_SCALE: f32 = 5.0;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())

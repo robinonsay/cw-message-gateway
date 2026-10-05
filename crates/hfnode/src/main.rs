@@ -139,7 +139,7 @@ enum Cmd {
         #[arg(long)]
         scenario: Vec<String>,
         /// Times faster than real time, 1 to 200 (the `keyer-` scenarios at most
-        /// 10); lower it on a slow machine.
+        /// 5); lower it on a slow machine.
         #[arg(long, default_value_t = selftest::DEFAULT_SCALE)]
         scale: f32,
         /// Scenarios run at once (default: one per CPU).
