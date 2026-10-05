@@ -9,11 +9,14 @@
 //! a 1 s key-down limit that trips it, a 60 s run limit, a 2 s link timeout and a
 //! hardware watchdog ([`keyer_core`], the same code the box runs).
 
+pub mod bench;
 pub mod link;
 pub mod mock;
 pub mod monitor;
 pub mod proto;
 pub mod rig;
+#[cfg(test)]
+pub(crate) mod testbench;
 
 use crate::config::{Config, RigKind};
 use anyhow::{bail, Result};
@@ -189,6 +192,12 @@ pub fn validate(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Whether a serial port's USB product string is the keyer box's: its firmware
+/// reports [`keyer_core::NAME`] (firmware/pico2-keyer).
+pub fn is_keyer_box(usb_product: &str) -> bool {
+    usb_product.trim() == keyer_core::NAME
+}
+
 /// Whether the node can work with the box that sent `h`: this protocol version,
 /// and limits of its own no looser than the box's ([`keyer_core::limits`]).
 pub fn check_hello(h: &Hello) -> Result<()> {
@@ -223,3 +232,6 @@ pub fn check_hello(h: &Hello) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

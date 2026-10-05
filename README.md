@@ -359,6 +359,12 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. Not identified: `run` identifies its tunes, here you do. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode keyer --config C check` | no | Any radio through the keyer box ([docs/keyer.md](docs/keyer.md)): greet the box, show its limits and why it last started, and check the radio's audio (band level, no key held at the radio). Keys nothing. |
+| `hfnode keyer --config C rx` | no | Stop the box and confirm the key is open, by the box and by the radio's audio. |
+| `hfnode keyer --config C key TEXT` | **yes** | Key TEXT through the box with every check `run` makes but the storm stand-down; report whether the radio was heard sending it. |
+| `hfnode keyer --config C sidetone` | **yes** | Key `DE <call>` and measure the radio's sidetone: its delay, level and pitch. |
+| `hfnode keyer --config C hangtest` | **yes** | Hang the box's control loop mid-transmission: its watchdog must open the key within 0.5 s. Then identifies. |
+| `hfnode keyer --config C stucktest` | **yes** | Identify, then make the box hold its key down: its 1 s limit must open the key and lock the box until it is unplugged. |
 | `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
 | `hfnode run --config C` | **yes** | Run the node (and email `[email] alert_to` if transmitting is inhibited). |
 

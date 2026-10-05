@@ -469,3 +469,52 @@ fn lost_audio_restarts_the_timing() {
     let id = m.run_started(t0 + Duration::from_secs_f64(start), dot, segs.as_slice());
     assert!(m.judge(id).unwrap().heard);
 }
+
+#[test]
+fn the_sidetone_pitch_and_the_longest_tone_are_measured() {
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(settings(), t0);
+    m.record(true);
+    let start = 3.0;
+    let (segs, dot, downs) = keyed("DE N0CALL K", 20, start);
+    let end = downs.last().unwrap().1;
+    // The radio's sidetone is at 640 Hz, not the 600 Hz set: still heard, and the
+    // pitch measured says so.
+    let mut radio = Radio {
+        box_downs: downs,
+        ..Radio::default()
+    };
+    radio.carrier = None;
+    let pitch = 640.0;
+    let mut rng = cw::synth::Noise::new(5);
+    let block = SR as usize / 20;
+    let mut t = 0.0;
+    let mut id = None;
+    while t < end + 1.5 {
+        if id.is_none() && t >= start {
+            id = Some(m.run_started(t0 + Duration::from_secs_f64(start), dot, segs.as_slice()));
+        }
+        let samples: Vec<f32> = (0..block)
+            .map(|i| {
+                let at = t + i as f64 / f64::from(SR);
+                let mut one = [0.0f32];
+                rng.add(&mut one, 0.0005);
+                let tone = if radio.keyed(at) {
+                    0.3 * (2.0 * std::f64::consts::PI * pitch * at).sin() as f32
+                } else {
+                    0.0
+                };
+                one[0] + tone
+            })
+            .collect();
+        t += block as f64 / f64::from(SR);
+        m.push(t0 + Duration::from_secs_f64(t + 0.05), &samples);
+    }
+    let id = id.unwrap();
+    assert!(m.judge(id).unwrap().heard);
+    let p = m.pitch(id).unwrap();
+    assert!((p - 640.0).abs() <= 5.0, "{p}");
+    // The longest element is a dash: 180 ms.
+    let longest = m.longest_tone(t0).as_millis() as i64;
+    assert!((longest - 180).abs() <= 20, "{longest} ms");
+}

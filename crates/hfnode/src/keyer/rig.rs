@@ -182,6 +182,20 @@ impl KeyerRig {
         self.monitor.clone()
     }
 
+    /// The monitor's id for the last run keyed.
+    pub fn last_run(&self) -> Option<u64> {
+        lock(&self.shared).last
+    }
+
+    /// `HELLO` again, as after the box restarted.
+    pub fn hello_again(&mut self) -> Result<Hello> {
+        let f = lock(&self.link).request(&Command::Hello)?;
+        let h = Hello::parse(&f).map_err(RigError::Protocol)?;
+        check_hello(&h).map_err(|e| RigError::Protocol(e.to_string()))?;
+        self.hello = h.clone();
+        Ok(h)
+    }
+
     /// The box's `STATUS`.
     pub fn status(&mut self) -> Result<Status> {
         let st = status(&mut lock(&self.link))?;
@@ -445,9 +459,6 @@ impl Rig for KeyerRig {
     }
 
     fn is_transmitting(&mut self) -> Result<bool> {
-        if let Some(f) = lock(&self.shared).failure.take() {
-            return Err(RigError::Protocol(f));
-        }
         let unreachable = match self.status() {
             Ok(st) if st.busy() => return Ok(true),
             Ok(_) => false,
@@ -476,6 +487,11 @@ impl Rig for KeyerRig {
                 }
             }
         };
+        // The box is not keying. If its last run ended other than as asked (seen
+        // here or by the keep-alive), the transmission fails, once.
+        if let Some(f) = lock(&self.shared).failure.take() {
+            return Err(RigError::Protocol(f));
+        }
         let now = Instant::now();
         match self.key_state(now) {
             KeyState::Held(_) | KeyState::Unsure => Ok(true),

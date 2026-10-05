@@ -249,6 +249,8 @@ pub struct Monitor {
     sidetone_db: Option<f32>,
     /// The last receive level measured, and when (wall clock).
     level: Option<(Instant, f32)>,
+    /// Bring-up: raw audio kept from the sample with this index on.
+    raw: Option<(u64, Vec<f32>)>,
 }
 
 impl Monitor {
@@ -275,6 +277,7 @@ impl Monitor {
             next_id: 1,
             sidetone_db: None,
             level: None,
+            raw: None,
         }
     }
 
@@ -323,6 +326,12 @@ impl Monitor {
             .map(|&(_, f)| f)
             .fold(f64::INFINITY, f64::min);
 
+        if let Some((_, raw)) = self.raw.as_mut() {
+            let room = (KEEP_S * sr) as usize;
+            if raw.len() < room {
+                raw.extend_from_slice(&samples[..samples.len().min(room - raw.len())]);
+            }
+        }
         self.pending.extend_from_slice(samples);
         let mut used = 0;
         while self.pending.len() - used >= self.slice_len {
@@ -543,6 +552,67 @@ impl Monitor {
     /// The sidetone level of the last run heard, dBFS.
     pub fn sidetone_db(&self) -> Option<f32> {
         self.sidetone_db
+    }
+
+    /// Bring-up: keep the raw audio from now on (at most two minutes of it), for
+    /// [`Monitor::pitch`]; or stop and drop it.
+    pub fn record(&mut self, on: bool) {
+        self.raw = on.then(|| (self.n + self.pending.len() as u64, Vec::new()));
+    }
+
+    /// The sidetone's pitch in run `id` (recorded, and judged): the frequency from
+    /// 300 to 1200 Hz with the most power in its elements, to 5 Hz.
+    pub fn pitch(&self, id: u64) -> Option<f32> {
+        let (first, raw) = self.raw.as_ref()?;
+        let run = self.runs.iter().find(|r| r.id == id)?;
+        let lag = run.judge.as_ref()?.lag.as_secs_f64();
+        let sr = f64::from(self.s.sample_rate);
+        let open = run.open_at();
+        // Each element's samples, inside its edges.
+        let parts: Vec<&[f32]> = run
+            .downs
+            .iter()
+            .filter(|&&(s, _)| s < open)
+            .filter_map(|&(s, e)| {
+                // Sample index of radio time `t` into the run, at its delay.
+                let at = |t: f64| ((run.start + lag + t - self.base) * sr) as i64 - *first as i64;
+                let (a, b) = (at(s + 0.015), at(e.min(open) - 0.015));
+                (a >= 0 && b > a && (b as usize) <= raw.len()).then(|| &raw[a as usize..b as usize])
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let mut best: Option<(f32, f32)> = None;
+        for step in 0..=180 {
+            let f = 300.0 + 5.0 * step as f32;
+            let coeff = 2.0 * (2.0 * std::f32::consts::PI * f / self.s.sample_rate as f32).cos();
+            let p: f32 = parts.iter().map(|x| measure(x, coeff, 0.0).purity).sum();
+            if best.is_none_or(|(_, b)| p > b) {
+                best = Some((f, p));
+            }
+        }
+        best.map(|(f, _)| f)
+    }
+
+    /// The longest unbroken stretch of sidetone (as loud as in the last run heard,
+    /// less 10 dB) since `from`: how long a key stayed closed at the radio.
+    pub fn longest_tone(&self, from: Instant) -> Duration {
+        let from = self.radio(from);
+        let floor = match self.sidetone_db {
+            Some(db) => db - BELOW_SIDETONE_DB,
+            None => self.s.min_level_dbfs + OVER_MIN_LEVEL_DB,
+        };
+        let (mut run, mut longest) = (0usize, 0usize);
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            if s.tone_db >= floor {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        Duration::from_secs_f64(longest as f64 * SLICE_S)
     }
 }
 

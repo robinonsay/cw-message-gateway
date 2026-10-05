@@ -12,6 +12,8 @@ state_dir = "/var/lib/hfnode"     # Mac: "~/Library/Application Support/hfnode/s
 pending_timeout_secs = 600
 
 [station]
+# rig = "keyer"                   # any radio, keyed through its key jack by the keyer
+                                  # box: see [keyer] below. Left out, the IC-7300 over CI-V.
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
@@ -41,6 +43,20 @@ sample_rate = 8000
 pitch_hz = 600                    # the radio's CW pitch setting
 end_of_message_ms = 3000
 bandwidth_hz = 150
+
+# Any radio through the keyer box (docs/keyer.md), with station.rig = "keyer". Then
+# station.serial_port is the box's port (`hfnode devices` marks it: Linux
+# "/dev/ttyACM0", or better its /dev/serial/by-id/ name; Mac "/dev/cu.usbmodem...";
+# Windows "COM5"), [audio] device is the sound card the radio's headphone jack goes
+# into and pitch_hz the radio's CW pitch. You set the radio's frequency, mode and power
+# by hand: frequency_hz only has to match it, and baud, civ_address and power_watts are
+# not used. max_key_seconds must leave room for 30 characters: at least 46 at 18 wpm,
+# 42 at 20.
+# [keyer]
+# commissioned = "none"           # last bring-up stage passed: none, listen, keying, done
+# sidetone_hz = 600               # the radio's sidetone pitch, if not audio.pitch_hz
+# min_level_dbfs = -65            # band noise quieter than this means the radio is off
+                                  # or its audio cable out: nothing is keyed
 
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key
