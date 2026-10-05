@@ -53,6 +53,13 @@
 //! - **Storm stand-down.** With a [`StormHold`] attached, nothing is tuned or keyed
 //!   while it is on, and a transmission under way is stopped and the radio forced to
 //!   receive ([`crate::storm`]).
+//! - **Rigs without a tuner or meters** (any radio keyed through its key jack by the
+//!   keyer box, [`crate::keyer`]): a window start sets the radio up and checks it but
+//!   tunes and keys nothing, and SWR is not checked. Instead, once the radio reads
+//!   receive after each piece, the rig says whether it saw the radio key it
+//!   ([`Rig::keying_confirmed`]: the keyer box's rig listens for the sidetone); if
+//!   not, the node stops and stays silent until its next window start, as for no
+//!   output on the Po meter.
 
 use crate::session::Transmission;
 use crate::storm::StormHold;
@@ -147,6 +154,10 @@ pub enum TxError {
     /// A piece was keyed without the Po meter showing output, so SWR could not be
     /// measured; treated like high SWR (the radio cuts its power into a bad load).
     NoOutput,
+    /// A rig without meters did not see the radio key the piece just sent (the
+    /// keyer box's rig heard no sidetone following it: the key cable, the radio
+    /// off or not in CW, its sidetone off, or the audio); treated like no output.
+    NotHeard,
     /// The radio stayed on transmit too long and was forced back to receive.
     Stuck,
     /// The radio could not be confirmed back on receive; nothing more is sent until
@@ -166,11 +177,17 @@ impl std::fmt::Display for TxError {
         match self {
             Self::SwrLockout => write!(
                 f,
-                "transmit locked out until the node next tunes (high SWR, no tuner \
-                 match, or the radio could not be set up)"
+                "transmit locked out until the node next tunes, or starts a window \
+                 on a rig without a tuner (high SWR, no output, keying not heard, no \
+                 tuner match, or the radio could not be set up)"
             ),
             Self::HighSwr(s) => write!(f, "SWR {s:.1} above limit"),
             Self::NoOutput => write!(f, "no output while keying: SWR not measured"),
+            Self::NotHeard => write!(
+                f,
+                "the radio was not heard keying (no sidetone): check the key cable, the \
+                 radio and its sidetone"
+            ),
             Self::Stuck => write!(f, "transmitter did not return to receive"),
             Self::Inhibited => write!(
                 f,
@@ -624,6 +641,16 @@ impl<R: Rig + 'static> Station<R> {
         }
         let t0 = Instant::now();
         self.tuner_ran = true;
+        if !self
+            .rig
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_tuner()
+        {
+            // Nothing to tune (any radio on the keyer box): set up and checked is all
+            // a window start needs, and nothing is transmitted.
+            return Ok(());
+        }
         if let Err(e) = self.tune(t0) {
             // The radio may have taken 1C 01 02 even if its reply was lost, or still
             // be tuning: make sure it is back on receive before going on.
@@ -685,9 +712,18 @@ impl<R: Rig + 'static> Station<R> {
     /// matched (no lockout, no inhibit), `DE <call>` to identify its carrier, keyed
     /// as a transmission of its own with every check of [`Station::transmit`],
     /// the SWR check included. The bench's `radio tune` uses `start_window` alone.
+    /// A rig without a tuner keyed nothing, so it sends no ID either.
     pub fn open_window(&mut self) -> Result<(), String> {
         self.start_window()
             .map_err(|e| format!("tune failed at window start: {e}"))?;
+        if !self
+            .rig
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_tuner()
+        {
+            return Ok(());
+        }
         let id = Transmission {
             segments: vec![self.cfg.station_id.clone()],
             read_ids: Vec::new(),
@@ -839,11 +875,18 @@ impl<R: Rig + 'static> Station<R> {
         let dot = self.with_rig(|r| r.dot_duration())?;
         let keying = dot * cw::units(piece);
         let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        // A rig without meters (any radio on the keyer box) cannot measure SWR or
+        // output: it has its own limits instead, and may confirm the keying itself.
+        let meters = self
+            .rig
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_meters();
         *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         self.with_rig(|r| r.send_cw(piece))?;
         let sent = Instant::now();
 
-        if !self.swr_checked {
+        if !self.swr_checked && meters {
             self.check_swr(sent, keying + hang)?;
         }
         // The radio's status says nothing about the keyer until the whole
@@ -851,6 +894,12 @@ impl<R: Rig + 'static> Station<R> {
         // break-in has switched over), so wait that long first.
         self.sleep_until(sent + keying)?;
         self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin)?;
+        if !meters && self.with_rig(|r| r.keying_confirmed())? == Some(false) {
+            self.health("keying", "not-heard");
+            self.swr_lockout = true;
+            log::error!("the radio was not heard keying: silent until the next window start");
+            return Err(TxError::NotHeard);
+        }
         *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }

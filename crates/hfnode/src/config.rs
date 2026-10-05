@@ -25,11 +25,17 @@ pub struct Config {
     pub storm: Option<Storm>,
     #[serde(default)]
     pub filter: Filter,
+    /// The keyer box, with `station.rig = "keyer"` (docs/keyer.md).
+    pub keyer: Option<Keyer>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Station {
+    /// The radio: the IC-7300 over CI-V (the default), or any radio keyed through
+    /// its key jack by the keyer box, set up in `[keyer]`.
+    #[serde(default)]
+    pub rig: RigKind,
     /// The node's own callsign, sent as `DE <call>` on every transmission.
     pub node_call: String,
     /// Field callsigns allowed to open transactions.
@@ -43,8 +49,9 @@ pub struct Station {
     /// The radio's CI-V address.
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
-    /// The last bring-up stage passed on this radio (docs/hardware-test-plan.md,
-    /// "Bring-up stages"). Commands that need a later stage are refused.
+    /// The last bring-up stage passed on the IC-7300 (docs/hardware-test-plan.md,
+    /// "Bring-up stages"). Commands that need a later stage are refused. The keyer
+    /// box's is `keyer.commissioned`.
     #[serde(default)]
     pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.
@@ -66,6 +73,36 @@ pub struct Station {
     /// Pause between chunks, in milliseconds.
     #[serde(default = "default_chunk_pause_ms")]
     pub chunk_pause_ms: u64,
+}
+
+/// Which radio the node drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RigKind {
+    #[default]
+    Ic7300,
+    Keyer,
+}
+
+/// Any radio, keyed through its key jack by the Pico 2 keyer box
+/// (firmware/pico2-keyer) on `station.serial_port`, its receive audio taken from
+/// its headphone jack through `[audio]`: see docs/keyer.md, the box's commands in
+/// docs/keyer-protocol.md, and [`crate::keyer`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keyer {
+    /// The pitch of the radio's sidetone in Hz, if not `audio.pitch_hz` (most
+    /// radios use their CW pitch for both).
+    pub sidetone_hz: Option<f32>,
+    /// The quietest band noise, in dB below full scale, at which the node still
+    /// keys: quieter means the radio is off, its volume down or the audio cable out,
+    /// and the node could not hear its own sidetone.
+    #[serde(default = "default_min_level")]
+    pub min_level_dbfs: f32,
+    /// The last bring-up stage passed with the box (docs/keyer.md, "Bring-up").
+    /// Commands that need a later stage are refused.
+    #[serde(default)]
+    pub commissioned: crate::keyer::Stage,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -486,6 +523,9 @@ fn default_end_of_message_ms() -> u64 {
 fn default_bandwidth() -> f32 {
     150.0
 }
+fn default_min_level() -> f32 {
+    -65.0
+}
 fn default_every() -> u32 {
     60
 }
@@ -602,9 +642,10 @@ impl Config {
         if !(6..=48).contains(&s.key_speed_wpm) {
             bail!("station.key_speed_wpm must be 6-48");
         }
-        if !TX_COVERAGE_HZ
-            .iter()
-            .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
+        if s.rig == RigKind::Ic7300
+            && !TX_COVERAGE_HZ
+                .iter()
+                .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
         {
             bail!(
                 "station.frequency_hz {} is outside the IC-7300's amateur transmit coverage",
@@ -739,6 +780,7 @@ impl Config {
         self.decoder_config()
             .validate()
             .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
+        crate::keyer::validate(self)?;
         Ok(())
     }
 

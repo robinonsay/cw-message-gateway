@@ -9,6 +9,7 @@ license.workspace = true
 auth = { path = "../auth" }
 civ = { path = "../civ" }
 cw = { path = "../cw" }
+keyer-core = { path = "../keyer-core" }
 protocol = { path = "../protocol" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -24,6 +25,8 @@ ureq = { version = "3", features = ["json"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "hostname"] }
 imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
 mail-parser = "0.11"
+# The serial link to the keyer box.
+serialport = { version = "4", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

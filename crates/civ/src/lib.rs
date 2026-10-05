@@ -104,6 +104,34 @@ pub trait Rig: Send {
     /// Force transmit on or off. The node only ever calls this with `false`, to
     /// make sure the radio is back on receive.
     fn set_transmit(&mut self, tx: bool) -> Result<()>;
+    /// Whether the radio has an antenna tuner for [`Rig::start_tune`]. A rig without
+    /// one (an FM handheld) answers `false`, and the node never asks it to tune.
+    fn has_tuner(&self) -> bool {
+        true
+    }
+    /// Whether [`Rig::read_swr`] and [`Rig::read_po`] measure the transmitter. A rig
+    /// without meters answers `false`: the node then cannot check SWR or output,
+    /// and relies on the rig's own limits instead.
+    fn has_meters(&self) -> bool {
+        true
+    }
+    /// How long the radio must stay on receive before keying a run that keys for
+    /// `keying` (at most [`MAX_CW_CHARS`] of text): a handheld's duty-cycle limit,
+    /// or a channel someone else is using. The node waits that long, on receive,
+    /// and asks again. An error means not to key at all. Rigs with no such limit
+    /// answer zero.
+    fn rest_needed(&mut self, keying: Duration) -> Result<Duration> {
+        let _ = keying;
+        Ok(Duration::ZERO)
+    }
+    /// For a rig without meters, once the radio reads receive after a piece sent
+    /// with [`Rig::send_cw`]: whether the rig saw by its own means that the radio
+    /// keyed it (a keyer box listens for the radio's sidetone). `Some(false)` stops
+    /// the transmission and keeps the node silent until its next window start, as
+    /// no output on the Po meter does. Rigs that cannot tell answer `None`.
+    fn keying_confirmed(&mut self) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 /// Split `text` into pieces the keyer accepts, on word boundaries where possible.
