@@ -45,7 +45,9 @@ impl SerialTransport {
 
     fn port(&mut self) -> io::Result<&mut Box<dyn serialport::SerialPort>> {
         if self.port.is_none() {
-            let p = open_port(&self.name).map_err(|e| io::Error::other(format!("{e:#}")))?;
+            // Not connected: nothing written can have reached the box.
+            let p = open_port(&self.name)
+                .map_err(|e| io::Error::new(io::ErrorKind::NotConnected, format!("{e:#}")))?;
             log::info!("keyer box: {} open again", self.name);
             self.buf.clear();
             self.port = Some(p);
@@ -130,9 +132,11 @@ pub struct Link {
     t: Box<dyn Transport>,
     next_id: u8,
     timeout: Duration,
-    /// When the box last answered anything: its link timeout counts from the last
-    /// line it took, which is no later than this.
+    /// When the box last answered anything.
     answered: Option<Instant>,
+    /// When a line was last written, or tried: the box's link timeout counts from
+    /// the last line it took, which arrived no later than this.
+    sent: Option<Instant>,
 }
 
 impl Link {
@@ -143,6 +147,7 @@ impl Link {
             next_id: 1,
             timeout,
             answered: None,
+            sent: None,
         }
     }
 
@@ -153,6 +158,11 @@ impl Link {
     /// When the box last answered a command.
     pub fn answered(&self) -> Option<Instant> {
         self.answered
+    }
+
+    /// When a line last went out to the box (whether or not it arrived).
+    pub fn sent(&self) -> Option<Instant> {
+        self.sent
     }
 
     /// Send `cmd` and return the fields of its `OK` reply. An `ERR` reply is an
@@ -189,7 +199,13 @@ impl Link {
         let line = proto::encode(id, cmd)
             .ok_or_else(|| RigError::Protocol(format!("{:?} does not fit a line", cmd.body())))?;
         self.t.clear_input().map_err(RigError::Io)?;
-        self.t.write_line(&line).map_err(RigError::Io)?;
+        let wrote = self.t.write_line(&line);
+        // Even a failed write may have reached the box, unless the port was not
+        // there to write to.
+        if !matches!(&wrote, Err(e) if e.kind() == io::ErrorKind::NotConnected) {
+            self.sent = Some(Instant::now());
+        }
+        wrote.map_err(RigError::Io)?;
         let deadline = Instant::now() + self.timeout;
         loop {
             let Some(line) = self.t.read_line(deadline).map_err(RigError::Io)? else {

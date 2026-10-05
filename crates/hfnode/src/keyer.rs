@@ -10,7 +10,10 @@
 //! hardware watchdog ([`keyer_core`], the same code the box runs).
 
 pub mod link;
+pub mod mock;
+pub mod monitor;
 pub mod proto;
+pub mod rig;
 
 use crate::config::{Config, RigKind};
 use anyhow::{bail, Result};
