@@ -1,0 +1,7 @@
+# Builds for the Pico 2's RP2350 (Cortex-M33). rustos's `pico2` crate ships the
+# linker script, link.ld, and puts it on the linker's search path.
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.ld"]
