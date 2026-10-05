@@ -31,7 +31,8 @@ pub const RUN_SLACK: Duration = Duration::from_secs(1);
 /// without its word for it.
 const LINK_MARGIN: Duration = Duration::from_millis(500);
 /// How long, past the run and the longest audio delay, to wait for the audio that
-/// shows whether a run was heard.
+/// shows whether a run was heard. In real time, as is the margin below: how late
+/// the capture's blocks arrive is up to the computer, whatever the scale.
 const JUDGE_WAIT: Duration = Duration::from_millis(1500);
 /// After the box opens its key, the audio shows the radio's key open (or held)
 /// once it covers the longest audio delay and the stuck margin after it; this
@@ -541,7 +542,7 @@ impl Rig for KeyerRig {
     }
 
     fn receive_settle(&self) -> Duration {
-        (MAX_LAG + STUCK_AFTER_RUN + SETTLE_MARGIN).div_f32(self.s.scale)
+        (MAX_LAG + STUCK_AFTER_RUN).div_f32(self.s.scale) + SETTLE_MARGIN
     }
 
     fn held_key(&mut self) -> Option<String> {
@@ -569,7 +570,7 @@ impl Rig for KeyerRig {
         let Some(id) = lock(&self.shared).last else {
             return Ok(None);
         };
-        let deadline = Instant::now() + (MAX_LAG + JUDGE_WAIT).div_f32(self.s.scale);
+        let deadline = Instant::now() + MAX_LAG.div_f32(self.s.scale) + JUDGE_WAIT;
         loop {
             if let Some(j) = lock(&self.monitor).judge(id) {
                 match j.why_not() {

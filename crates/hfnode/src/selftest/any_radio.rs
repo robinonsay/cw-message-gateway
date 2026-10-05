@@ -25,6 +25,9 @@ use keyer_core::keyer::{Ended, Trip};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// Real time the radio waits for the operator's next audio when it falls behind.
+const FIELD_WAIT: Duration = Duration::from_millis(250);
+
 /// The fastest the keyer scenarios run, whatever scale is asked for.
 pub const MAX_SCALE: f32 = 20.0;
 
@@ -235,11 +238,26 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     }
     let field = Arc::new(Mutex::new(VecDeque::<f32>::new()));
     let (tx, rx) = audio::queue(usize::MAX);
+    // The operator keeps its audio a few blocks ahead of the radio's. A busy
+    // machine can hold its thread up for longer than that: the radio then waits for
+    // it, up to FIELD_WAIT, rather than hear a gap in the middle of its keying
+    // (which miscopies the word). Its audio reaches the node that much later, as
+    // from a busy sound card, with no sample lost. Before the operator's first
+    // block there is nothing to wait for.
     let feed = {
         let field = field.clone();
+        let mut started = false;
         Box::new(move |_: f64, n: usize| {
-            let mut q = lock(&field);
-            (0..n).map(|_| q.pop_front().unwrap_or(0.0)).collect()
+            let end = Instant::now() + FIELD_WAIT;
+            loop {
+                let mut q = lock(&field);
+                started |= !q.is_empty();
+                if q.len() >= n || !started || Instant::now() >= end {
+                    return (0..n).map(|_| q.pop_front().unwrap_or(0.0)).collect();
+                }
+                drop(q);
+                thread::sleep(Duration::from_micros(200));
+            }
         })
     };
     let radio = Radio::start(rs, keyer_box.clone(), monitor.clone(), Some(tx), Some(feed));
@@ -376,6 +394,11 @@ fn on_keyer(mut s: Scenario, name: &str, about: &str) -> Scenario {
     s.radio.keyer = true;
     s.expect.tunes = 0;
     s.expect.ids = 0;
+    // The operator's signal clean, over the radio's own band noise. These are
+    // about keying: copying a noisy signal is for the IC-7300 scenarios and the
+    // sweep, where the node takes the audio at its own pace. Here it arrives on
+    // the radio's clock, so how a rare miscopy falls depends on the machine's load.
+    s.fist.snr_db = None;
     s
 }
 

@@ -264,8 +264,9 @@ fn a_key_closed_at_the_radio_is_not_keyed_over_and_inhibits_while_idle() {
     // Not keyed over, and not taken for a fault of the node's keying...
     assert!(b.station.can_transmit());
     // ... but once the tone has gone on for 30 s the station inhibits by itself,
-    // with nothing keyed and no check due.
-    let deadline = Instant::now() + radio_secs(40.0);
+    // with nothing keyed and no check due. Its forced receive first waits for the
+    // audio in real time, whatever the scale.
+    let deadline = Instant::now() + radio_secs(40.0) + Duration::from_secs(2);
     while !b.station.tx_inhibited() {
         assert!(Instant::now() < deadline, "not inhibited");
         thread::sleep(radio_secs(0.5));

@@ -393,31 +393,40 @@ impl Monitor {
     /// the samples count for, while the earliest-ever timing in `base` stays put: then
     /// the timing moves on by that much from the first late block, and the slices
     /// cut since then move with it. Without this they would sit up to a second too
-    /// early, and the runs keyed over them would not be heard, for 30 s.
+    /// early, and the runs keyed over them would not be heard, for 30 s. Audio held
+    /// up and then delivered all at once is not lost: its blocks come less and less
+    /// late, then on time, and the timing stays.
     fn check_loss(&mut self, at_r: f64) {
-        let confirm = self.real(LOSS_CONFIRM_S);
-        let recent: Vec<(f64, f64, u64)> = self
+        let (confirm, loss) = (self.real(LOSS_CONFIRM_S), self.real(LOSS_S));
+        // The blocks since the last one on time, newest first.
+        let base = self.base;
+        let run: Vec<(f64, f64, u64)> = self
             .stamps
             .iter()
             .rev()
-            .take_while(|&&(t, _, _)| t >= at_r - confirm)
+            .take_while(|&&(_, f, _)| f - base > loss)
             .copied()
             .collect();
-        let Some(&(_, _, from_n)) = recent.last() else {
+        let Some(&(since, _, from_n)) = run.last() else {
             return;
         };
-        if recent.len() < 2 || recent.len() == self.stamps.len() {
-            // Too few blocks to tell, or nothing older to compare with.
+        if run.len() < 2 || run.len() == self.stamps.len() || at_r - since < confirm {
+            // Too few blocks to tell, nothing older to compare with, or not late
+            // for long enough yet.
             return;
         }
-        let late = recent
+        // Late by the same amount over the last `confirm`, not catching up.
+        let (late, most_late) = run
             .iter()
-            .map(|&(_, f, _)| f)
-            .fold(f64::INFINITY, f64::min);
-        let shift = late - self.base;
-        if shift <= self.real(LOSS_S) {
+            .take_while(|&&(t, _, _)| t >= at_r - confirm)
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lo, hi), &(_, f, _)| (lo.min(f), hi.max(f)),
+            );
+        if most_late - late > loss {
             return;
         }
+        let shift = late - self.base;
         log::warn!(
             "sidetone monitor: {:.0} ms of audio was lost; timing it from there",
             shift * 1000.0
@@ -430,7 +439,7 @@ impl Monitor {
             }
             s.t += shift;
         }
-        let keep = self.stamps.len() - recent.len();
+        let keep = self.stamps.len() - run.len();
         self.stamps.drain(..keep);
         self.base = late;
     }

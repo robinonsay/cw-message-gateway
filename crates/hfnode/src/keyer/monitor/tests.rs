@@ -626,6 +626,48 @@ fn a_little_lost_audio_keeps_the_timing() {
 }
 
 #[test]
+fn audio_held_up_then_caught_up_is_not_lost_audio() {
+    // The capture stalls for 0.9 s early in a run, then catches up at 1.25 times
+    // real time: every sample arrives, late at first.
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(settings(), t0);
+    let start = 3.0;
+    let (segs, dot, downs) = keyed("DE N0CALL K", 20, start);
+    let end = downs.last().unwrap().1;
+    let radio = Radio {
+        box_downs: downs,
+        ..Radio::default()
+    };
+    let mut rng = cw::synth::Noise::new(7);
+    let block = SR as usize / 20;
+    let at = |s: f64| t0 + Duration::from_secs_f64(s);
+    let (stall, resume) = (start + 0.3, start + 1.2);
+    let (mut t, mut id, mut last) = (0.0, None, 0.0f64);
+    while t < end + 1.5 {
+        if id.is_none() && t >= start {
+            m.band(at(start));
+            id = Some(m.run_started(at(start), dot, segs.as_slice()));
+        }
+        let samples: Vec<f32> = (0..block)
+            .map(|i| radio.sample(t + i as f64 / f64::from(SR), &mut rng))
+            .collect();
+        t += block as f64 / f64::from(SR);
+        let due = t + 0.08;
+        last = if t <= stall {
+            due
+        } else {
+            due.max(resume + 0.08).max(last + 0.04)
+        };
+        m.push(at(last), &samples);
+    }
+    let j = m.judge(id.unwrap()).unwrap();
+    assert!(j.heard, "{j}");
+    let lag = j.lag.as_millis() as i64;
+    assert!((lag - 85).abs() <= 15, "{j}");
+    assert_eq!(m.key_state(), KeyState::Open);
+}
+
+#[test]
 fn audio_held_up_by_a_busy_computer_is_not_lost_audio() {
     // At 20x real time, the few milliseconds a busy computer holds up the audio
     // are a tenth of a second of radio time: not audio lost, so the timing stays.
