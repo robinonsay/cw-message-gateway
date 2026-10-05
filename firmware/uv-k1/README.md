@@ -8,10 +8,9 @@ them are in [docs/handheld-protocol.md](../../docs/handheld-protocol.md); settin
 radio up and the bring-up are in [docs/handheld.md](../../docs/handheld.md). Not for
 the older UV-K5 (v1 and v2), which has a different processor (from memory).
 
-**Nothing here has run on a radio yet, and this version has not been built.** An
-earlier one, before the stop check (3 below) was added, was built once (94,216 bytes,
-in the radio's 118 KB of program flash). The command and safety logic is tested on a
-computer against a simulated radio (below).
+**Nothing here has run on a radio yet.** CI builds it on every push (below; 94,664
+bytes when first built there, of the radio's 118 KB of program flash). The command
+and safety logic is tested on a computer against a simulated radio (below).
 
 ## What is here
 
@@ -19,7 +18,7 @@ computer against a simulated radio (below).
 |---|---|
 | `app/hfnode.c`, `app/hfnode.h` | The commands and the limits below. |
 | `app/hfnode_line.c`, `app/hfnode_line.h` | The line format: framing and checksums. |
-| `nr7y-hfnode.patch` | The small changes to the firmware's own files: start and poll hfnode from the main loop, feed the watchdog from the 10 ms tick, a keyer entry that plays given text at a given speed, and five Morse characters the keyer lacked (`' ) : " @`). |
+| `nr7y-hfnode.patch` | The small changes to the firmware's own files: start and poll hfnode from the main loop, feed the watchdog from the 10 ms tick, a keyer entry that plays given text at a given speed (timing an element that switches the transmitter on from when the carrier is on, so the switch-over does not shorten it), and five Morse characters the keyer lacked (`' ) : " @`). |
 | `build.sh` | Fetches the firmware at the commit the patch was made for, applies it and builds. |
 | `test/` | The host test, with stand-ins for the radio's code. |
 

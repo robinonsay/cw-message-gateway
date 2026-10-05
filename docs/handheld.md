@@ -196,8 +196,8 @@ the log for why it latched, and delete `tx-inhibited` in the handheld's `state_d
 
 ## Not yet checked on a radio
 
-- This version of the firmware has not been built: an earlier one, before the stop
-  check was added, was built once, and never flashed.
+- The firmware is built in CI on every push (firmware/uv-k1/README.md, "Building")
+  but has never been flashed.
 - What the firmware was read to do and the host test assumes: that its time-out
   timer is cleared on every CW key-down, that its end-of-transmission routine ends a
   transmission, that the radio chip's transmit bit is set while the CW engine
