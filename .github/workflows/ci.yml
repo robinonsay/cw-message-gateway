@@ -115,3 +115,21 @@ jobs:
 
       - name: cargo check (aarch64-unknown-linux-gnu)
         run: cargo check --target aarch64-unknown-linux-gnu --all-targets
+
+  # hfnode's part of the handheld firmware (firmware/uv-k1/app), compiled for the
+  # computer against stand-ins for the radio, with its commands and limits tested.
+  # The firmware itself is not fetched or built here.
+  firmware-host-test:
+    name: handheld firmware host test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware/uv-k1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build and run the host test
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+             -I test/stubs -I . test/test_hfnode.c app/hfnode_line.c -o test_hfnode
+          ./test_hfnode

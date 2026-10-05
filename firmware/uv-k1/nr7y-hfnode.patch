@@ -1,0 +1,239 @@
+diff --git a/App/CMakeLists.txt b/App/CMakeLists.txt
+index fef0df2..fd1d734 100644
+--- a/App/CMakeLists.txt
++++ b/App/CMakeLists.txt
+@@ -197,6 +197,15 @@ if(ENABLE_FEAT_NR7Y_CPO)
+     target_compile_definitions(App INTERFACE ENABLE_CODE_PRACTICE)
+ endif()
+ 
++# hfnode serial control over the USB-C port (needs the CW mod and USB)
++if(ENABLE_HFNODE AND ENABLE_FEAT_NR7Y_CW AND ENABLE_USB)
++    target_compile_definitions(App INTERFACE ENABLE_HFNODE)
++    target_sources(App INTERFACE
++        app/hfnode.c
++        app/hfnode_line.c
++    )
++endif()
++
+ if(ENABLE_MILLIS OR ENABLE_FEAT_NR7Y_CW)
+     target_compile_definitions(App INTERFACE ENABLE_MILLIS)
+ endif()
+diff --git a/App/app/cwkeyer.c b/App/app/cwkeyer.c
+index 6867180..4d4d5fd 100644
+--- a/App/app/cwkeyer.c
++++ b/App/app/cwkeyer.c
+@@ -117,6 +117,25 @@ typedef enum {
+ static PB_State_t s_pb_state = PB_STATE_IDLE;
+ static bool s_play_space_pending = false;  // indicates next char should be shown with a leading space
+ 
++#ifdef ENABLE_HFNODE
++// Text played at a speed of its own (CW_StartTextPlayback) times its elements with
++// these instead of the keyer's.
++static bool     s_pb_own_speed = false;
++static uint16_t s_pb_dit_count, s_pb_dah_count, s_pb_gap_count, s_pb_char_gap_count,
++                s_pb_word_gap_count;
++#define PB_DIT      (s_pb_own_speed ? s_pb_dit_count : s_dit_count)
++#define PB_DAH      (s_pb_own_speed ? s_pb_dah_count : s_dah_count)
++#define PB_GAP      (s_pb_own_speed ? s_pb_gap_count : s_gap_count)
++#define PB_CHAR_GAP (s_pb_own_speed ? s_pb_char_gap_count : s_char_gap_count)
++#define PB_WORD_GAP (s_pb_own_speed ? s_pb_word_gap_count : s_word_gap_count)
++#else
++#define PB_DIT      s_dit_count
++#define PB_DAH      s_dah_count
++#define PB_GAP      s_gap_count
++#define PB_CHAR_GAP s_char_gap_count
++#define PB_WORD_GAP s_word_gap_count
++#endif
++
+ // Reconfigure requested (apply at idle or after gap)
+ static volatile bool s_cfg_dirty = true;
+ 
+@@ -286,6 +305,9 @@ void CW_StartMacroPlayback(uint8_t macroIndex, bool repeat)
+     // Do nothing if recording or playback already in progress
+     if (gCW_Recording || gCW_PlaybackActive) return;
+ 
++#ifdef ENABLE_HFNODE
++    s_pb_own_speed = false;
++#endif
+     // Load the macro into a local buffer (decoded with spaces)
+     memset(s_playback_buf, 0, sizeof(s_playback_buf));
+     CW_LoadMacro(macroIndex, s_playback_buf, sizeof(s_playback_buf));
+@@ -316,9 +338,48 @@ void CW_StartMacroPlayback(uint8_t macroIndex, bool repeat)
+ #endif
+ }
+ 
++#ifdef ENABLE_HFNODE
++bool CW_StartTextPlayback(const char *text, uint8_t wpm)
++{
++    const size_t len = strlen(text);
++    if (gCW_Recording || gCW_PlaybackActive || len == 0 || len >= sizeof(s_playback_buf)
++        || wpm == 0)
++        return false;
++
++    const uint32_t dit = TICKS_PER_MINUTE / ((uint32_t)wpm * DITS_PER_WORD);
++    s_pb_dit_count = dit;
++    s_pb_dah_count = 3U * dit;
++    s_pb_gap_count = dit;
++    s_pb_char_gap_count = 3U * dit;
++    s_pb_word_gap_count = 7U * dit;
++    s_pb_own_speed = true;
++
++    memset(s_playback_buf, 0, sizeof(s_playback_buf));
++    memcpy(s_playback_buf, text, len);
++    s_playback_buf_len = (uint16_t)len;
++    s_playback_pos = 0;
++    s_play_elem_index = 0;
++    s_play_char_len = 0;
++    s_play_char_pattern = 0;
++    gCW_PlaybackRepeat = false;
++    gCW_MessageRepeatCountdown_500ms = 0;
++
++    CW_ClearTxDisplay();
++    s_play_space_pending = false;
++    // Start on the first character at once: the gap before it has already passed.
++    s_pb_state = PB_STATE_INTER_CHAR_GAP;
++    s_elem_start_count = millis() - s_pb_char_gap_count;
++    gCW_PlaybackActive = true;
++    return true;
++}
++#endif
++
+ // Stop playback immediately (user interrupted)
+ void CW_StopPlayback(void)
+ {
++#ifdef ENABLE_HFNODE
++    s_pb_own_speed = false;
++#endif
+     gCW_PlaybackActive = false;
+     gCW_PlaybackRepeat = false;       // Cancel any pending repeat
+     gCW_MessageRepeatCountdown_500ms = 0;
+@@ -344,7 +405,7 @@ CW_Action_t CW_PlaybackHandleState(void)
+ 
+     switch (s_pb_state) {
+     case PB_STATE_ACTIVE_ELEMENT: {
+-        const uint32_t target = s_active_is_dit ? s_dit_count : s_dah_count;
++        const uint32_t target = s_active_is_dit ? PB_DIT : PB_DAH;
+         const uint32_t elapsed = millis_since(s_elem_start_count);
+         if (elapsed < target) {
+             return CW_ACTION_CARRIER_HOLD_ON;
+@@ -359,7 +420,7 @@ CW_Action_t CW_PlaybackHandleState(void)
+ 
+     case PB_STATE_INTER_ELEMENT_GAP: {
+         const uint32_t elapsed = millis_since(s_elem_start_count);
+-        if (elapsed >= s_gap_count) {
++        if (elapsed >= PB_GAP) {
+             // Advance to next element in current char
+             s_play_elem_index++;
+             if (s_play_elem_index < s_play_char_len) {
+@@ -384,7 +445,7 @@ CW_Action_t CW_PlaybackHandleState(void)
+ 
+     case PB_STATE_INTER_CHAR_GAP: {
+         const uint32_t elapsed = millis_since(s_elem_start_count);
+-        if (elapsed < s_char_gap_count) {
++        if (elapsed < PB_CHAR_GAP) {
+             return CW_ACTION_NONE;
+         }
+         // Move to next character (if any)
+@@ -436,7 +497,7 @@ CW_Action_t CW_PlaybackHandleState(void)
+ 
+     case PB_STATE_INTER_WORD_GAP: {
+         const uint32_t elapsed = millis_since(s_elem_start_count);
+-        if (elapsed >= s_word_gap_count) {
++        if (elapsed >= PB_WORD_GAP) {
+             // Word gap done - advance to char-gap state with the same origin
+             // preserved. elapsed (>=7) already exceeds s_char_gap_count (3), so
+             // the next char is read immediately with no extra wait.
+diff --git a/App/app/cwkeyer.h b/App/app/cwkeyer.h
+index 262f9ad..911916b 100644
+--- a/App/app/cwkeyer.h
++++ b/App/app/cwkeyer.h
+@@ -56,6 +56,12 @@ bool CW_CheckKeyerInputs(uint8_t new_mode);
+ // If repeat is true, playback will restart after CW_MESSAGE_REPEAT_DELAY expires.
+ void CW_StartMacroPlayback(uint8_t macroIndex, bool repeat);
+ 
++#ifdef ENABLE_HFNODE
++// Start playing `text` once at `wpm`, whatever the keyer's speed. False if a
++// recording or playback is in progress, or the text does not fit.
++bool CW_StartTextPlayback(const char *text, uint8_t wpm);
++#endif
++
+ // Stop playback and cancel any pending repeat
+ void CW_StopPlayback(void);
+ 
+diff --git a/App/app/cwmacro.c b/App/app/cwmacro.c
+index c0ad19e..4a6fb0c 100644
+--- a/App/app/cwmacro.c
++++ b/App/app/cwmacro.c
+@@ -87,7 +87,14 @@ static const MorseCode_t MORSE_TABLE[] = {
+ 	{'-', 6, 0b100001},   // -....-
+ 	{'+', 5, 0b01010},   // .-.-. AR prosign
+ 	{'(', 5, 0b01101},   // -.--.  KN prosign
+-	{'&', 5, 0b00010}    // .-...  AS prosign
++	{'&', 5, 0b00010},   // .-...  AS prosign
++#ifdef ENABLE_HFNODE
++	{'\'', 6, 0b011110}, // .----.
++	{')', 6, 0b101101},  // -.--.-
++	{':', 6, 0b000111},  // ---...
++	{'"', 6, 0b010010},  // .-..-.
++	{'@', 6, 0b010110},  // .--.-.
++#endif
+ };
+ #define MORSE_TABLE_SIZE (sizeof(MORSE_TABLE) / sizeof(MORSE_TABLE[0]))
+ 
+diff --git a/App/main.c b/App/main.c
+index 9d5e401..867f227 100644
+--- a/App/main.c
++++ b/App/main.c
+@@ -61,6 +61,9 @@
+ #endif
+ #ifdef ENABLE_USB
+ #include "driver/vcp.h"
++#ifdef ENABLE_HFNODE
++    #include "app/hfnode.h"
++#endif
+ #endif
+ 
+ #if defined(ENABLE_CW_MODULATOR) || defined(ENABLE_LPTIM)
+@@ -363,9 +366,17 @@ void Main(void)
+         }
+     #endif
+         
++#ifdef ENABLE_HFNODE
++    HFNODE_Init();
++#endif
++
+     while (true) {
+         APP_Update();
+ 
++#ifdef ENABLE_HFNODE
++        HFNODE_Poll();
++#endif
++
+ #ifdef ENABLE_CW_MODULATOR
+         static uint32_t s_last_millis = 0;
+         const uint32_t current_millis = millis();
+diff --git a/App/scheduler.c b/App/scheduler.c
+index 96666d8..48bc039 100644
+--- a/App/scheduler.c
++++ b/App/scheduler.c
+@@ -28,6 +28,9 @@
+ 
+ #include "driver/backlight.h"
+ #include "driver/gpio.h"
++#ifdef ENABLE_HFNODE
++    #include "app/hfnode.h"
++#endif
+ 
+ #define DECREMENT(cnt) \
+     do {               \
+@@ -51,6 +54,10 @@ void SysTick_Handler(void)
+     
+     gNextTimeslice = true;
+ 
++#ifdef ENABLE_HFNODE
++    HFNODE_WatchdogTick();
++#endif
++
+     if ((gGlobalSysTickCounter % 50) == 0) {
+         gNextTimeslice_500ms = true;
+ 

@@ -100,7 +100,7 @@ fn firmware_without_limits_of_its_own_is_refused() {
     fw.set_silent(true);
     let e = open(&fw, settings()).err().unwrap();
     assert!(
-        format!("{e:#}").contains("no CW firmware answering"),
+        format!("{e:#}").contains("no hfnode CW firmware answering"),
         "{e:#}"
     );
     let fw = firmware(SCALE);
@@ -223,18 +223,82 @@ fn what_a_handheld_cannot_do_is_refused() {
 }
 
 #[test]
-fn frequency_power_and_mode_are_set_and_read_back() {
+fn settings_are_read_back_and_never_set() {
     let (mut h, fw) = ready();
-    h.set_frequency(144_070_000).unwrap();
-    assert_eq!(fw.frequencies(), (144_070_000, 144_070_000));
-    assert_eq!(h.frequency().unwrap(), 144_070_000);
+    h.set_frequency(FREQ).unwrap();
+    assert_eq!(h.frequency().unwrap(), FREQ);
     assert!(!h.split_or_delta_tx().unwrap());
-    assert!(h.set_frequency(146_000).is_err(), "refused by the firmware");
+    let e = h.set_frequency(144_070_000).unwrap_err().to_string();
+    assert!(e.contains("set it to 144070000 Hz simplex"), "{e}");
+    assert_eq!(fw.frequencies(), (FREQ, FREQ), "not changed");
+    // `low` is any of the radio's low levels.
     h.set_rf_power_watts(40).unwrap();
-    assert_eq!(fw.power(), "LOW", "the configured level, not the watts");
+    fw.set_power("LOW5");
+    h.set_rf_power_watts(40).unwrap();
+    fw.set_power("HIGH");
+    let e = h.set_rf_power_watts(40).unwrap_err().to_string();
+    assert!(e.contains("reads HIGH"), "{e}");
+    fw.set_modes("CW", "FM");
+    let e = h.set_mode_cw().unwrap_err().to_string();
+    assert!(e.contains("CW transmit, FM receive"), "{e}");
+    fw.set_modes("CW", "CW");
+    h.set_mode_cw().unwrap();
+    h.set_break_in(true).unwrap();
+    fw.set_break_in(false);
+    assert!(h.set_break_in(true).is_err());
     fw.set_tx_hz(144_670_000);
     assert!(h.split_or_delta_tx().unwrap());
     assert_eq!(h.transmit_frequency().unwrap(), 144_670_000);
+    // Only queries went out.
+    let sent: Vec<String> = fw.received().into_iter().map(|r| r.1).collect();
+    assert!(
+        sent.iter().all(
+            |b| ["HELLO", "STOP", "STATUS", "FREQ", "MODE", "POWER", "BREAKIN"]
+                .contains(&b.as_str())
+        ),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn a_refused_cw_is_explained() {
+    let (mut h, fw) = ready();
+    fw.set_refuse_tx(true);
+    let e = h.send_cw("TEST").unwrap_err().to_string();
+    assert!(e.contains("REFUSED (the radio would not transmit"), "{e}");
+    assert!(fw.runs().is_empty());
+    assert!(!lock(&h.shared.state).keyed);
+    fw.set_refuse_tx(false);
+    h.send_cw("TEST").unwrap();
+}
+
+#[test]
+fn the_hang_test_is_ended_by_the_watchdog() {
+    // Real-time Morse, so that the text outlasts the watchdog.
+    let mut set = settings();
+    set.time_scale = 1.0;
+    let (mut h, fw) = ready_with(set.clone());
+    fw.set_watchdog(Some(Duration::from_millis(100)));
+    assert!(h.hang_test("E").is_err(), "too short to tell");
+    assert!(fw.runs().is_empty());
+    h.hang_test(LONG).unwrap();
+    assert!(fw.hung() && fw.transmitting());
+    drop(h);
+    let sent: Vec<String> = fw.received().into_iter().map(|r| r.1).collect();
+    assert_eq!(sent.last().map(String::as_str), Some("TEST HANG"));
+    assert!(fw.wait_receive(Duration::from_secs(1)));
+    assert_eq!(off(&fw, 0).1, Off::Watchdog);
+    // Opened again: found on receive.
+    let mut h = open(&fw, set.clone()).unwrap();
+    assert!(!h.is_transmitting().unwrap());
+
+    // A firmware without the hang test, or nothing keyed: refused, and stopped.
+    fw.set_endless(true);
+    h.send_cw("TEST").unwrap();
+    h.stop_cw().unwrap();
+    fw.set_refuse_tx(true);
+    assert!(h.hang_test(LONG).is_err());
+    assert!(!fw.hung() && !fw.transmitting());
 }
 
 #[test]
@@ -358,9 +422,6 @@ fn tx(segments: &[&str]) -> Transmission {
 #[test]
 fn the_station_keys_a_handheld_without_tuning_or_reading_meters() {
     let (mut st, fw) = station_with(settings());
-    assert_eq!(fw.frequencies(), (FREQ, FREQ));
-    assert!(fw.mode_cw());
-    assert_eq!(fw.power(), "LOW");
     // A window start tunes nothing and keys nothing, not even an ID.
     st.start_window().unwrap();
     st.open_window().unwrap();
@@ -423,17 +484,30 @@ fn firmware_that_will_not_stop_inhibits_transmitting() {
 }
 
 #[test]
-fn a_transmit_frequency_off_the_set_one_is_refused() {
+fn a_radio_set_otherwise_is_not_keyed() {
     let (mut st, fw) = station_with(settings());
-    // Set apart by hand: the node puts it back.
+    // A repeater offset, or the wrong frequency: refused, and left as it is.
     fw.set_tx_hz(FREQ + 600_000);
-    st.check().unwrap();
-    assert_eq!(fw.frequencies(), (FREQ, FREQ));
-    // Kept apart by the radio, as a repeater offset: refused.
-    fw.set_tx_offset(600_000);
     assert!(st.check().is_err());
     assert!(st.transmit(&tx(&["TEST"])).is_err());
+    assert_eq!(fw.frequencies(), (FREQ, FREQ + 600_000));
+    fw.set_frequencies(FREQ + 10_000, FREQ + 10_000);
+    assert!(st.transmit(&tx(&["TEST"])).is_err());
+    fw.set_frequencies(FREQ, FREQ);
+    // Not in CW, break-in off, the wrong power: the same.
+    fw.set_modes("FM", "FM");
+    assert!(st.transmit(&tx(&["TEST"])).is_err());
+    fw.set_modes("CW", "CW");
+    fw.set_break_in(false);
+    assert!(st.transmit(&tx(&["TEST"])).is_err());
+    fw.set_break_in(true);
+    fw.set_power("HIGH");
+    assert!(st.transmit(&tx(&["TEST"])).is_err());
     assert!(fw.runs().is_empty());
+    assert!(!st.tx_inhibited());
+    fw.set_power("LOW2");
+    st.transmit(&tx(&["TEST"])).unwrap();
+    assert_eq!(fw.runs().len(), 1);
 }
 
 #[test]
@@ -550,6 +624,8 @@ fn ids_stay_on_time_while_the_duty_cycle_holds_a_long_transmission() {
 fn stages_gate_keying_and_running() {
     assert!(check_stage(Stage::None, Action::Key).is_err());
     assert!(check_stage(Stage::Listen, Action::Key).is_ok());
+    assert!(check_stage(Stage::Listen, Action::Hang).is_err());
+    assert!(check_stage(Stage::Keying, Action::Hang).is_ok());
     assert!(check_stage(Stage::Keying, Action::Run).is_err());
     assert!(check_stage(Stage::Done, Action::Run).is_ok());
 }

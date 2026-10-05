@@ -1,11 +1,15 @@
 //! The serial command set between `hfnode` and a handheld's CW firmware, version 1
-//! (docs/handheld-protocol.md has the firmware's side of it).
+//! (docs/handheld-protocol.md has the firmware's side of it, and
+//! firmware/uv-k1/app/hfnode.c is that firmware).
 //!
 //! Every line is printable ASCII ending in `\n`: `<id> <body>*<cs>`, where `<id>` is
 //! two hex digits the reply repeats, so a late reply to an earlier command is never
 //! taken for the answer to this one, and `<cs>` is two hex digits, the XOR of every
 //! byte before the `*`. A line whose checksum does not match is ignored by both
 //! sides. Replies are `OK <command> [fields]` or `ERR <command> <code>`.
+//!
+//! Nothing in it sets the radio up: frequency, mode, power and break-in are read,
+//! and set by hand at the radio. Only `CW` keys it.
 
 use std::fmt;
 use std::time::Duration;
@@ -51,20 +55,33 @@ fn parse_hex(s: &str) -> Option<u8> {
     u8::from_str_radix(s, 16).ok()
 }
 
-/// Transmit power, from the handheld's own levels.
+/// Transmit power, from the handheld's own levels: what `[handheld] power` says
+/// the radio must be set to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Power {
+    /// Any of the radio's low levels, `LOW1` to `LOW5`.
     #[default]
     Low,
     Mid,
     High,
 }
 
+impl Power {
+    /// Whether the level the firmware reads back (`OK POWER <level>`) is this one.
+    pub fn matches(self, level: &str) -> bool {
+        match self {
+            Self::Low => matches!(level, "LOW1" | "LOW2" | "LOW3" | "LOW4" | "LOW5"),
+            Self::Mid => level == "MID",
+            Self::High => level == "HIGH",
+        }
+    }
+}
+
 impl fmt::Display for Power {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Low => "LOW",
+            Self::Low => "LOW1-LOW5",
             Self::Mid => "MID",
             Self::High => "HIGH",
         })
@@ -80,18 +97,19 @@ pub enum Command {
     Status,
     /// Read the receive and transmit frequencies.
     Freq,
-    /// Receive and transmit on `hz`, simplex.
-    SetFreq(u64),
-    /// Receive CW (a beat note, for the decoder) and send CW as a keyed carrier.
-    ModeCw,
-    Power(Power),
-    /// Key `text` at `wpm` with the firmware's keyer.
-    Cw {
-        wpm: u32,
-        text: String,
-    },
-    /// Stop keying at once; the reply comes once the transmitter is off.
+    /// Read the transmit and receive modes.
+    Mode,
+    /// Read the transmit power level.
+    Power,
+    /// Read whether break-in is on: without it the keyer only sounds the sidetone.
+    Breakin,
+    /// Key `text` at `wpm` with the firmware's keyer. Answered once keying has begun.
+    Cw { wpm: u32, text: String },
+    /// Stop keying at once.
     Stop,
+    /// Bring-up only: stop the firmware's main loop during a run, so that its
+    /// watchdog must reset the radio.
+    TestHang,
 }
 
 impl Command {
@@ -100,30 +118,52 @@ impl Command {
         match self {
             Self::Hello => "HELLO",
             Self::Status => "STATUS",
-            Self::Freq | Self::SetFreq(_) => "FREQ",
-            Self::ModeCw => "MODE",
-            Self::Power(_) => "POWER",
+            Self::Freq => "FREQ",
+            Self::Mode => "MODE",
+            Self::Power => "POWER",
+            Self::Breakin => "BREAKIN",
             Self::Cw { .. } => "CW",
             Self::Stop => "STOP",
+            Self::TestHang => "TEST",
         }
     }
 
     pub fn body(&self) -> String {
         match self {
-            Self::SetFreq(hz) => format!("FREQ {hz}"),
-            Self::ModeCw => "MODE CW".into(),
-            Self::Power(p) => format!("POWER {p}"),
             Self::Cw { wpm, text } => format!("CW {wpm} {text}"),
+            Self::TestHang => "TEST HANG".into(),
             _ => self.name().into(),
         }
     }
 
     /// Whether sending it twice does no more than sending it once, so that it may
     /// be sent again when its reply is lost. Not so for `CW`, which would key the
-    /// text twice.
+    /// text twice, nor for `TEST HANG`.
     pub fn repeatable(&self) -> bool {
-        !matches!(self, Self::Cw { .. })
+        !matches!(self, Self::Cw { .. } | Self::TestHang)
     }
+}
+
+/// What an `ERR` code means, for the operator.
+pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
+    Some(match (cmd, code) {
+        (Command::Cw { .. }, "MODE") => "the radio is not in CW: set CW on it",
+        (Command::Cw { .. }, "BKIN") => {
+            "break-in is off on the radio, so its keyer would only sound the sidetone: \
+             turn it on in the CW menu"
+        }
+        (Command::Cw { .. }, "REFUSED") => {
+            "the radio would not transmit: the keypad's transmit lock, a frequency it \
+             does not transmit on, a low battery, or the key or paddle in use"
+        }
+        (Command::Cw { .. }, "TX") => {
+            "the radio is busy: transmitting, or recording or playing a CW memory"
+        }
+        (Command::Cw { .. }, "STOP") => "stopped before it began",
+        (Command::TestHang, "RUN") => "nothing was being sent",
+        (_, "UNKNOWN") => "the firmware does not have this command: is it the hfnode build?",
+        _ => return None,
+    })
 }
 
 /// A reply: the fields after `OK <command>`, or the code after `ERR <command>`.
@@ -221,6 +261,32 @@ pub fn parse_freq(f: &[String]) -> Result<(u64, u64), String> {
     Ok((hz(rx)?, hz(tx)?))
 }
 
+/// `OK MODE <transmit mode> <receive mode>`: `CW`, `FM`, `AM`, `USB`, ... or
+/// `OTHER`.
+pub fn parse_mode(f: &[String]) -> Result<(String, String), String> {
+    match f {
+        [tx, rx] => Ok((tx.clone(), rx.clone())),
+        _ => Err(format!("MODE reply {f:?}: expected two fields")),
+    }
+}
+
+/// `OK POWER <level>`: `LOW1` to `LOW5`, `MID`, `HIGH`, `USER` or `OTHER`.
+pub fn parse_power(f: &[String]) -> Result<String, String> {
+    match f {
+        [level] => Ok(level.clone()),
+        _ => Err(format!("POWER reply {f:?}: expected one field")),
+    }
+}
+
+/// `OK BREAKIN <0 or 1>`.
+pub fn parse_breakin(f: &[String]) -> Result<bool, String> {
+    match f {
+        [on] if on == "1" => Ok(true),
+        [off] if off == "0" => Ok(false),
+        _ => Err(format!("BREAKIN reply {f:?}: expected 0 or 1")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +333,7 @@ mod tests {
             .lines()
             .filter_map(|l| l.strip_prefix("node: ").or(l.strip_prefix("fw:   ")))
             .collect();
-        assert_eq!(lines.len(), 20);
+        assert_eq!(lines.len(), 22);
         for l in lines {
             let (id, body) = decode(l).unwrap_or_else(|e| panic!("{l}: {e}"));
             assert_eq!(encode(id, body), l);
@@ -327,15 +393,127 @@ mod tests {
     }
 
     #[test]
-    fn only_cw_is_not_repeated() {
+    fn reads_mode_power_and_break_in() {
+        assert_eq!(parse_mode(&words("CW FM")), Ok(("CW".into(), "FM".into())));
+        assert!(parse_mode(&words("CW")).is_err());
+        assert_eq!(parse_power(&words("LOW3")), Ok("LOW3".into()));
+        assert!(parse_power(&words("LOW 3")).is_err());
+        assert_eq!(parse_breakin(&words("1")), Ok(true));
+        assert_eq!(parse_breakin(&words("0")), Ok(false));
+        assert!(parse_breakin(&words("2")).is_err());
+        assert!(Power::Low.matches("LOW1") && Power::Low.matches("LOW5"));
+        assert!(!Power::Low.matches("LOW") && !Power::Low.matches("MID"));
+        assert!(Power::Mid.matches("MID") && !Power::Mid.matches("HIGH"));
+        assert!(Power::High.matches("HIGH") && !Power::High.matches("USER"));
+    }
+
+    #[test]
+    fn only_cw_and_the_hang_test_are_not_repeated() {
         assert!(Command::Stop.repeatable());
-        assert!(Command::SetFreq(1).repeatable());
+        assert!(Command::Freq.repeatable());
+        assert!(!Command::TestHang.repeatable());
         assert!(!Command::Cw {
             wpm: 20,
             text: "E".into()
         }
         .repeatable());
-        assert_eq!(Command::Power(Power::Low).body(), "POWER LOW");
-        assert_eq!(Command::SetFreq(144_060_000).body(), "FREQ 144060000");
+        assert_eq!(Command::TestHang.body(), "TEST HANG");
+        assert_eq!(
+            parse_reply(&Command::TestHang, "OK TEST HANG"),
+            Ok(Reply::Ok(words("HANG")))
+        );
+        assert_eq!(Command::Breakin.body(), "BREAKIN");
+    }
+
+    /// The firmware in firmware/uv-k1, read as text: its limits and character set
+    /// must be the node's.
+    mod firmware {
+        use super::super::*;
+
+        const HFNODE_C: &str = include_str!("../../../../firmware/uv-k1/app/hfnode.c");
+        const LINE_C: &str = include_str!("../../../../firmware/uv-k1/app/hfnode_line.c");
+        const LINE_H: &str = include_str!("../../../../firmware/uv-k1/app/hfnode_line.h");
+        const PATCH: &str = include_str!("../../../../firmware/uv-k1/nr7y-hfnode.patch");
+
+        /// The value of `#define <name> <value>` in `src`.
+        fn define(src: &str, name: &str) -> u64 {
+            src.lines()
+                .find_map(|l| {
+                    let mut w = l.split_whitespace();
+                    (w.next() == Some("#define") && w.next() == Some(name))
+                        .then(|| w.next().unwrap().parse().unwrap())
+                })
+                .unwrap_or_else(|| panic!("no #define {name}"))
+        }
+
+        #[test]
+        fn its_limits_are_the_ones_the_node_accepts() {
+            assert_eq!(define(HFNODE_C, "HF_VERSION"), u64::from(VERSION));
+            let tx_limit = Duration::from_secs(define(HFNODE_C, "HF_TX_LIMIT_S"));
+            assert!(tx_limit <= crate::handheld::MAX_FIRMWARE_TX_LIMIT);
+            let link = Duration::from_millis(define(HFNODE_C, "HF_LINK_TIMEOUT_MS"));
+            assert!(
+                (crate::handheld::MIN_LINK_TIMEOUT..=crate::handheld::MAX_LINK_TIMEOUT)
+                    .contains(&link)
+            );
+            assert_eq!(define(HFNODE_C, "HF_TEXT_MAX"), civ::MAX_CW_CHARS as u64);
+            assert_eq!(define(HFNODE_C, "HF_WPM_MIN"), 5);
+            assert_eq!(define(HFNODE_C, "HF_WPM_MAX"), 50);
+            assert_eq!(define(LINE_H, "HF_LINE_MAX"), MAX_LINE as u64);
+            // The CW reply comes once keying has begun, well within the node's wait.
+            let start = Duration::from_millis(define(HFNODE_C, "HF_KEY_START_MS"));
+            assert!(start + Duration::from_millis(100) < crate::handheld::REPLY_TIMEOUT);
+        }
+
+        #[test]
+        fn it_keys_exactly_the_characters_the_node_sends() {
+            let (_, rest) = LINE_C.split_once("strchr(\"").expect("the character list");
+            let (set, _) = rest.split_once("\", c)").expect("its end");
+            let set = set.replace("\\\"", "\"");
+            for b in 0x20u8..0x7F {
+                let c = b as char;
+                let node = !c.is_ascii_lowercase() && cw::is_sendable(c);
+                let fw = c.is_ascii_uppercase() || c.is_ascii_digit() || set.contains(c);
+                assert_eq!(node, fw, "{c:?}");
+            }
+        }
+
+        #[test]
+        fn the_morse_it_adds_is_the_nodes() {
+            // `{'c', length, pattern}`: the first element in the lowest bit, 1 a dah.
+            // Only the entries the patch adds, inside its `#ifdef ENABLE_HFNODE`.
+            let mut inside = false;
+            let added_lines = PATCH.lines().filter(|l| {
+                match *l {
+                    "+#ifdef ENABLE_HFNODE" => inside = true,
+                    "+#endif" => inside = false,
+                    _ => {}
+                }
+                inside
+            });
+            let mut added = 0;
+            for l in added_lines.filter_map(|l| l.strip_prefix("+\t{'")) {
+                let (c, rest) = if let Some(r) = l.strip_prefix("\\''") {
+                    ('\'', r)
+                } else {
+                    let mut it = l.chars();
+                    let c = it.next().unwrap();
+                    (c, it.as_str().strip_prefix('\'').unwrap())
+                };
+                let fields: Vec<&str> = rest
+                    .trim_start_matches(", ")
+                    .split(['}', ','])
+                    .map(str::trim)
+                    .collect();
+                let len: usize = fields[0].parse().unwrap();
+                let bits = u32::from_str_radix(fields[1].trim_start_matches("0b"), 2).unwrap();
+                let pattern: String = (0..len)
+                    .map(|i| if bits >> i & 1 == 1 { '-' } else { '.' })
+                    .collect();
+                assert_eq!(cw::encode_char(c), Some(pattern.as_str()), "{c:?}");
+                added += 1;
+            }
+            assert_eq!(added, 5);
+        }
     }
 }

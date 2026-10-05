@@ -1,6 +1,7 @@
 //! A handheld running the CW firmware, simulated behind a [`Transport`]: it keeps
-//! the firmware's side of docs/handheld-protocol.md, including its own limits, and
-//! can be made to misbehave. For tests; nothing here touches a radio.
+//! the firmware's side of docs/handheld-protocol.md (firmware/uv-k1/app/hfnode.c),
+//! including its own limits and its watchdog, and can be made to misbehave. For
+//! tests; nothing here touches a radio.
 
 use super::link::Transport;
 use super::proto::{self, Hello};
@@ -20,6 +21,8 @@ pub enum Off {
     Link,
     /// The firmware's own transmit limit.
     Limit,
+    /// The watchdog reset the radio, its main loop having stopped.
+    Watchdog,
 }
 
 /// One keying run, as the firmware made it.
@@ -42,12 +45,13 @@ struct Key {
 struct Fw {
     hello: Hello,
     time_scale: f32,
+    /// As set at the radio: the firmware only reads them.
     rx_hz: u64,
     tx_hz: u64,
-    /// Added to the transmit frequency whenever the frequency is set.
-    tx_offset: i64,
-    mode_cw: bool,
+    tx_mode: String,
+    rx_mode: String,
     power: String,
+    break_in: bool,
     key: Option<Key>,
     runs: Vec<Run>,
     last_valid: Instant,
@@ -56,9 +60,15 @@ struct Fw {
     /// Every valid line received, as (when, body).
     received: Vec<(Instant, String)>,
     out: VecDeque<String>,
+    /// The main loop stopped (`TEST HANG`) until the watchdog resets the radio
+    /// then; `None` inside if the watchdog never does.
+    hung: Option<Option<Instant>>,
+    /// From the main loop stopping to the reset.
+    watchdog: Option<Duration>,
     deaf: bool,
     silent: bool,
     lose_cw_reply: bool,
+    refuse_tx: bool,
     ignore_stop: bool,
     endless: bool,
     no_link_watchdog: bool,
@@ -68,6 +78,20 @@ struct Fw {
 impl Fw {
     /// End keying if it should have ended by `now`, at the moment it should have.
     fn update(&mut self, now: Instant) {
+        if let Some(hung) = self.hung {
+            // Nothing runs but the watchdog: the carrier stays as it was.
+            match hung {
+                Some(reset) if reset <= now => {
+                    if let Some(k) = self.key.take() {
+                        self.runs[k.run].off = Some((reset, Off::Watchdog));
+                    }
+                    self.hung = None;
+                    self.out.clear();
+                    self.last_valid = reset;
+                }
+                _ => return,
+            }
+        }
         let Some(k) = &self.key else { return };
         let on = self.runs[k.run].on;
         let mut ends = vec![(on + self.hello.tx_limit, Off::Limit)];
@@ -114,41 +138,30 @@ impl Fw {
 
     /// The reply to `body`, received at `now`.
     fn handle(&mut self, now: Instant, body: &str) -> Option<String> {
-        let (name, args) = body.split_once(' ').unwrap_or((body, ""));
+        let (name, args) = match body.split_once(' ') {
+            Some((n, a)) => (n, Some(a)),
+            None => (body, None),
+        };
         let tx = self.key.is_some();
         Some(match (name, args) {
-            ("HELLO", "") => format!(
+            ("HELLO", None) => format!(
                 "OK HELLO {} {} {} {}",
                 self.hello.version,
                 self.hello.tx_limit.as_secs(),
                 self.hello.link_timeout.as_millis(),
                 self.hello.name
             ),
-            ("STATUS", "") => format!("OK STATUS {} {}", tx as u8, self.quiet_ms(now)),
-            ("FREQ", "") => format!("OK FREQ {} {}", self.rx_hz, self.tx_hz),
-            ("FREQ", hz) => match hz.parse::<u64>() {
-                _ if tx => "ERR FREQ TX".into(),
-                Ok(hz) if super::band_of(hz).is_some() => {
-                    (self.rx_hz, self.tx_hz) = (hz, hz.saturating_add_signed(self.tx_offset));
-                    format!("OK FREQ {} {}", self.rx_hz, self.tx_hz)
-                }
-                _ => "ERR FREQ RANGE".into(),
-            },
-            ("MODE", "CW") => {
-                self.mode_cw = true;
-                "OK MODE CW".into()
-            }
-            ("MODE", _) => "ERR MODE MODE".into(),
-            ("POWER", p @ ("LOW" | "MID" | "HIGH")) => {
-                self.power = p.to_string();
-                format!("OK POWER {p}")
-            }
-            ("CW", args) => {
-                let (wpm, text) = args.split_once(' ').unwrap_or((args, ""));
+            ("STATUS", None) => format!("OK STATUS {} {}", tx as u8, self.quiet_ms(now)),
+            ("FREQ", None) => format!("OK FREQ {} {}", self.rx_hz, self.tx_hz),
+            ("MODE", None) => format!("OK MODE {} {}", self.tx_mode, self.rx_mode),
+            ("POWER", None) => format!("OK POWER {}", self.power),
+            ("BREAKIN", None) => format!("OK BREAKIN {}", self.break_in as u8),
+            ("CW", Some(args)) => {
+                let Some((wpm, text)) = args.split_once(' ') else {
+                    return Some("ERR CW LEN".into());
+                };
                 let wpm = wpm.parse::<u32>().unwrap_or(0);
-                if tx {
-                    "ERR CW TX".into()
-                } else if !(5..=50).contains(&wpm) {
+                if !(5..=50).contains(&wpm) {
                     "ERR CW WPM".into()
                 } else if text.is_empty() || text.chars().count() > civ::MAX_CW_CHARS {
                     "ERR CW LEN".into()
@@ -157,8 +170,14 @@ impl Fw {
                     .all(|c| !c.is_ascii_lowercase() && cw::is_sendable(c))
                 {
                     "ERR CW CHAR".into()
-                } else if !self.mode_cw {
+                } else if self.tx_mode != "CW" {
                     "ERR CW MODE".into()
+                } else if !self.break_in {
+                    "ERR CW BKIN".into()
+                } else if tx {
+                    "ERR CW TX".into()
+                } else if self.refuse_tx {
+                    "ERR CW REFUSED".into()
                 } else {
                     self.start(now, wpm, text);
                     if self.lose_cw_reply {
@@ -167,12 +186,19 @@ impl Fw {
                     "OK CW".into()
                 }
             }
-            ("STOP", "") => {
+            ("STOP", None) => {
                 if !self.ignore_stop {
                     self.stop(now, Off::Stop);
                 }
                 "OK STOP".into()
             }
+            ("TEST", Some("HANG")) => match &self.key {
+                Some(k) if k.end.is_some() => {
+                    self.hung = Some(self.watchdog.map(|w| now + w));
+                    "OK TEST HANG".into()
+                }
+                _ => "ERR TEST RUN".into(),
+            },
             (name, _) => format!("ERR {name} UNKNOWN"),
         })
     }
@@ -186,8 +212,10 @@ pub struct MockFirmware {
 }
 
 impl MockFirmware {
-    /// On 144.060 MHz, receive, with a 60 s transmit limit and a 2 s link timeout.
-    /// Morse goes `time_scale` times faster than at its speed.
+    /// Set up as the operator leaves it for the node: 144.060 MHz simplex, CW,
+    /// power LOW1, break-in on, on receive; a 60 s transmit limit, a 2 s link
+    /// timeout, and a watchdog that resets it 3 s after its main loop stops. Morse
+    /// goes `time_scale` times faster than at its speed.
     pub fn new(time_scale: f32) -> Self {
         Self {
             fw: Arc::new(Mutex::new(Fw {
@@ -200,18 +228,22 @@ impl MockFirmware {
                 time_scale,
                 rx_hz: 144_060_000,
                 tx_hz: 144_060_000,
-                tx_offset: 0,
-                mode_cw: false,
-                power: "HIGH".into(),
+                tx_mode: "CW".into(),
+                rx_mode: "CW".into(),
+                power: "LOW1".into(),
+                break_in: true,
                 key: None,
                 runs: Vec::new(),
                 last_valid: Instant::now(),
                 busy_until: None,
                 received: Vec::new(),
                 out: VecDeque::new(),
+                hung: None,
+                watchdog: Some(Duration::from_secs(3)),
                 deaf: false,
                 silent: false,
                 lose_cw_reply: false,
+                refuse_tx: false,
                 ignore_stop: false,
                 endless: false,
                 no_link_watchdog: false,
@@ -253,28 +285,50 @@ impl MockFirmware {
         (fw.rx_hz, fw.tx_hz)
     }
 
+    /// Set the frequencies at the radio.
+    pub fn set_frequencies(&self, rx_hz: u64, tx_hz: u64) {
+        let mut fw = self.lock();
+        (fw.rx_hz, fw.tx_hz) = (rx_hz, tx_hz);
+    }
+
     /// Set the transmit frequency apart from receive, as a repeater offset would.
     pub fn set_tx_hz(&self, hz: u64) {
         self.lock().tx_hz = hz;
     }
 
-    pub fn power(&self) -> String {
-        self.lock().power.clone()
+    /// Set the transmit and receive modes at the radio (`CW`, `FM`, ...).
+    pub fn set_modes(&self, tx: &str, rx: &str) {
+        let mut fw = self.lock();
+        (fw.tx_mode, fw.rx_mode) = (tx.into(), rx.into());
     }
 
-    pub fn mode_cw(&self) -> bool {
-        self.lock().mode_cw
+    /// Set the power level at the radio (`LOW1`, `MID`, ...).
+    pub fn set_power(&self, level: &str) {
+        self.lock().power = level.into();
+    }
+
+    pub fn set_break_in(&self, on: bool) {
+        self.lock().break_in = on;
+    }
+
+    /// Answer `CW` with `ERR CW REFUSED`: the radio would not transmit.
+    pub fn set_refuse_tx(&self, on: bool) {
+        self.lock().refuse_tx = on;
+    }
+
+    /// How long from `TEST HANG` to the watchdog's reset; `None`: no reset.
+    pub fn set_watchdog(&self, after: Option<Duration>) {
+        self.lock().watchdog = after;
+    }
+
+    /// Hung, its main loop stopped: until the watchdog resets it.
+    pub fn hung(&self) -> bool {
+        self.lock().hung.is_some()
     }
 
     /// Someone on the frequency for `d` from now.
     pub fn set_busy_for(&self, d: Duration) {
         self.lock().busy_until = Some(Instant::now() + d);
-    }
-
-    /// Keep transmit `offset` Hz from receive, as a repeater offset would, even
-    /// when the frequency is set.
-    pub fn set_tx_offset(&self, offset: i64) {
-        self.lock().tx_offset = offset;
     }
 
     /// Keyed without any command, until `STOP`: the radio's PTT held by hand.
@@ -337,7 +391,7 @@ impl Transport for MockFirmware {
     fn write_line(&mut self, line: &str) -> io::Result<()> {
         let mut fw = self.lock();
         let now = Instant::now();
-        if fw.deaf {
+        if fw.deaf || fw.hung.is_some() {
             return Ok(());
         }
         let Ok((id, body)) = proto::decode(line) else {
@@ -396,7 +450,7 @@ mod tests {
     #[test]
     fn keys_the_text_and_ends_by_itself() {
         let mut fw = MockFirmware::new(50.0);
-        assert_eq!(send(&mut fw, 1, "MODE CW").as_deref(), Some("OK MODE CW"));
+        assert_eq!(send(&mut fw, 1, "MODE").as_deref(), Some("OK MODE CW CW"));
         assert_eq!(send(&mut fw, 2, "CW 20 TEST").as_deref(), Some("OK CW"));
         assert!(fw.transmitting());
         assert_eq!(send(&mut fw, 3, "CW 20 TEST").as_deref(), Some("ERR CW TX"));
@@ -409,7 +463,6 @@ mod tests {
         let mut fw = MockFirmware::new(1.0);
         fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(50));
         // (Shorter than a node accepts, to keep the test quick.)
-        send(&mut fw, 1, "MODE CW");
         send(&mut fw, 2, "CW 5 PARIS PARIS");
         assert!(fw.wait_receive(Duration::from_millis(500)));
         assert_eq!(fw.runs()[0].off.unwrap().1, Off::Link);
@@ -422,13 +475,44 @@ mod tests {
     }
 
     #[test]
+    fn a_hang_is_ended_by_the_watchdog_alone() {
+        let mut fw = MockFirmware::new(1.0);
+        fw.set_watchdog(Some(Duration::from_millis(100)));
+        assert_eq!(
+            send(&mut fw, 1, "TEST HANG").as_deref(),
+            Some("ERR TEST RUN")
+        );
+        send(&mut fw, 2, "CW 5 PARIS PARIS");
+        assert_eq!(
+            send(&mut fw, 3, "TEST HANG").as_deref(),
+            Some("OK TEST HANG")
+        );
+        // Deaf and keyed until the reset.
+        assert_eq!(send(&mut fw, 4, "STOP"), None);
+        assert!(fw.hung() && fw.transmitting());
+        assert!(fw.wait_receive(Duration::from_millis(500)));
+        assert_eq!(fw.runs()[0].off.unwrap().1, Off::Watchdog);
+        assert_eq!(
+            send(&mut fw, 5, "STATUS").as_deref(),
+            Some("OK STATUS 0 60000")
+        );
+    }
+
+    #[test]
     fn refuses_what_the_protocol_does_not_allow() {
         let mut fw = MockFirmware::new(1.0);
+        fw.set_modes("FM", "FM");
         assert_eq!(
             send(&mut fw, 1, "CW 20 TEST").as_deref(),
             Some("ERR CW MODE")
         );
-        send(&mut fw, 2, "MODE CW");
+        fw.set_modes("CW", "CW");
+        fw.set_break_in(false);
+        assert_eq!(
+            send(&mut fw, 2, "CW 20 TEST").as_deref(),
+            Some("ERR CW BKIN")
+        );
+        fw.set_break_in(true);
         assert_eq!(
             send(&mut fw, 3, "CW 20 test").as_deref(),
             Some("ERR CW CHAR")
@@ -438,11 +522,18 @@ mod tests {
         assert_eq!(send(&mut fw, 5, &long).as_deref(), Some("ERR CW LEN"));
         assert_eq!(
             send(&mut fw, 6, "FREQ 146000").as_deref(),
-            Some("ERR FREQ RANGE")
+            Some("ERR FREQ UNKNOWN"),
+            "nothing is set from a line"
+        );
+        fw.set_refuse_tx(true);
+        assert_eq!(
+            send(&mut fw, 7, "CW 20 TEST").as_deref(),
+            Some("ERR CW REFUSED")
         );
         assert!(fw.runs().is_empty());
         // A damaged line is ignored entirely.
-        fw.write_line("07 CW 20 TEST*00").unwrap();
+        fw.set_refuse_tx(false);
+        fw.write_line("08 CW 20 TEST*00").unwrap();
         assert!(fw.read_line(Instant::now()).unwrap().is_none());
         assert!(fw.runs().is_empty());
     }

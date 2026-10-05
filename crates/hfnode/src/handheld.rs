@@ -1,28 +1,32 @@
 //! A handheld as the node's radio (`station.rig = "handheld"`), for trying the whole
-//! system out locally on 2 m before the IC-7300: a Quansheng UV-K1 or UV-K5 running
-//! a CW firmware that keys a carrier on commands over its serial link, the way the
-//! IC-7300's keyer takes CI-V commands. The command set is in [`proto`] and
+//! system out locally on 2 m before the IC-7300: a Quansheng UV-K1 or UV-K5 v3
+//! running the NR7Y CW firmware with hfnode's commands added (firmware/uv-k1), which
+//! keys a carrier on commands over the radio's USB-C port, the way the IC-7300's
+//! keyer takes CI-V commands. The command set is in [`proto`] and
 //! docs/handheld-protocol.md; [`mock`] simulates a radio running it.
 //!
 //! The station's safety layer ([`crate::station`]) drives it like the IC-7300: the
 //! software watchdog, keyer pieces of at most 30 characters with receive confirmed
-//! after each, the transmit inhibit, the storm stand-down, and the radio set up and
-//! checked (frequency, and transmit frequency equal to it) before every
-//! transmission. What a handheld does not have, and what covers it here:
+//! after each, the transmit inhibit, the storm stand-down, and the radio checked
+//! (frequency, transmit frequency equal to it, mode, power and break-in) before
+//! every transmission. The firmware sets nothing: those are set by hand at the
+//! radio, and the node refuses to transmit, saying what to change, when they read
+//! back otherwise. What a handheld does not have, and what covers it here:
 //!
 //! - **No SWR or power meter.** The firmware's own transmit state
-//!   ([`proto::Status`]) is read back instead, and a run read back as ended well
-//!   before its text could have gone out fails the transmission. Each keying run is
-//!   bounded four ways besides the station's watchdog: the node stops a run that goes
-//!   on past the end of its text (plus `run_slack`, and never past
-//!   `max_key_seconds` plus [`DEADMAN_MARGIN`]), and fails the transmission; while a
-//!   run lasts the node sends `STATUS` often enough to keep the firmware's link
-//!   timeout from expiring, and no longer, so that the link timeout ends the run if
-//!   the node dies or the cable is pulled; the firmware has a transmit limit of its
-//!   own of at most a minute; and the radio's own transmit time-out timer is the
-//!   last backstop (docs/handheld.md).
-//! - **No tuner**: a window start sets the radio up and checks it, and transmits
-//!   nothing.
+//!   ([`proto::Status`], which reads the radio chip's transmit bit) is read back
+//!   instead, and a run read back as ended well before its text could have gone out
+//!   fails the transmission. Each keying run is bounded besides the station's
+//!   watchdog: the node stops a run that goes on past the end of its text (plus
+//!   `run_slack`, and never past `max_key_seconds` plus [`DEADMAN_MARGIN`]), and
+//!   fails the transmission; while a run lasts the node sends `STATUS` often enough
+//!   to keep the firmware's link timeout from expiring, and no longer, so that the
+//!   link timeout ends the run if the node dies or the cable is pulled; the firmware
+//!   has a transmit limit of its own of at most a minute, checks that every stop
+//!   turned the transmitter off, and has a hardware watchdog that resets the radio
+//!   if it hangs during a run (firmware/uv-k1/README.md). The radio's own time-out
+//!   timer does not work in CW.
+//! - **No tuner**: a window start checks the radio and transmits nothing.
 //! - **A small transmitter**: at most `max_duty_percent` of any `duty_window_secs`
 //!   on the air; a long reply waits on receive between keying runs.
 //! - **A shared channel**: the node keys only once the squelch has been closed for
@@ -57,8 +61,13 @@ pub const MAX_FIRMWARE_TX_LIMIT: Duration = Duration::from_secs(60);
 /// run, short enough to end one soon after the node dies.
 pub const MIN_LINK_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MAX_LINK_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long the node waits for each reply from the firmware.
+/// How long the node waits for each reply from the firmware. A `CW` is answered
+/// once keying has begun, within 300 ms.
 pub const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
+/// From the firmware's main loop stopping during a run to its watchdog resetting
+/// the radio: a second before it stops feeding the watchdog, and the watchdog's own
+/// 2 s (2048 counts of a 32 kHz clock divided by 32; the clock is not precise).
+pub const WATCHDOG_RESET: Duration = Duration::from_secs(3);
 
 /// The US amateur bands a UV-K1 or UV-K5 covers, in Hz, where CW may be sent
 /// anywhere (47 CFR 97.305(a), from memory, not checked against the eCFR): 2 m,
@@ -99,9 +108,11 @@ pub enum Stage {
     /// `hfnode handheld key` and `linktest`, with the operator at the radio.
     Listen,
     /// Short transmissions were heard correctly on the other handheld and read back
-    /// as ended; the link test showed the firmware stopping on its own.
+    /// as ended; the link test showed the firmware stopping on its own. Allows
+    /// `hfnode handheld hangtest`.
     Keying,
-    /// The radio's own transmit time-out timer was checked. Allows `run`.
+    /// The hang test showed the firmware's watchdog ending a transmission. Allows
+    /// `run`.
     Done,
 }
 
@@ -120,6 +131,7 @@ impl fmt::Display for Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Key,
+    Hang,
     Run,
 }
 
@@ -127,6 +139,7 @@ pub enum Action {
 pub fn check_stage(stage: Stage, action: Action) -> Result<()> {
     let (needs, name) = match action {
         Action::Key => (Stage::Listen, "this keying command"),
+        Action::Hang => (Stage::Keying, "the hang test"),
         Action::Run => (Stage::Done, "`run`"),
     };
     if stage < needs {
@@ -426,6 +439,8 @@ pub struct Handheld {
     busy_looked: Option<Instant>,
     keeper: Option<JoinHandle<()>>,
     describe: String,
+    /// The hang test stopped the firmware: nothing more is sent to it.
+    hung: bool,
 }
 
 impl Handheld {
@@ -438,8 +453,8 @@ impl Handheld {
             .and_then(|f| Hello::parse(&f).map_err(anyhow::Error::msg))
             .with_context(|| {
                 format!(
-                    "no CW firmware answering on {} (is it flashed, the radio on, and the \
-                     cable on that port at handheld.baud?)",
+                    "no hfnode CW firmware answering on {} (is it flashed with \
+                     firmware/uv-k1, the radio on, and its USB-C port that one?)",
                     link.describe()
                 )
             })?;
@@ -485,6 +500,7 @@ impl Handheld {
             busy_looked: None,
             keeper: Some(keeper),
             describe,
+            hung: false,
         })
     }
 
@@ -584,8 +600,60 @@ impl Handheld {
         }
     }
 
+    /// The bring-up's hang test: key `text`, which must last well past
+    /// [`WATCHDOG_RESET`], then have the firmware stop its main loop, as a hang or a
+    /// crash would. Only its watchdog can end the transmission then: its own limits
+    /// and `STOP` all run in that loop. Returns once the hang has begun. The reset
+    /// drops the radio's USB port, so the handheld must then be opened again, and
+    /// found on receive; nothing more is sent to this one, not even `STOP` when it
+    /// is dropped.
+    pub fn hang_test(&mut self, text: &str) -> Result<()> {
+        let length = self.set.dot(self.wpm) * cw::units(text);
+        if length < WATCHDOG_RESET + Duration::from_secs(2) {
+            bail!(
+                "{text:?} lasts {:.1} s at {} wpm, too short to outlast the watchdog",
+                length.as_secs_f32(),
+                self.wpm
+            );
+        }
+        if lock(&self.shared.state).keyed {
+            bail!("still transmitting");
+        }
+        let t0 = Instant::now();
+        // Not marked keyed, so that nothing keeps the link alive: the firmware stops
+        // reading at once anyway.
+        let sent = self.shared.request(&Command::Cw {
+            wpm: self.wpm,
+            text: text.to_string(),
+        });
+        if let Err(e) = sent {
+            let _ = self.shared.stop();
+            bail!("the CW command failed: {e}");
+        }
+        let hang = self.shared.request(&Command::TestHang);
+        lock(&self.shared.state)
+            .on_air
+            .push_back((t0, Instant::now() + WATCHDOG_RESET));
+        if let Err(e) = hang {
+            if matches!(e, RigError::Timeout) {
+                // Lost: it may have hung all the same.
+                self.hung = true;
+            } else {
+                self.shared.stop().context("stopping it")?;
+            }
+            bail!("the firmware did not take the hang test: {e}");
+        }
+        self.hung = true;
+        self.shared.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn freq(&mut self) -> civ::Result<(u64, u64)> {
         proto::parse_freq(&self.shared.request(&Command::Freq)?).map_err(RigError::Protocol)
+    }
+
+    fn modes(&mut self) -> civ::Result<(String, String)> {
+        proto::parse_mode(&self.shared.request(&Command::Mode)?).map_err(RigError::Protocol)
     }
 
     /// The duty cycle's wait before a run of `on_air` may be keyed.
@@ -684,24 +752,40 @@ impl Rig for Handheld {
         let (rx, tx) = self.freq()?;
         Ok(rx != tx)
     }
-    /// Receive and transmit on `hz`, read back.
+    /// The firmware sets nothing: the radio must already receive and transmit on
+    /// `hz`, as set at the radio.
     fn set_frequency(&mut self, hz: u64) -> civ::Result<()> {
-        let f = self.shared.request(&Command::SetFreq(hz))?;
-        match proto::parse_freq(&f).map_err(RigError::Protocol)? {
+        match self.freq()? {
             (rx, tx) if rx == hz && tx == hz => Ok(()),
             (rx, tx) => Err(RigError::Protocol(format!(
-                "set {hz} Hz, but the handheld reads {rx} Hz receive, {tx} Hz transmit"
+                "the handheld reads {rx} Hz receive, {tx} Hz transmit: set it to {hz} Hz \
+                 simplex (no offset) at the radio"
             ))),
         }
     }
+    /// The radio must be in CW, transmit and receive, as set at the radio.
     fn set_mode_cw(&mut self) -> civ::Result<()> {
-        self.shared.request(&Command::ModeCw).map(drop)
+        match self.modes()? {
+            (tx, rx) if tx == "CW" && rx == "CW" => Ok(()),
+            (tx, rx) => Err(RigError::Protocol(format!(
+                "the handheld's mode reads {tx} transmit, {rx} receive: set CW at the radio \
+                 (with dual watch off, so that both are this VFO)"
+            ))),
+        }
     }
-    /// The level in `[handheld] power`: a handheld has a few fixed levels.
+    /// The level in `[handheld] power`, as set at the radio: a handheld has a few
+    /// fixed levels.
     fn set_rf_power_watts(&mut self, _: u32) -> civ::Result<()> {
-        self.shared
-            .request(&Command::Power(self.set.power))
-            .map(drop)
+        let level = proto::parse_power(&self.shared.request(&Command::Power)?)
+            .map_err(RigError::Protocol)?;
+        if self.set.power.matches(&level) {
+            return Ok(());
+        }
+        Err(RigError::Protocol(format!(
+            "the handheld's power reads {level}, but handheld.power is {}: set it at the \
+             radio",
+            self.set.power
+        )))
     }
     /// Sent with each `CW` command.
     fn set_key_speed(&mut self, wpm: u32) -> civ::Result<()> {
@@ -713,9 +797,21 @@ impl Rig for Handheld {
         self.wpm = wpm;
         Ok(())
     }
-    /// The firmware returns to receive at the end of each `CW` command's text.
-    fn set_break_in(&mut self, _: bool) -> civ::Result<()> {
-        Ok(())
+    /// Break-in must be on, as set at the radio: without it the firmware's keyer
+    /// only sounds the sidetone. It returns to receive at the end of each `CW`
+    /// command's text.
+    fn set_break_in(&mut self, on: bool) -> civ::Result<()> {
+        if !on {
+            return Ok(());
+        }
+        let on = proto::parse_breakin(&self.shared.request(&Command::Breakin)?)
+            .map_err(RigError::Protocol)?;
+        if on {
+            return Ok(());
+        }
+        Err(RigError::Protocol(
+            "break-in is off on the handheld: turn it on in its CW menu".into(),
+        ))
     }
     fn set_break_in_delay(&mut self, _: f32) -> civ::Result<()> {
         Ok(())
@@ -737,8 +833,9 @@ impl Rig for Handheld {
         Err(RigError::Protocol("a handheld has no power meter".into()))
     }
 
-    /// Have the firmware key `text`, and return once it has started. If the reply
-    /// is lost the run may or may not have started, so the node sends `STOP`.
+    /// Have the firmware key `text`, and return once it has started: the firmware
+    /// answers once it has keyed. If the reply is lost the run may or may not have
+    /// started, so the node sends `STOP`.
     fn send_cw(&mut self, text: &str) -> civ::Result<()> {
         let text = text.to_ascii_uppercase();
         if text.trim().is_empty() || text.chars().count() > MAX_CW_CHARS {
@@ -830,8 +927,10 @@ impl Rig for Handheld {
 impl Drop for Handheld {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        if let Err(e) = self.shared.stop() {
-            log::error!("handheld: STOP on closing failed: {e}");
+        if !self.hung {
+            if let Err(e) = self.shared.stop() {
+                log::error!("handheld: STOP on closing failed: {e}");
+            }
         }
         if let Some(t) = self.keeper.take() {
             let _ = t.join();

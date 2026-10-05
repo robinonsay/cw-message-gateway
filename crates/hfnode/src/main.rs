@@ -235,17 +235,20 @@ enum RadioCmd {
 
 #[derive(Subcommand)]
 enum HandheldCmd {
-    /// Ask the firmware who it is, stop anything it is sending, and read its status
-    /// and frequency. Changes no setting and never transmits.
+    /// Ask the firmware who it is, stop anything it is sending, read its status, and
+    /// check the radio's frequency, mode, power and break-in against the config.
+    /// Changes nothing and never transmits.
     Check,
-    /// Set the frequency, CW mode and power, and read them back. Never transmits.
-    Setup,
     /// Key a short CW message through the station's safety layer (transmits).
     Key { text: String },
     /// Bring-up: key a long message and then go silent, as if the node had died; the
     /// firmware must stop on its own within its link timeout. Transmits for up to a
     /// few seconds, then sends the station's call.
     Linktest,
+    /// Bring-up: key a long message and then have the firmware hang; its watchdog
+    /// must reset the radio, which ends the transmission. Transmits for about 3 s,
+    /// then sends the station's call.
+    Hangtest,
     /// Stop the firmware's keyer and confirm receive.
     Rx,
 }
@@ -1055,7 +1058,6 @@ fn open_handheld(cfg: &Config, action: Option<handheld::Action>) -> Result<Handh
 }
 
 fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
-    use civ::Rig;
     let h = cfg.handheld.as_ref().context("no [handheld] section")?;
     match action {
         HandheldCmd::Check => {
@@ -1067,50 +1069,26 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                 s.tx,
                 s.quiet.as_secs_f32()
             );
-            let (rx, tx) = (rig.frequency()?, rig.transmit_frequency()?);
-            println!("receive {rx} Hz, transmit {tx} Hz");
-            if rx != tx {
-                println!("transmit is off receive (an offset?): `setup` puts it back");
-            }
+            let wrong = handheld_settings(&mut rig, cfg);
             println!(
                 "bring-up stage passed (handheld.commissioned): {}",
                 h.commissioned
             );
+            if wrong > 0 {
+                bail!("{wrong} setting(s) to change at the radio, then run `check` again");
+            }
         }
         HandheldCmd::Rx => {
             let mut rig = open_handheld(cfg, None)?;
             hfnode::station::force_receive(&mut rig).context("radio not confirmed on receive")?;
             println!("receive (confirmed)");
         }
-        HandheldCmd::Setup | HandheldCmd::Key { .. } | HandheldCmd::Linktest => {
-            let keys = !matches!(action, HandheldCmd::Setup);
-            // The health log and any transmit inhibit are written there.
-            std::fs::create_dir_all(&cfg.state_dir)
-                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
-            let rig = open_handheld(cfg, keys.then_some(handheld::Action::Key))?;
-            let mut st = Station::new(
-                rig,
-                StationConfig::from_config(&cfg.station),
-                Some(cfg.state_dir.join("health.csv")),
-            );
-            guard_radio(st.rig());
-            st.configure()?;
-            st.check()
-                .context("the handheld did not read back as set up")?;
-            println!(
-                "set up and read back: {} Hz simplex, CW, power {:?}",
-                cfg.station.frequency_hz, h.power
-            );
-            let send = |st: &mut Station<Handheld>, text: &str| {
-                let t = hfnode::session::Transmission {
-                    segments: vec![sanitize(text)],
-                    read_ids: Vec::new(),
-                };
-                st.transmit(&t).map_err(|e| anyhow::anyhow!("{e}"))
-            };
+        HandheldCmd::Key { .. } | HandheldCmd::Linktest => {
+            let rig = open_handheld(cfg, Some(handheld::Action::Key))?;
+            let mut st = handheld_station(cfg, rig)?;
             match action {
                 HandheldCmd::Key { text } => {
-                    send(&mut st, &text)?;
+                    send_text(&mut st, &text)?;
                     println!("sent; the handheld read back as on receive after each piece");
                 }
                 HandheldCmd::Linktest => {
@@ -1129,7 +1107,7 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                         .link_test("TEST TEST TEST TEST TEST TEST");
                     // The test text carries no call: identify now. The station
                     // refuses if the handheld is not confirmed on receive.
-                    let id = send(&mut st, &format!("DE {}", cfg.station.node_call));
+                    let id = send_text(&mut st, &format!("DE {}", cfg.station.node_call));
                     let waited = result?;
                     id?;
                     println!(
@@ -1138,10 +1116,115 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                         waited.as_secs_f32()
                     );
                 }
-                _ => {}
+                _ => unreachable!(),
+            }
+        }
+        HandheldCmd::Hangtest => handheld_hang_test(cfg)?,
+    }
+    Ok(())
+}
+
+/// Check the handheld's frequency, mode, power and break-in against `cfg`, and
+/// print each; the number that are wrong.
+fn handheld_settings(rig: &mut Handheld, cfg: &Config) -> usize {
+    use civ::Rig;
+    let hz = cfg.station.frequency_hz;
+    let checks = [
+        ("frequency", rig.set_frequency(hz)),
+        ("mode", rig.set_mode_cw()),
+        ("power", rig.set_rf_power_watts(0)),
+        ("break-in", rig.set_break_in(true)),
+    ];
+    let mut wrong = 0;
+    for (what, r) in checks {
+        match r {
+            Ok(()) => println!("{what}: as configured"),
+            Err(e) => {
+                wrong += 1;
+                println!("{what}: {e}");
             }
         }
     }
+    wrong
+}
+
+/// The station's safety layer on `rig`, with the radio checked.
+fn handheld_station(cfg: &Config, rig: Handheld) -> Result<Station<Handheld>> {
+    // The health log and any transmit inhibit are written there.
+    std::fs::create_dir_all(&cfg.state_dir)
+        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+    let st = Station::new(
+        rig,
+        StationConfig::from_config(&cfg.station),
+        Some(cfg.state_dir.join("health.csv")),
+    );
+    guard_radio(st.rig());
+    st.configure()
+        .context("the handheld is not set up as configured (`hfnode handheld check`)")?;
+    st.check()
+        .context("the handheld is not set up as configured (`hfnode handheld check`)")?;
+    Ok(st)
+}
+
+fn send_text(st: &mut Station<Handheld>, text: &str) -> Result<()> {
+    let t = hfnode::session::Transmission {
+        segments: vec![sanitize(text)],
+        read_ids: Vec::new(),
+    };
+    st.transmit(&t).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `hfnode handheld hangtest`: the firmware's watchdog must end a transmission
+/// when the firmware hangs (docs/handheld.md, "Bring-up").
+fn handheld_hang_test(cfg: &Config) -> Result<()> {
+    let inhibit = cfg.state_dir.join(hfnode::station::INHIBIT_FILE);
+    if inhibit.exists() {
+        bail!(
+            "transmitting is inhibited ({}): see why in the log before clearing it",
+            inhibit.display()
+        );
+    }
+    let mut rig = open_handheld(cfg, Some(handheld::Action::Hang))?;
+    if handheld_settings(&mut rig, cfg) > 0 {
+        bail!("change those at the radio first (`hfnode handheld check`)");
+    }
+    println!(
+        "keying, then hanging the firmware: its watchdog must reset the radio, which ends \
+         the transmission about {} s later. Listen on the other handheld; if the node's \
+         handheld is still sending after 10 s, switch it off.",
+        handheld::WATCHDOG_RESET.as_secs()
+    );
+    let hung = rig.hang_test("TEST TEST TEST TEST TEST TEST");
+    drop(rig);
+    let t0 = Instant::now();
+    if hung.is_ok() {
+        std::thread::sleep(handheld::WATCHDOG_RESET + Duration::from_secs(2));
+    }
+    // The reset drops the radio's USB port: open it again once it is back. Opening
+    // stops anything it is sending and checks that it reads receive.
+    let reopened = loop {
+        match open_handheld(cfg, None) {
+            Ok(r) => break Ok(r),
+            Err(e) if t0.elapsed() < Duration::from_secs(30) => {
+                log::debug!("handheld not back yet: {e:#}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    let rig = reopened.context(
+        "the handheld did not answer after the hang, so its watchdog did not reset it: if it \
+         is still transmitting, switch it off now",
+    )?;
+    hung?;
+    // The test text carries no call: identify now.
+    let mut st = handheld_station(cfg, rig)?;
+    send_text(&mut st, &format!("DE {}", cfg.station.node_call))?;
+    println!(
+        "passed: the firmware restarted after it hung, and reads receive. If the carrier \
+         stopped within about {} s on the other handheld, set commissioned = \"done\".",
+        handheld::WATCHDOG_RESET.as_secs()
+    );
     Ok(())
 }
 

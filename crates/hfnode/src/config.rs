@@ -83,17 +83,20 @@ pub enum RigKind {
     Handheld,
 }
 
-/// A handheld (such as a Quansheng UV-K1) running a CW firmware that keys a
-/// carrier on commands over `station.serial_port`: see docs/handheld.md, the
-/// command set in docs/handheld-protocol.md, and [`crate::handheld`].
+/// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in
+/// firmware/uv-k1, which keys a carrier on commands over its USB-C port,
+/// `station.serial_port`: see docs/handheld.md, the command set in
+/// docs/handheld-protocol.md, and [`crate::handheld`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handheld {
-    /// The serial speed the firmware uses.
+    /// The serial speed. The radio's USB-C port is a virtual serial port, which
+    /// ignores it.
     #[serde(default = "default_handheld_baud")]
     pub baud: u32,
-    /// Transmit power: "low" (the default), "mid" or "high", the handheld's own
-    /// levels. `station.power_watts` is not used with a handheld.
+    /// The transmit power the radio must be set to: "low" (the default, any of its
+    /// LOW1-LOW5), "mid" or "high". The node checks it and does not set it.
+    /// `station.power_watts` is not used with a handheld.
     #[serde(default)]
     pub power: crate::handheld::proto::Power,
     /// At most this share of any `duty_window_secs` on the air, so the handheld's

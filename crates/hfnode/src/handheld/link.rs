@@ -17,15 +17,14 @@ pub trait Transport: Send {
     fn describe(&self) -> String;
 }
 
-/// A USB serial port.
+/// A USB serial port: the handheld's own USB-C port, a virtual COM port, where the
+/// serial speed means nothing.
 ///
-/// Opened with DTR and RTS down. A cable that also carries the handheld's audio,
-/// such as the AIOC, keys the radio's PTT with those lines (the AIOC: DTR up with RTS
-/// down), so the node holds them down for as long as the port is open, and the
-/// system drops them when it closes. Linux and macOS raise both lines when a port
-/// is opened, which the AIOC does not take as keyed; dropping DTR first never
-/// passes through its keyed state. (The AIOC's PTT lines as its documentation
-/// describes them, from memory; not measured here.)
+/// Opened with DTR and RTS down, and held down for as long as the port is open.
+/// The radio's USB port does nothing with them, but a cable on the headset jack
+/// with a PTT line (the AIOC keys PTT with DTR up and RTS down, from memory) would
+/// key the radio if the wrong port were named; dropping DTR first never passes
+/// through that state. Linux and macOS raise both lines when a port is opened.
 pub struct SerialTransport {
     port: Box<dyn serialport::SerialPort>,
     buf: Vec<u8>,
@@ -130,10 +129,13 @@ impl Link {
             match self.once(cmd) {
                 Ok(Reply::Ok(fields)) => return Ok(fields),
                 Ok(Reply::Err(code)) => {
+                    let why = proto::explain(cmd, &code)
+                        .map(|w| format!(" ({w})"))
+                        .unwrap_or_default();
                     return Err(RigError::Protocol(format!(
-                        "the handheld refused {}: {code}",
+                        "the handheld refused {}: {code}{why}",
                         cmd.body()
-                    )))
+                    )));
                 }
                 Err(e @ RigError::Timeout) => last = e,
                 Err(e) => return Err(e),
@@ -251,12 +253,19 @@ mod tests {
     }
 
     #[test]
-    fn an_err_reply_is_an_error_with_its_code() {
+    fn an_err_reply_is_an_error_with_its_code_explained() {
         let s = Script::default();
-        s.then(vec![reply("ERR FREQ RANGE")]);
+        s.then(vec![reply("ERR CW BKIN")]);
+        s.then(vec![reply("ERR POWER WHAT")]);
         let mut link = Link::new(Box::new(s), Duration::from_millis(10));
-        let e = link.request(&Command::SetFreq(1)).unwrap_err().to_string();
-        assert!(e.contains("RANGE"), "{e}");
+        let cw = Command::Cw {
+            wpm: 20,
+            text: "TEST".into(),
+        };
+        let e = link.request(&cw).unwrap_err().to_string();
+        assert!(e.contains("BKIN (break-in is off"), "{e}");
+        let e = link.request(&Command::Power).unwrap_err().to_string();
+        assert!(e.ends_with("refused POWER: WHAT"), "{e}");
     }
 
     #[test]

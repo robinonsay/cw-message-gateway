@@ -144,15 +144,16 @@ api_key_env = "ANTHROPIC_API_KEY" # Claude only
 # timeout_secs = 600              # default 120 for Claude, 600 for Ollama
 extra_policy = ""
 
-# A handheld running the CW firmware (docs/handheld.md), for testing locally on 2 m,
-# with station.rig = "handheld". The [station] settings still apply: frequency_hz
-# (simplex, e.g. 144_060_000), serial_port (the handheld's serial port),
-# key_speed_wpm and max_key_seconds; the CI-V ones (baud, civ_address,
-# commissioned, power_watts) do not. [audio] is the cable's sound input from the
-# handheld, and pitch_hz the firmware's CW pitch.
+# A Quansheng UV-K1 or UV-K5 v3 running the CW firmware in firmware/uv-k1
+# (docs/handheld.md), for testing locally on 2 m, with station.rig = "handheld". The
+# [station] settings still apply: frequency_hz (simplex, e.g. 144_060_000),
+# serial_port (the handheld's USB-C port), key_speed_wpm and max_key_seconds; the
+# CI-V ones (baud, civ_address, commissioned, power_watts) do not. The node sets
+# nothing on the handheld: set the frequency, CW, the power and break-in at the
+# radio, and `hfnode handheld check` compares them with this file. [audio] is the
+# cable's sound input from the handheld, and pitch_hz the firmware's CW pitch.
 # [handheld]
-# baud = 38400                    # the firmware's serial speed
-# power = "low"                   # low, mid or high: the handheld's own levels
+# power = "low"                   # low (any of LOW1-LOW5), mid or high: as set at the radio
 # max_duty_percent = 50           # at most this share of any duty_window_secs on the air
 # duty_window_secs = 300
 # busy_quiet_ms = 1000            # key only after the squelch has been closed this long
