@@ -27,7 +27,7 @@ fn a_run_longer_than_the_link_timeout_is_kept_alive() {
         .unwrap();
     let st = b.keyer_box.now();
     assert_eq!(st.ended(), Ended::Done);
-    // A STATUS every 0.25 s from the keep-alive: at 20x a busy test machine
+    // A STATUS every 0.25 s from the keep-alive: time-scaled, a busy test machine
     // sleeps longer than asked, so look for at least two per link timeout.
     let polls = st.lines.iter().filter(|l| l.contains(" STATUS*")).count();
     assert!(polls >= 14, "{polls} STATUS lines");

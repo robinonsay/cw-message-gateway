@@ -14,7 +14,9 @@
 //!
 //! The radio's audio runs in real time on the box's clock, never held back for
 //! the node, so these scenarios run at most [`MAX_SCALE`] times real time: the
-//! sidetone monitor times the audio against the wall clock, as on the air.
+//! sidetone monitor times the audio against the wall clock, as on the air, and
+//! the box's link timeout (2 s) leaves a busy machine 0.2 s of real time to send
+//! its keep-alive.
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -29,7 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const FIELD_WAIT: Duration = Duration::from_millis(250);
 
 /// The fastest the keyer scenarios run, whatever scale is asked for.
-pub const MAX_SCALE: f32 = 20.0;
+pub const MAX_SCALE: f32 = 10.0;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -321,6 +323,17 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         .push(box_safety(&cfg, e, &keyer_box, left_keying, inhibited));
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
+    // On a failure, what the station recorded (why a transmission failed, among
+    // others): a test keeps no log of the node's.
+    if !out.passed() {
+        if let Ok(h) = std::fs::read_to_string(cfg.state_dir.join("health.csv")) {
+            out.transcript.extend(
+                h.lines()
+                    .filter_map(|l| l.split_once(','))
+                    .map(|(_, ev)| format!("HEALTH {}", ev.replacen(',', ": ", 1))),
+            );
+        }
+    }
     Ok(())
 }
 

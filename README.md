@@ -198,7 +198,7 @@ node (decoder, parser, session, station safety layer and the real IC-7300 CI-V
 driver) against `civ::mock`, a byte-level IC-7300, with a scripted field operator
 on the other end. The `keyer-` scenarios run it on the keyer rig instead, against a
 mock keyer box (the firmware's own keyer code) and a radio whose headphone audio,
-sidetone included, goes to the node in real time; they run at most 20x real time:
+sidetone included, goes to the node in real time; they run at most 10x real time:
 
 ```sh
 hfnode selftest                          # all scenarios, PASS/FAIL table; exit code 1 on failure

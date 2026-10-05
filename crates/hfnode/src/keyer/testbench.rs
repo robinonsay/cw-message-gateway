@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Radio time runs this much faster than real time.
-pub const SCALE: f32 = 20.0;
+/// Radio time runs this much faster than real time. Not faster: the box's link
+/// timeout (2 s) is then 0.4 s of real time, and a test machine busy with other
+/// tests can hold the keep-alive's thread up for longer than 0.1 s.
+pub const SCALE: f32 = 5.0;
 
 pub fn radio_secs(s: f64) -> Duration {
     Duration::from_secs_f64(s / f64::from(SCALE))

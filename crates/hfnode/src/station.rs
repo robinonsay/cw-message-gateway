@@ -95,7 +95,8 @@ pub struct StationConfig {
     /// stays on transmit for a whole piece.
     pub break_in_delay_dots: f32,
     /// Extra time allowed beyond the keying time and break-in delay before the
-    /// transmitter is declared stuck.
+    /// transmitter is declared stuck (or the rig's [`Rig::receive_settle`], if
+    /// longer).
     pub stuck_margin: Duration,
     /// Longest a tuner cycle may take before it is abandoned and receive forced.
     pub tune_timeout: Duration,
@@ -770,6 +771,9 @@ impl<R: Rig + 'static> Station<R> {
         let result = self
             .transmit_inner(tx)
             .or_else(|e| self.force_rx().and(Err(e)));
+        if let Err(e) = &result {
+            self.health("tx-failed", &e.to_string());
+        }
         if result != Err(TxError::Inhibited) {
             *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
         } else {
@@ -898,11 +902,12 @@ impl<R: Rig + 'static> Station<R> {
         let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
         // A rig without meters (any radio on the keyer box) cannot measure SWR or
         // output: it has its own limits instead, and may confirm the keying itself.
-        let meters = self
-            .rig
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .has_meters();
+        // One that only hears its radio shows it back on receive once the audio has
+        // caught up, which takes real time whatever the time scale.
+        let (meters, settle) = {
+            let r = self.rig.lock().unwrap_or_else(|e| e.into_inner());
+            (r.has_meters(), r.receive_settle())
+        };
         *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         self.with_rig(|r| r.send_cw(piece))?;
         let sent = Instant::now();
@@ -914,7 +919,7 @@ impl<R: Rig + 'static> Station<R> {
         // piece has had time to go out (it reads receive before semi
         // break-in has switched over), so wait that long first.
         self.sleep_until(sent + keying)?;
-        self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin)?;
+        self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin.max(settle))?;
         if !meters && self.with_rig(|r| r.keying_confirmed())? == Some(false) {
             self.health("keying", "not-heard");
             self.swr_lockout = true;
