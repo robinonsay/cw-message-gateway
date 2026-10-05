@@ -1297,35 +1297,44 @@ fn run_selftest(
         match on_keyer {
             0 => String::new(),
             n => format!(
-                ", {n} against the mock keyer box and radio (at most {}x)",
+                ", then {n} against the mock keyer box and radio (at most {}x)",
                 selftest::KEYER_MAX_SCALE
             ),
         }
     );
     let t0 = Instant::now();
-    let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; picked.len()]);
-    std::thread::scope(|sc| {
-        for _ in 0..jobs {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(s) = picked.get(i) else { break };
-                let out = selftest::run(s, scale);
-                if verbose {
-                    print!("{}", out.render());
-                } else {
-                    println!(
-                        "{:<24} {}  {:>5.1} s  {}",
-                        out.scenario,
-                        if out.passed() { "PASS" } else { "FAIL" },
-                        out.wall.as_secs_f32(),
-                        out.summary()
-                    );
-                }
-                results.lock().unwrap()[i] = Some(out);
-            });
-        }
-    });
+    // The keyer scenarios hear their radio in real time, and the IC-7300 ones take
+    // all the processor they can get: on a busy machine the first would then miss
+    // real time. So the keyer ones run on their own, after the others.
+    for keyer in [false, true] {
+        let todo: Vec<usize> = (0..picked.len())
+            .filter(|&i| picked[i].radio.keyer == keyer)
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..jobs {
+                sc.spawn(|| loop {
+                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&i) = todo.get(k) else { break };
+                    let s = &picked[i];
+                    let out = selftest::run(s, scale);
+                    if verbose {
+                        print!("{}", out.render());
+                    } else {
+                        println!(
+                            "{:<24} {}  {:>5.1} s  {}",
+                            out.scenario,
+                            if out.passed() { "PASS" } else { "FAIL" },
+                            out.wall.as_secs_f32(),
+                            out.summary()
+                        );
+                    }
+                    results.lock().unwrap()[i] = Some(out);
+                });
+            }
+        });
+    }
     let results: Vec<_> = results
         .into_inner()
         .unwrap()
