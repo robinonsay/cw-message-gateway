@@ -865,7 +865,11 @@ impl<R: Rig + 'static> Station<R> {
         self.rest_before_keying(both)
     }
 
-    /// How long the ID `id` keys, and `piece` with it.
+    /// How long the ID `id` keys, and how long to rest for to key `piece` and then
+    /// the ID: the piece counted at the longest this module lets it keep the radio
+    /// on transmit ([`Station::keying_bound`]), since a rig measures what it really
+    /// keyed (a handheld's switch-over to transmit, its break-in tail), and a piece
+    /// that ran over its Morse length would otherwise leave the ID a rest of its own.
     fn piece_and_id_keying(
         &self,
         piece: &str,
@@ -873,7 +877,9 @@ impl<R: Rig + 'static> Station<R> {
     ) -> Result<(Duration, Duration), TxError> {
         let dot = self.with_rig(|r| r.dot_duration())?;
         let id_keying = dot * id.iter().map(|p| cw::units(p)).sum::<u32>();
-        Ok((id_keying, id_keying + dot * cw::units(piece)))
+        let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        let piece = dot * cw::units(piece) + hang + self.cfg.stuck_margin;
+        Ok((id_keying, id_keying + piece))
     }
 
     /// How long the node's last ID still counts for its next transmission: the 10

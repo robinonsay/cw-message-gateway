@@ -714,6 +714,21 @@ fn the_duty_cycle_paces_a_long_transmission_on_receive() {
 
 #[test]
 fn ids_stay_on_time_while_the_duty_cycle_holds_a_long_transmission() {
+    ids_stay_on_time_under_the_duty_cycle(Duration::ZERO);
+}
+
+/// Runs measured longer than their Morse, as on a radio (the switch-over to
+/// transmit, the break-in tail) or a slow machine, take more of the duty cycle than
+/// the station's count of them: the room left for the next ID must allow for that.
+#[test]
+fn ids_stay_on_time_under_the_duty_cycle_with_runs_that_overrun() {
+    // 15 ms made an ID late here before the station allowed for it.
+    for ms in [15, 30] {
+        ids_stay_on_time_under_the_duty_cycle(Duration::from_millis(ms));
+    }
+}
+
+fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
     let mut set = settings();
     // 0.5 s on the air (real) in any 1 s, and an ID due every 1.5 s.
     set.duty = 0.5;
@@ -722,6 +737,7 @@ fn ids_stay_on_time_while_the_duty_cycle_holds_a_long_transmission() {
     cfg.id_interval = Duration::from_millis(1500);
     let interval = cfg.id_interval;
     let (mut st, fw) = station_cfg_with(set, cfg);
+    fw.set_overrun(overrun);
     let mut segments: Vec<String> = (0..12)
         .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
         .collect();

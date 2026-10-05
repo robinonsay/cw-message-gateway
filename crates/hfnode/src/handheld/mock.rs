@@ -87,6 +87,8 @@ struct Fw {
     refuse_tx: bool,
     ignore_stop: bool,
     endless: bool,
+    /// How long each run keys past its Morse length.
+    overrun: Duration,
     no_link_watchdog: bool,
     no_hang_test: bool,
     garble: u32,
@@ -186,7 +188,7 @@ impl Fw {
         });
         self.key = Some(Key {
             run: self.runs.len() - 1,
-            end: Some(now + dot * cw::units(text)),
+            end: Some(now + dot * cw::units(text) + self.overrun),
         });
     }
 
@@ -308,6 +310,7 @@ impl MockFirmware {
                 refuse_tx: false,
                 ignore_stop: false,
                 endless: false,
+                overrun: Duration::ZERO,
                 no_link_watchdog: false,
                 no_hang_test: false,
                 garble: 0,
@@ -428,6 +431,12 @@ impl MockFirmware {
     /// Never finish the text by itself.
     pub fn set_endless(&self, on: bool) {
         self.lock().endless = on;
+    }
+
+    /// Key each run `d` past its Morse length (real time), as a radio's switch-over
+    /// to transmit and its break-in tail do.
+    pub fn set_overrun(&self, d: Duration) {
+        self.lock().overrun = d;
     }
 
     /// A firmware without `TEST HANG`.
