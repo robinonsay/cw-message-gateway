@@ -128,6 +128,9 @@ Then edit `hfnode.toml` as in [section 7](raspberry-pi-setup.md#7-configuration)
 there, with the COM port, audio device and folder paths from above. Keep
 `station.commissioned = "none"` until the hardware test plan sets it.
 
+To reach contacts by text from a Google Voice number as well as by email, see
+[texting.md](texting.md). (iMessage needs a Mac.)
+
 ## 6. Secrets
 
 Passwords and API keys never go in the TOML file. Put them in `env` in the node's

@@ -7,6 +7,8 @@ language model reads each reply against a written policy and answers one of:
 **drop** (the field operator hears `MSG WITHHELD BY FILTER`). It never rewrites a
 message. What the field operator hears is in
 [operating.md](operating.md#what-redacted-and-msg-withheld-by-filter-mean).
+Texts from Google Voice and iMessages ([texting.md](texting.md)) are screened the
+same way as email replies.
 
 The model can be Claude, through the Anthropic API, or a model you run yourself
 with [Ollama](https://ollama.com). Set it in `[filter]`:

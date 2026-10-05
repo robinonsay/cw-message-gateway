@@ -18,6 +18,10 @@ pub struct Config {
     #[serde(default = "default_pending_timeout")]
     pub pending_timeout_secs: u64,
     pub email: Option<Email>,
+    /// The node's Google Voice number, for texting contacts' phones.
+    pub google_voice: Option<GoogleVoice>,
+    /// iMessage through Messages on this Mac (macOS only).
+    pub imessage: Option<Imessage>,
     #[serde(default)]
     pub contacts: Vec<Contact>,
     pub weather: Option<Weather>,
@@ -216,15 +220,202 @@ pub struct Email {
     pub alert_to: Option<String>,
 }
 
-/// Someone the field operator can message by name. SMS goes through the carrier's
-/// email-to-SMS gateway (for example `5551234567@vtext.com`), so replies from a
-/// phone arrive back by email too.
-#[derive(Debug, Clone, Deserialize)]
+/// Someone the field operator can message by name, reached by iMessage, a text from
+/// the node's Google Voice number, or email: see [`crate::gateway::route`] for which
+/// is used. A contact needs at least one of `address`, `phone` and `imessage`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contact {
     /// Name as sent in CW, e.g. `MOM`. Letters and digits only.
     pub name: String,
-    pub address: String,
+    /// Email address. A carrier email-to-SMS address (e.g. `5551234567@vtext.com`)
+    /// still works where the carrier keeps its gateway, but is never used for TX
+    /// while `phone` is set.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// Mobile number, texted from the node's Google Voice number (`[google_voice]`).
+    #[serde(default)]
+    pub phone: Option<Phone>,
+    /// iMessage handles (a phone number or an Apple ID email), as a string or a list:
+    /// replies from any of them are taken, and TX goes to the first.
+    #[serde(default, deserialize_with = "one_or_many_handles")]
+    pub imessage: Vec<Handle>,
+}
+
+/// A phone number in E.164 form, e.g. `+15551234567`. Written in the config with or
+/// without spaces, dashes, dots and brackets; a 10-digit number is taken as +1.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Phone(String);
+
+impl Phone {
+    pub fn parse(s: &str) -> Option<Self> {
+        canonical_phone(s).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether this is a US or Canadian number (+1 and 10 digits).
+    pub fn is_nanp(&self) -> bool {
+        self.0.len() == 12 && self.0.starts_with("+1")
+    }
+}
+
+impl std::fmt::Display for Phone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Phone {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Phone::parse(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "{s:?} is not a phone number: write it with its country code, e.g. \"+1 555 123 4567\""
+            ))
+        })
+    }
+}
+
+/// An iMessage handle: a phone number, or an Apple ID email address (lowercased).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handle {
+    Phone(Phone),
+    Email(String),
+}
+
+impl Handle {
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        // Never anything osascript could read as an option.
+        if s.starts_with('-') {
+            return None;
+        }
+        if s.contains('@') {
+            return is_bare_address(s).then(|| Handle::Email(s.to_ascii_lowercase()));
+        }
+        Phone::parse(s).map(Handle::Phone)
+    }
+
+    /// As given to Messages, and as compared with Messages' handles ([`handle_key`]).
+    pub fn as_str(&self) -> &str {
+        match self {
+            Handle::Phone(p) => p.as_str(),
+            Handle::Email(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for Handle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn one_or_many_handles<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<Handle>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let list = match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    };
+    list.iter()
+        .map(|s| {
+            Handle::parse(s).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "{s:?} is not an iMessage handle: write a phone number with its country \
+                     code (\"+1 555 123 4567\") or an Apple ID email address"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// A phone number in E.164 form (`+` and 8-15 digits), from one written with spaces,
+/// dashes, dots or brackets. Ten digits are a US/Canadian number; eleven starting
+/// with 1 are too. Anything else (letters, short codes) is not a phone number.
+pub fn canonical_phone(s: &str) -> Option<String> {
+    let s: String = s
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '.' | '(' | ')'))
+        .collect();
+    let (plus, digits) = match s.strip_prefix('+') {
+        Some(d) => (true, d),
+        None => (false, s.as_str()),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match (plus, digits.len()) {
+        (true, 8..=15) => Some(format!("+{digits}")),
+        (false, 10) => Some(format!("+1{digits}")),
+        (false, 11) if digits.starts_with('1') => Some(format!("+{digits}")),
+        _ => None,
+    }
+}
+
+/// The form in which a Messages handle (`handle.id`, `chat.chat_identifier`) is
+/// compared with contacts' handles: an email lowercased, a phone number in E.164.
+/// `None` never matches. Only equal keys match: never by suffix or last digits.
+pub fn handle_key(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.contains('@') {
+        Some(id.to_ascii_lowercase())
+    } else {
+        canonical_phone(id)
+    }
+}
+
+/// An address the mailer can send to and replies can be matched against: parsed as
+/// a Mailbox too (which refuses some addresses that Address takes), with no name.
+fn is_bare_address(s: &str) -> bool {
+    s.parse::<lettre::Address>().is_ok()
+        && s.parse::<lettre::message::Mailbox>()
+            .is_ok_and(|m| m.name.is_none())
+}
+
+/// Domain of the addresses Google Voice forwards texts from (and takes replies at).
+pub const GOOGLE_VOICE_DOMAIN: &str = "txt.voice.google.com";
+
+/// Texting from a Google Voice number: texts to it are forwarded to the `[email]`
+/// account (which must be the Google account that has the number), and the node
+/// answers them by email. See docs/texting.md.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleVoice {
+    /// The node's own Google Voice number.
+    pub number: Phone,
+    /// Put before every text, `{call}` being the field callsign that sent it.
+    #[serde(default = "default_text_tag")]
+    pub tag: String,
+}
+
+/// iMessage through Messages on this Mac, as the signed-in Apple ID. Works only when
+/// the node is started by hfnode.command in Terminal. See docs/texting.md.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Imessage {
+    /// Messages' database.
+    #[serde(default = "default_chat_db")]
+    pub db: PathBuf,
+    /// How often to look for replies, in seconds.
+    #[serde(default = "default_im_poll")]
+    pub poll_secs: u64,
+    /// Replies are read only within this many hours of an iMessage sent by TX.
+    #[serde(default = "default_reply_hours")]
+    pub reply_hours: u64,
+    /// Put before every iMessage, `{call}` being the field callsign that sent it.
+    #[serde(default = "default_text_tag")]
+    pub tag: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -556,6 +747,18 @@ fn default_periods() -> usize {
 fn default_api_key_env() -> String {
     "ANTHROPIC_API_KEY".into()
 }
+fn default_text_tag() -> String {
+    "{call} via HF radio, replies are read on air:".into()
+}
+fn default_chat_db() -> PathBuf {
+    PathBuf::from("~/Library/Messages/chat.db")
+}
+fn default_im_poll() -> u64 {
+    60
+}
+fn default_reply_hours() -> u64 {
+    48
+}
 
 /// The IC-7300's transmitter frequency coverage in Hz, inclusive, from the manual's
 /// "Frequency coverage" table (Section 16 SPECIFICATIONS, p. 16-2). Which of these
@@ -578,10 +781,13 @@ const TX_COVERAGE_HZ: [(u64, u64); 12] = [
 /// A path starting with `~` starts in the user's home directory, as in a shell: the
 /// node may be started by launchd or Task Scheduler, where no shell expands it.
 pub fn expand_home(path: &Path) -> Result<PathBuf> {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+    expand_home_from(path, home_dir())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .filter(|h| !h.is_empty())
-        .map(PathBuf::from);
-    expand_home_from(path, home)
+        .map(PathBuf::from)
 }
 
 fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
@@ -604,10 +810,20 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        cfg.state_dir = expand_home(&cfg.state_dir).context("state_dir")?;
-        cfg.auth.key_file = expand_home(&cfg.auth.key_file).context("auth.key_file")?;
+        cfg.expand_paths(home_dir())?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Expand `~` in the paths the node opens.
+    fn expand_paths(&mut self, home: Option<PathBuf>) -> Result<()> {
+        self.state_dir = expand_home_from(&self.state_dir, home.clone()).context("state_dir")?;
+        self.auth.key_file =
+            expand_home_from(&self.auth.key_file, home.clone()).context("auth.key_file")?;
+        if let Some(im) = &mut self.imessage {
+            im.db = expand_home_from(&im.db, home).context("imessage.db")?;
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -669,20 +885,96 @@ impl Config {
             if self.contacts[..i].iter().any(|o| o.name == c.name) {
                 bail!("contact name {:?} is listed twice", c.name);
             }
-            // A bare address: the gateway sends to it (parsed as a Mailbox, which
-            // refuses some addresses that Address takes) and matches replies
-            // against it.
-            let bare = c.address.parse::<lettre::Address>().is_ok()
-                && c.address
-                    .parse::<lettre::message::Mailbox>()
-                    .is_ok_and(|m| m.name.is_none());
-            if !bare {
+            let n = &c.name;
+            if c.address.is_none() && c.phone.is_none() && c.imessage.is_empty() {
+                bail!("contact {n} needs at least one of address, phone or imessage");
+            }
+            if let Some(a) = &c.address {
+                if !is_bare_address(a) {
+                    bail!("contact {n} address {a:?} is not an email address");
+                }
+                if domain_of(a).eq_ignore_ascii_case(GOOGLE_VOICE_DOMAIN) {
+                    bail!(
+                        "contact {n} address {a:?} is a Google Voice reply address: give the \
+                         contact's own number as phone instead"
+                    );
+                }
+            }
+            if let Some(p) = &c.phone {
+                if !p.is_nanp() {
+                    bail!(
+                        "contact {n} phone {p}: Google Voice texts US and Canadian numbers only \
+                         (+1 and 10 digits); reach this contact with address or imessage instead"
+                    );
+                }
+            }
+        }
+        // A phone number, handle or address identifies one contact, or replies could be
+        // read out as from the wrong person.
+        let keys: Vec<Vec<String>> = self.contacts.iter().map(Contact::keys).collect();
+        for (i, c) in self.contacts.iter().enumerate() {
+            for (j, o) in self.contacts[..i].iter().enumerate() {
+                if let Some(k) = keys[i].iter().find(|k| keys[j].contains(k)) {
+                    bail!(
+                        "contacts {} and {} both use {k}: a phone number, iMessage handle or \
+                         address can belong to one contact only",
+                        o.name,
+                        c.name
+                    );
+                }
+            }
+        }
+        if let Some(gv) = &self.google_voice {
+            if self.email.is_none() {
                 bail!(
-                    "contact {} address {:?} is not an email address",
-                    c.name,
-                    c.address
+                    "[google_voice] needs [email]: Google Voice texts arrive in, and are \
+                     answered from, the Gmail account that has the Google Voice number; add \
+                     [email] for that account"
                 );
             }
+            if !gv.number.is_nanp() {
+                bail!(
+                    "google_voice.number {}: a Google Voice number is +1 and 10 digits, e.g. \
+                     \"+1 555 000 1111\"",
+                    gv.number
+                );
+            }
+            if let Some(c) = self
+                .contacts
+                .iter()
+                .find(|c| c.phone.as_ref() == Some(&gv.number))
+            {
+                bail!(
+                    "contact {} phone is the node's own Google Voice number",
+                    c.name
+                );
+            }
+            check_tag("google_voice", &gv.tag)?;
+        }
+        if let Some(im) = &self.imessage {
+            if !cfg!(target_os = "macos") {
+                bail!(
+                    "[imessage] works only on a Mac: Messages and its database exist only on \
+                     macOS; remove [imessage] from this config"
+                );
+            }
+            if !(15..=3600).contains(&im.poll_secs) {
+                bail!("imessage.poll_secs must be 15-3600");
+            }
+            if !(1..=336).contains(&im.reply_hours) {
+                bail!("imessage.reply_hours must be 1-336");
+            }
+            let home_relative = matches!(
+                im.db.components().next(),
+                Some(std::path::Component::Normal(first)) if first == "~"
+            );
+            if !im.db.is_absolute() && !home_relative {
+                bail!(
+                    "imessage.db {}: use a full path or one starting with ~",
+                    im.db.display()
+                );
+            }
+            check_tag("imessage", &im.tag)?;
         }
         if let Some(to) = self.email.as_ref().and_then(|e| e.alert_to.as_deref()) {
             // A bare address, as for contacts.
@@ -820,6 +1112,77 @@ impl Config {
             .map(|p| (p.number, p.grid.to_ascii_uppercase()))
             .collect()
     }
+
+    /// Settings that work but are probably not what was meant. Logged when the node
+    /// starts and printed by `hfnode messages check`.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        for c in &self.contacts {
+            if let (Some(a), Some(_)) = (&c.address, &c.phone) {
+                if crate::gateway::email::is_carrier_address(a) {
+                    w.push(format!(
+                        "{}: {a} is a carrier email-to-SMS gateway and is never used for TX \
+                         while phone is set",
+                        c.name
+                    ));
+                }
+            }
+            if !c.imessage.is_empty() && c.phone.is_none() && self.google_voice.is_some() {
+                w.push(format!(
+                    "{} can reply only within reply_hours of an iMessage TX; add phone so they \
+                     can text the node's number first",
+                    c.name
+                ));
+            }
+        }
+        if let Some(e) = &self.email {
+            if self.google_voice.is_some() && e.authserv_id.is_none() {
+                w.push(
+                    "set email.authserv_id = \"mx.google.com\" so only Gmail's own \
+                     Authentication-Results header is believed"
+                        .into(),
+                );
+            }
+            if e.imap_port != 993 {
+                w.push(format!(
+                    "IMAP on port {} uses STARTTLS without read timeouts; a stalled server can \
+                     stop mail checks until the node restarts",
+                    e.imap_port
+                ));
+            }
+        }
+        w
+    }
+}
+
+impl Contact {
+    /// What identifies this contact: its phone, iMessage handles and address (and
+    /// the number in a carrier email-to-SMS address).
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.phone.iter().map(|p| p.to_string()).collect();
+        keys.extend(self.imessage.iter().map(|h| h.to_string()));
+        if let Some(a) = &self.address {
+            let a = a.trim().to_ascii_lowercase();
+            if let Some(n) = crate::gateway::email::carrier_number(&a) {
+                keys.push(format!("+1{n}"));
+            }
+            keys.push(a);
+        }
+        keys
+    }
+}
+
+fn domain_of(address: &str) -> &str {
+    address.rsplit_once('@').map_or("", |(_, d)| d.trim())
+}
+
+/// A text tag names the field callsign and stays short, since it is sent with every
+/// message.
+fn check_tag(section: &str, tag: &str) -> Result<()> {
+    if !tag.contains("{call}") || tag.chars().any(char::is_control) || tag.chars().count() > 60 {
+        bail!("{section}.tag must contain {{call}}, be one line and at most 60 characters");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -944,21 +1307,232 @@ mod tests {
     #[test]
     fn rejects_bad_contacts() {
         let mut cfg = example();
-        cfg.contacts[1].address = "bob at example.com".into();
+        cfg.contacts[1].address = Some("bob at example.com".into());
         assert!(cfg.validate().is_err());
         let mut cfg = example();
-        cfg.contacts[1].address = "Bob <bob@example.com>".into();
+        cfg.contacts[1].address = Some("Bob <bob@example.com>".into());
         assert!(cfg.validate().is_err());
         // Taken as an Address, but the mailer cannot send to them.
         for address in ["bob@[127.0.0.1]", "\"a b\"@example.com"] {
             assert!(address.parse::<lettre::message::Mailbox>().is_err());
             let mut cfg = example();
-            cfg.contacts[1].address = address.into();
+            cfg.contacts[1].address = Some(address.into());
             assert!(cfg.validate().is_err(), "{address}");
         }
         let mut cfg = example();
         cfg.contacts[1].name = cfg.contacts[0].name.clone();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn canonical_phones() {
+        for s in [
+            "(555) 123-4567",
+            "555-123-4567",
+            "15551234567",
+            "+1 555 123 4567",
+            "555.123.4567",
+        ] {
+            assert_eq!(canonical_phone(s).as_deref(), Some("+15551234567"), "{s}");
+        }
+        assert_eq!(
+            canonical_phone("+44 20 7946 0000").as_deref(),
+            Some("+442079460000")
+        );
+        for s in [
+            "5551234",
+            "+1234567",
+            "555123456",
+            "255512345678",
+            "55512345a7",
+            "",
+            "+",
+            "555/123/4567",
+        ] {
+            assert_eq!(canonical_phone(s), None, "{s}");
+        }
+        assert_eq!(
+            handle_key("Mom@iCloud.com").as_deref(),
+            Some("mom@icloud.com")
+        );
+        assert_eq!(handle_key("+15551234567").as_deref(), Some("+15551234567"));
+        assert_eq!(handle_key("chat123456"), None);
+    }
+
+    /// The example with `extra` added to its contacts' section.
+    fn with_contacts(contacts: &str) -> Result<Config> {
+        let text = include_str!("../../../hfnode.example.toml");
+        let start = text.find("[[contacts]]").unwrap();
+        let end = text.find("[weather]").unwrap();
+        let text = format!("{}{contacts}\n{}", &text[..start], &text[end..]);
+        let cfg: Config = toml::from_str(&text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn contact_routes() {
+        let cfg = with_contacts(
+            "[[contacts]]\nname = \"MOM\"\nphone = \"(555) 123-4567\"\nimessage = \"Mom@iCloud.com\"\n\
+             [[contacts]]\nname = \"DAD\"\nimessage = [\"+1 555 222 3333\", \"dad@example.com\"]\naddress = \"dad@work.example\"\n",
+        )
+        .unwrap();
+        let mom = &cfg.contacts[0];
+        assert_eq!(mom.phone.as_ref().unwrap().as_str(), "+15551234567");
+        assert_eq!(mom.imessage, [Handle::Email("mom@icloud.com".into())]);
+        assert_eq!(mom.address, None);
+        assert_eq!(
+            cfg.contacts[1].imessage,
+            [
+                Handle::Phone(Phone::parse("5552223333").unwrap()),
+                Handle::Email("dad@example.com".into())
+            ]
+        );
+        // Not handles.
+        for bad in ["-x@example.com", "5551234", "Mom <m@x.com>", "-15551234567"] {
+            let e = with_contacts(&format!(
+                "[[contacts]]\nname = \"MOM\"\nimessage = \"{bad}\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                format!("{e:#}").contains("is not an iMessage handle"),
+                "{bad}: {e:#}"
+            );
+        }
+        let e = with_contacts("[[contacts]]\nname = \"MOM\"\nphone = \"555-1234\"\n").unwrap_err();
+        assert!(format!("{e:#}").contains("with its country code"), "{e:#}");
+    }
+
+    #[test]
+    fn rejects_contacts_that_cannot_work() {
+        let refused = |contacts: &str, says: &str| {
+            let e = with_contacts(contacts).unwrap_err();
+            assert!(format!("{e:#}").contains(says), "{contacts}: {e:#}");
+        };
+        refused(
+            "[[contacts]]\nname = \"MOM\"\n",
+            "needs at least one of address, phone or imessage",
+        );
+        refused(
+            "[[contacts]]\nname = \"MOM\"\nphone = \"+44 20 7946 0000\"\n",
+            "US and Canadian numbers only",
+        );
+        refused(
+            "[[contacts]]\nname = \"MOM\"\naddress = \"15550001111.15551234567.tok@txt.voice.google.com\"\n",
+            "is a Google Voice reply address",
+        );
+        refused(
+            "[[contacts]]\nname = \"MOM\"\nphone = \"+1 555 000 1111\"\n",
+            "the node's own Google Voice number",
+        );
+        // One phone number, handle or address, one contact.
+        for (a, b) in [
+            ("phone = \"5551234567\"", "phone = \"+15551234567\""),
+            ("imessage = \"m@x.com\"", "imessage = \"M@X.com\""),
+            ("address = \"m@x.com\"", "imessage = \"m@x.com\""),
+            ("address = \"m@x.com\"", "address = \"M@x.com\""),
+            (
+                "phone = \"5551234567\"",
+                "address = \"5551234567@vtext.com\"",
+            ),
+            ("imessage = \"+15551234567\"", "phone = \"555 123 4567\""),
+        ] {
+            refused(
+                &format!("[[contacts]]\nname = \"MOM\"\n{a}\n[[contacts]]\nname = \"DAD\"\n{b}\n"),
+                "contacts MOM and DAD both use",
+            );
+        }
+        // The same number twice in one contact is fine.
+        with_contacts(
+            "[[contacts]]\nname = \"MOM\"\nphone = \"5551234567\"\nimessage = \"+1 555 123 4567\"\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn google_voice_and_imessage_settings() {
+        let base = include_str!("../../../hfnode.example.toml");
+        let parse = |text: &str| -> Result<Config> {
+            let cfg: Config = toml::from_str(text)?;
+            cfg.validate()?;
+            Ok(cfg)
+        };
+        let cfg = parse(base).unwrap();
+        let gv = cfg.google_voice.as_ref().unwrap();
+        assert_eq!(gv.number.as_str(), "+15550001111");
+        assert_eq!(gv.tag, "{call} via HF radio, replies are read on air:");
+        // Google Voice is answered through [email].
+        let start = base.find("\n[email]").unwrap();
+        let end = base.find("\n[google_voice]").unwrap();
+        let no_email = format!("{}{}", &base[..start], &base[end..]);
+        let e = parse(&no_email).unwrap_err();
+        assert!(
+            e.to_string().contains("[google_voice] needs [email]"),
+            "{e}"
+        );
+        for (from, to) in [
+            ("number = \"+1 555 000 1111\"", "number = \"+44 20 7946 0000\""),
+            (
+                "# tag = \"{call} via HF radio, replies are read on air:\"   # starts every text",
+                "tag = \"via HF radio:\"",
+            ),
+            (
+                "# tag = \"{call} via HF radio, replies are read on air:\"   # starts every text",
+                "tag = \"{call} sent this over HF radio, and replies to it are read out on the air:\"",
+            ),
+        ] {
+            let text = base.replace(from, to);
+            assert_ne!(text, base);
+            assert!(parse(&text).is_err(), "{to}");
+        }
+        // [imessage] only on a Mac, and with sane settings there.
+        let im = base.replace("# [imessage]", "[imessage]");
+        assert_eq!(parse(&im).is_ok(), cfg!(target_os = "macos"));
+        if cfg!(target_os = "macos") {
+            for (from, to) in [
+                ("# poll_secs = 60", "poll_secs = 14"),
+                ("# reply_hours = 48 ", "reply_hours = 0 "),
+                ("# db = \"~/Library/Messages/chat.db\"", "db = \"chat.db\""),
+            ] {
+                let text = im.replace(from, to);
+                assert_ne!(text, im);
+                assert!(parse(&text).is_err(), "{to}");
+            }
+        }
+        let im: Config = toml::from_str(&im).unwrap();
+        let w = im.imessage.unwrap();
+        assert_eq!((w.poll_secs, w.reply_hours), (60, 48));
+    }
+
+    #[test]
+    fn paths_are_expanded() {
+        let mut cfg = example();
+        cfg.state_dir = "~/hfnode/state".into();
+        cfg.auth.key_file = "~/hfnode/node.key".into();
+        cfg.imessage = Some(toml::from_str("").unwrap());
+        cfg.expand_paths(Some(PathBuf::from("/home/op"))).unwrap();
+        assert_eq!(cfg.state_dir, Path::new("/home/op").join("hfnode/state"));
+        assert_eq!(
+            cfg.auth.key_file,
+            Path::new("/home/op").join("hfnode/node.key")
+        );
+        assert_eq!(
+            cfg.imessage.unwrap().db,
+            Path::new("/home/op").join("Library/Messages/chat.db")
+        );
+    }
+
+    #[test]
+    fn warnings_for_settings_that_work_badly() {
+        let cfg = with_contacts(
+            "[[contacts]]\nname = \"MOM\"\nphone = \"5551234567\"\naddress = \"5551234567@vtext.com\"\n\
+             [[contacts]]\nname = \"DAD\"\nimessage = \"dad@example.com\"\n",
+        )
+        .unwrap();
+        let w = cfg.warnings().join("\n");
+        assert!(w.contains("never used for TX while phone is set"), "{w}");
+        assert!(w.contains("DAD can reply only within reply_hours"), "{w}");
+        assert!(w.contains("email.authserv_id"), "{w}");
     }
 
     #[test]

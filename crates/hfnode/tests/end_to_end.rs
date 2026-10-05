@@ -9,7 +9,7 @@ use hfnode::audio::{self, Block};
 use hfnode::config::Config;
 use hfnode::inbox::Message;
 use hfnode::node;
-use hfnode::session::{Services, WxError};
+use hfnode::session::{SendError, Services, WxError};
 use hfnode::station::{Station, StationConfig};
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ struct Fake {
 }
 
 impl Services for Fake {
-    fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+    fn send_message(&mut self, dest: &str, _from_call: &str, text: &str) -> Result<(), SendError> {
         self.sent.push((dest.into(), text.into()));
         Ok(())
     }

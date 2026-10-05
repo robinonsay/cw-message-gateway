@@ -33,6 +33,11 @@
     <dict>
         <key>RUST_LOG</key>
         <string>info</string>
+        <!-- iMessage is not available under this agent (macOS's permissions for
+             Messages are Terminal's): the node uses Google Voice or email instead.
+             Use hfnode.command for iMessage. See docs/texting.md. -->
+        <key>HFNODE_LAUNCHD</key>
+        <string>1</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

@@ -26,6 +26,7 @@ fn run(name: &str) -> Outcome {
 const NAMES: &[&str] = &[
     "tx",
     "tx-gateway-down",
+    "tx-no-route",
     "rx-empty",
     "rx-one",
     "rx-several",
@@ -120,6 +121,7 @@ macro_rules! scenario_tests {
 scenario_tests! {
     tx => "tx",
     tx_gateway_down => "tx-gateway-down",
+    tx_no_route => "tx-no-route",
     rx_empty => "rx-empty",
     rx_one => "rx-one",
     rx_several => "rx-several",
