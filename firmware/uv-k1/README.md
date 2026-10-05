@@ -18,7 +18,7 @@ and safety logic is tested on a computer against a simulated radio (below).
 |---|---|
 | `app/hfnode.c`, `app/hfnode.h` | The commands and the limits below. |
 | `app/hfnode_line.c`, `app/hfnode_line.h` | The line format: framing and checksums. |
-| `nr7y-hfnode.patch` | The small changes to the firmware's own files: start and poll hfnode from the main loop, feed the watchdog from the 10 ms tick, a keyer entry that plays given text at a given speed (timing an element that switches the transmitter on from when the carrier is on, so the switch-over does not shorten it), and five Morse characters the keyer lacked (`' ) : " @`). |
+| `nr7y-hfnode.patch` | The small changes to the firmware's own files: start and poll hfnode from the main loop, feed the watchdog from the 10 ms tick, reset the BK4819 radio chip as soon as its pins are set up at start-up, a keyer entry that plays given text at a given speed (timing an element that switches the transmitter on from when the carrier is on, so the switch-over does not shorten it), and five Morse characters the keyer lacked (`' ) : " @`). |
 | `build.sh` | Fetches the firmware at the commit the patch was made for, applies it and builds. |
 | `test/` | The host test, with stand-ins for the radio's code. |
 
@@ -52,7 +52,9 @@ tick, not on the timer the keyer uses, so that a fault in one does not stop both
    is fed from the 10 ms tick, which a hard fault stops. A reset should turn the
    transmitter off: the radio chip, which also switches the power amplifier, keeps
    transmitting through the processor's reset until the start-up code resets it.
-   That comes early in the start-up code, but how long the bootloader takes first is
+   The patch resets it as soon as its pins are set up (`BOARD_Init` in `board.c`),
+   before the display's start-up delays (about 0.2 s, from the code) after which the
+   firmware would otherwise reset it. How long the bootloader takes before that is
    not known. `hfnode handheld hangtest` checks it on your radio.
 5. **A key-down budget.** Time in runs adds to it and time out of them takes from
    it; past 165 s, `CW` is refused until it has come down. A computer that keeps
@@ -65,12 +67,6 @@ tick, not on the timer the keyer uses, so that a fault in one does not stop both
 8. **Nothing set.** No command sets anything on the radio: frequency, mode, power
    and break-in are read, never written, so `hfnode` cannot change what you set at
    the radio, and nothing is written to its memory.
-
-Not done: the start-up code resets the BK4819 only after the display's start-up
-delays (about 0.2 s, from the code). Resetting it straight after the pins are set
-up (`BOARD_Init` in `board.c`, after `BOARD_GPIO_Init`) would end a carrier left on
-through a reset that much sooner. It is a change to the firmware's own start-up,
-not yet made here.
 
 Commands come only over USB-C. The headset jack's serial line (the firmware's
 programming port, left as it is) shares a wire with the PTT, so `hfnode`'s commands

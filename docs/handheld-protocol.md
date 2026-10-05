@@ -105,10 +105,10 @@ so that a fault in one does not stop both the keyer and its limits.
    radio about 2 s later: about 3 s in all. Outside a run it is fed from the 10 ms
    tick; a hard fault stops that tick, and so resets the radio too. A reset should
    turn the transmitter off: the radio chip keeps transmitting through the
-   processor's reset until the start-up code resets it, which it does after the
-   display's start-up (about 0.2 s, from the code), and how long the bootloader
-   takes before that is not known. `hfnode handheld hangtest` checks it on the
-   radio.
+   processor's reset until the start-up code resets it, which the patched firmware
+   does as soon as the chip's pins are set up, before the display's start-up (about
+   0.2 s, from the code); how long the bootloader takes before that is not known.
+   `hfnode handheld hangtest` checks it on the radio.
 5. **A key-down budget.** Time in `CW` runs adds to it, time out of them takes from
    it, and `CW` is answered `ERR CW DUTY` while it is over 165 s: back to back runs
    for that long, then about half the time. The node's duty cycle stays within it.

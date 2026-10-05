@@ -207,11 +207,9 @@ the log for why it latched, and delete `tx-inhibited` in the handheld's `state_d
   after a stop, and the watchdog's timing (its clock is not precise).
 - That a reset turns the transmitter off soon enough: the radio chip, which also
   switches the power amplifier, keeps transmitting through the processor's reset
-  until the start-up code resets it, which comes after the display's start-up
-  (about 0.2 s, from the code) and whatever time the bootloader takes first, which
-  is not known. `hangtest` checks it. Resetting the radio chip before the display's
-  start-up would shorten it, but changes the firmware's own start-up code, which
-  has not been done.
+  until the start-up code resets it. The patched firmware does that as soon as the
+  chip's pins are set up, before the display's start-up, but how long the
+  bootloader takes first is not known. `hangtest` checks it.
 - From memory: the UVTools2 steps, the jack's wiring, the AIOC's PTT, the UV-K5
   models, and the band plan below.
 
