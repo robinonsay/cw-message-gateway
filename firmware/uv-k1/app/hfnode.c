@@ -36,10 +36,12 @@
 // time. These limits are timed by hfnode's own clock, counted from SysTick
 // (HFNODE_WatchdogTick), not by the keyer's timer (millis), so that a fault in one
 // does not stop both the keyer and its limits.
-// A reset should turn the transmitter off: the start-up code resets the BK4819
-// (main.c, BK4819_Init), though only after the bootloader and the display's
-// start-up. The radio's own transmit time-out timer does not run in CW (cwapp.c
-// clears it on every key-down), so these are the firmware's only limits.
+// A reset should turn the transmitter off: the patched start-up code resets the
+// BK4819 as soon as its pins are set up (board.c, BOARD_Init), before the
+// display's start-up, and BK4819_Init resets it again; how long the bootloader
+// takes before that is not known. The radio's own transmit time-out timer does not
+// run in CW (cwapp.c clears it on every key-down), so these are the firmware's
+// only limits.
 
 #include <stdbool.h>
 #include <stdint.h>

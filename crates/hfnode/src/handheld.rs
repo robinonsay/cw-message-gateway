@@ -1067,7 +1067,8 @@ impl Rig for Handheld {
         let duty = self.duty_rest(keying)?;
         if !duty.is_zero() {
             log::info!(
-                "duty cycle: {:.1} s on receive before the next keying run",
+                "duty cycle: a keying run of {:.1} s needs {:.1} s on receive first",
+                keying.as_secs_f32(),
                 duty.as_secs_f32()
             );
             return Ok(duty);
