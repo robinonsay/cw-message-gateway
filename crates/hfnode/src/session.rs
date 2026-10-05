@@ -39,14 +39,35 @@ use std::time::{Duration, Instant};
 
 /// What the session needs from the outside world.
 pub trait Services {
-    /// Deliver `text` to the contact named `dest`.
-    fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String>;
+    /// Deliver `text` to the contact named `dest`, as sent by field callsign
+    /// `from_call`.
+    fn send_message(&mut self, dest: &str, from_call: &str, text: &str) -> Result<(), SendError>;
     /// Screened inbound messages waiting to be read, oldest first.
     fn ready_messages(&mut self) -> Vec<Message>;
     /// Called by the node once a transmission carrying these messages was keyed.
     fn mark_read(&mut self, ids: &[u64]);
     /// A short forecast for the 4- or 6-character grid square `grid`.
     fn weather(&mut self, grid: &str) -> Result<String, WxError>;
+}
+
+/// Why a message was not sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// Nothing on this node can reach the contact now, so asking again will not help
+    /// until it is fixed at home, or the contact texts the node's number. Keyed as
+    /// `FAIL <seq> NO ROUTE`.
+    NoRoute(String),
+    /// A route was tried and failed, or its outcome is unknown. Keyed as
+    /// `FAIL <seq> GATEWAY`.
+    Gateway(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRoute(e) | Self::Gateway(e) => write!(f, "{e}"),
+        }
+    }
 }
 
 /// Why there is no forecast.
@@ -390,9 +411,16 @@ impl Session {
         let call = self.cfg.node_call.clone();
         let (transmission, chunks) = match p.cmd {
             Command::Tx { dest, text } => {
-                let reply = match svc.send_message(&dest, &text) {
+                let reply = match svc.send_message(&dest, &p.call, &text) {
                     Ok(()) => Reply::Sent { seq },
-                    Err(e) => {
+                    Err(SendError::NoRoute(why)) => {
+                        log::warn!("no route to {dest}: {why}");
+                        Reply::Failed {
+                            seq,
+                            reason: "NO ROUTE".into(),
+                        }
+                    }
+                    Err(SendError::Gateway(e)) => {
                         log::warn!("sending to {dest} failed: {e}");
                         Reply::Failed {
                             seq,
@@ -688,18 +716,31 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         sent: Vec<(String, String)>,
+        from_calls: Vec<String>,
         inbox: Vec<Message>,
         fail_send: bool,
+        no_route: bool,
         weather_calls: Vec<String>,
         weather_error: Option<WxError>,
     }
 
     impl Services for Fake {
-        fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+        fn send_message(
+            &mut self,
+            dest: &str,
+            from_call: &str,
+            text: &str,
+        ) -> Result<(), SendError> {
+            if self.no_route {
+                return Err(SendError::NoRoute(
+                    "no Google Voice reply address yet".into(),
+                ));
+            }
             if self.fail_send {
-                return Err("smtp down".into());
+                return Err(SendError::Gateway("smtp down".into()));
             }
             self.sent.push((dest.into(), text.into()));
+            self.from_calls.push(from_call.into());
             Ok(())
         }
         fn ready_messages(&mut self) -> Vec<Message> {
@@ -900,6 +941,27 @@ mod tests {
         tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
         assert_eq!(tx(&r.send(10, "OK 43 {43} K")), "FAIL 43 GATEWAY DE N0DE K");
         assert_eq!(r.stored_seq(), 43);
+    }
+
+    #[test]
+    fn no_route_is_keyed_and_codes_stay_used() {
+        let mut r = Rig::new();
+        r.svc.no_route = true;
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        assert_eq!(
+            tx(&r.send(10, "OK 43 {43} K")),
+            "FAIL 43 NO ROUTE DE N0DE K"
+        );
+        assert_eq!(r.stored_seq(), 43);
+        assert!(r.svc.sent.is_empty());
+    }
+
+    #[test]
+    fn commit_passes_the_opening_call() {
+        let mut r = Rig::new();
+        tx(&r.send(0, "W5XXX 42 {42} TX MOM HI K"));
+        tx(&r.send(10, "OK 43 {43} K"));
+        assert_eq!(r.svc.from_calls, ["W5XXX"]);
     }
 
     #[test]

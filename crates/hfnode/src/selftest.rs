@@ -35,7 +35,7 @@ use crate::audio::{self, Block, BlockSender};
 use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
-use crate::session::{Services, WxError};
+use crate::session::{SendError, Services, WxError};
 use crate::station::{InhibitNotice, Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
@@ -153,6 +153,8 @@ pub struct NodeSetup {
     pub key_wpm: u32,
     pub chunk_chars: usize,
     pub fail_send: bool,
+    /// No route to any contact (`FAIL <seq> NO ROUTE`).
+    pub no_route: bool,
     /// What every weather request gets instead of a forecast.
     pub weather_error: Option<WxError>,
     /// Inbound messages ready to read, as (contact, text).
@@ -174,6 +176,7 @@ impl Default for NodeSetup {
             key_wpm: 18,
             chunk_chars: 60,
             fail_send: false,
+            no_route: false,
             weather_error: None,
             inbox: Vec::new(),
             schedule: None,
@@ -451,6 +454,7 @@ pub struct FakeServices {
     pub read: Vec<u64>,
     pub weather_calls: Vec<String>,
     pub fail_send: bool,
+    pub no_route: bool,
     pub weather_error: Option<WxError>,
 }
 
@@ -462,9 +466,14 @@ impl FakeServices {
 }
 
 impl Services for FakeServices {
-    fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+    fn send_message(&mut self, dest: &str, _from_call: &str, text: &str) -> Result<(), SendError> {
+        if self.no_route {
+            return Err(SendError::NoRoute(
+                "no Google Voice reply address yet".into(),
+            ));
+        }
         if self.fail_send {
-            return Err("gateway down".into());
+            return Err(SendError::Gateway("gateway down".into()));
         }
         self.sent.push((dest.into(), text.into()));
         Ok(())
@@ -1413,6 +1422,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     let svc = FakeServices {
         inbox: inbox(&s.node),
         fail_send: s.node.fail_send,
+        no_route: s.node.no_route,
         weather_error: s.node.weather_error.clone(),
         ..FakeServices::default()
     };
@@ -1978,6 +1988,24 @@ pub fn scenarios() -> Vec<Scenario> {
             s.node.fail_send = true;
             let rb = rb_tx(42, "BOB", "CALL ME");
             let fail = de("FAIL 43 GATEWAY");
+            s.script[1] = Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(fail.clone()),
+            };
+            s.expect.keyed = full(&[&rb, &fail]);
+            s.expect.sent = Vec::new();
+            s
+        },
+        {
+            let mut s = tx(
+                "tx-no-route",
+                "TX to a contact the node cannot reach yet: FAIL 43 NO ROUTE",
+                "MOM",
+                "CALL ME",
+            );
+            s.node.no_route = true;
+            let rb = rb_tx(42, "MOM", "CALL ME");
+            let fail = de("FAIL 43 NO ROUTE");
             s.script[1] = Step::Say {
                 text: "OK 43 {43} K".into(),
                 expect: Some(fail.clone()),

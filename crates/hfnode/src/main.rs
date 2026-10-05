@@ -115,6 +115,14 @@ enum Cmd {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Texts, iMessage and email without the radio: see how TX would reach each
+    /// contact and what the node would take, or send one message.
+    Messages {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: MessagesCmd,
+    },
     /// Try the inbound filter configured in `[filter]` (Claude or Ollama) without
     /// the radio. Nothing is transmitted or stored.
     Filter {
@@ -199,6 +207,48 @@ enum Cmd {
         #[arg(long, default_value_t = 600.0)]
         pitch: f32,
     },
+}
+
+#[derive(Subcommand)]
+enum MessagesCmd {
+    /// Show, without changing anything, how TX would reach each contact and what
+    /// the node would take from each inbound route. Reads the node's mailbox
+    /// read-only (no flags set) and, on a Mac, Messages' database. Writes nothing in
+    /// state_dir; the running node learns Google Voice reply addresses itself.
+    /// --save-raw also writes Google Voice mails to DIR.
+    Check {
+        /// How far back to show contacts' iMessages, in hours.
+        #[arg(long, default_value_t = 24)]
+        since: u64,
+        /// Save Google Voice mails as .eml files in this folder (they hold phone
+        /// numbers, reply tokens and private texts).
+        #[arg(long, value_name = "DIR")]
+        save_raw: Option<PathBuf>,
+        /// Print the raw attributedBody of this Messages row, if it is a contact's.
+        #[arg(long, value_name = "ROWID")]
+        dump: Option<i64>,
+    },
+    /// Send one message now by the route TX would use: a real text or email, tagged
+    /// like a TX; an iMessage opens a reply window like a TX does. Exits 0 when
+    /// sent, 1 when the route failed, 2 when there is no route.
+    Send {
+        /// Use only this kind of route.
+        #[arg(long, value_enum)]
+        via: Option<ViaArg>,
+        /// The field callsign it is sent as (default: the first in the config).
+        #[arg(long)]
+        call: Option<String>,
+        /// Contact name, as in the config.
+        name: String,
+        text: String,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ViaArg {
+    Imessage,
+    GoogleVoice,
+    Email,
 }
 
 #[derive(Subcommand)]
@@ -293,6 +343,7 @@ fn main() -> Result<()> {
         Cmd::Handheld { config, action } => handheld_cmd(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&config, &Config::load(&config)?),
         Cmd::Storm { config } => storm_check(&Config::load(&config)?),
+        Cmd::Messages { config, action } => messages_cmd(&Config::load(&config)?, action),
         Cmd::Filter { config, action } => filter_cmd(&Config::load(&config)?, action),
         Cmd::Selftest {
             sweep: true,
@@ -449,7 +500,40 @@ fn codes(cfg: &Config, from: Option<u64>, count: u64) -> Result<()> {
             default_wx(cfg)
         );
     }
+    if !cfg.contacts.is_empty() {
+        println!();
+        println!("Contacts (TX route when printed):");
+        for line in hfnode::messages::code_table_routes(cfg) {
+            println!("{line}");
+        }
+    }
     Ok(())
+}
+
+fn messages_cmd(cfg: &Config, action: MessagesCmd) -> Result<()> {
+    let mut out = std::io::stdout();
+    match action {
+        MessagesCmd::Check {
+            since,
+            save_raw,
+            dump,
+        } => hfnode::messages::check(cfg, since, save_raw.as_deref(), dump, &mut out),
+        MessagesCmd::Send {
+            via,
+            call,
+            name,
+            text,
+        } => {
+            let via = via.map(|v| match v {
+                ViaArg::Imessage => gateway::RouteKind::IMessage,
+                ViaArg::GoogleVoice => gateway::RouteKind::GoogleVoice,
+                ViaArg::Email => gateway::RouteKind::Email,
+            });
+            let result = hfnode::messages::send(cfg, via, call.as_deref(), &name, &text, &mut out)?;
+            out.flush()?;
+            std::process::exit(result as i32);
+        }
+    }
 }
 
 /// The rules printed under the code table's title; docs/operating.md shows them too.
@@ -495,7 +579,13 @@ fn sim(cfg: &Config, offline: bool) -> Result<()> {
             inbox: inbox.clone(),
         })
     } else {
-        Box::new(node::live_services(cfg, inbox.clone())?)
+        let im = hfnode::messages::probe_imessage(cfg).map(|(shared, r)| {
+            if let hfnode::gateway::imessage::Readiness::NotReady(why) = r {
+                println!("iMessage not available: {why}");
+            }
+            shared
+        });
+        Box::new(node::live_services(cfg, inbox.clone(), im)?)
     };
     let book = node::load_codebook(cfg)?;
     println!("Type what the field operator sends, e.g.");
@@ -962,10 +1052,16 @@ fn run(config: &Path, cfg: &Config) -> Result<()> {
 
 fn run_node(cfg: &Config, alerts: &alert::Alerts, storm: Option<Arc<StormHold>>) -> Result<()> {
     let inbox = node::open_inbox(cfg)?;
+    // Checked by the node's iMessage thread, and not ready until then.
+    let im = cfg
+        .imessage
+        .as_ref()
+        .map(|_| Arc::new(hfnode::gateway::imessage::ImShared::new()));
     let parts = NodeParts {
         session: node::build_session(cfg)?,
-        svc: node::live_services(cfg, inbox.clone())?,
+        svc: node::live_services(cfg, inbox.clone(), im.clone())?,
         inbox,
+        im,
         alerts,
         storm,
     };
@@ -988,6 +1084,7 @@ fn run_node(cfg: &Config, alerts: &alert::Alerts, storm: Option<Arc<StormHold>>)
 /// What `run` builds before opening the radio, whichever it is.
 struct NodeParts<'a> {
     inbox: Arc<Mutex<Inbox>>,
+    im: Option<Arc<hfnode::gateway::imessage::ImShared>>,
     session: hfnode::session::Session,
     svc: gateway::LiveServices,
     alerts: &'a alert::Alerts,
@@ -1003,12 +1100,13 @@ fn serve<R: civ::Rig + 'static>(
 ) -> Result<()> {
     let NodeParts {
         inbox,
+        im,
         mut session,
         mut svc,
         alerts,
         storm,
     } = parts;
-    node::spawn_inbound(cfg.clone(), inbox);
+    node::spawn_inbound(cfg.clone(), inbox, im);
     let mut station = Station::new(
         rig,
         StationConfig::from_config(&cfg.station),

@@ -1,16 +1,22 @@
 //! Outbound mail over SMTP and inbound replies over IMAP.
 //!
-//! SMS is handled as email: contacts' phones are reached through their carrier's
-//! email-to-SMS gateway, and replies from the phone come back as email.
+//! Texts travel as email too: Google Voice forwards texts to the node's number to
+//! the mailbox and texts back the replies the node emails (see
+//! [`super::google_voice`]), and where a carrier still runs an email-to-SMS gateway
+//! a phone can be reached through it.
 
-use crate::config::{Contact, Email};
+use super::google_voice::{self, parse_gv_from};
+use crate::config::{Contact, Email, Phone, GOOGLE_VOICE_DOMAIN};
 use crate::inbox::Inbox;
 use anyhow::{anyhow, Context, Result};
 use lettre::message::{header::ContentType, Mailbox};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use mail_parser::{HeaderName, MessageParser};
-use std::sync::{Arc, Mutex};
+use rustls_connector::{rustls, rustls_native_certs, RustlsConnector};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 fn password(cfg: &Email) -> Result<String> {
     std::env::var(&cfg.password_env)
@@ -39,19 +45,38 @@ impl Mailer {
         })
     }
 
+    /// Email `text` as from the first field callsign.
     pub fn send(&self, to: &str, text: &str) -> Result<()> {
+        self.send_as(to, text, &self.field_call)
+    }
+
+    /// Email `text` as from field callsign `call`, with a signature saying how it
+    /// was sent.
+    pub fn send_as(&self, to: &str, text: &str, call: &str) -> Result<()> {
         let body = format!(
-            "{text}\n\n-- \nSent by {} over HF radio. Reply to this message; keep it short and plain.",
-            self.field_call
+            "{text}\n\n-- \nSent by {call} over HF radio. Reply to this message; keep it short and plain."
         );
-        let msg = Message::builder()
-            .from(self.from.clone())
-            .to(to.parse().with_context(|| format!("bad address {to}"))?)
-            .subject(format!("From {}", self.field_call))
-            .header(ContentType::TEXT_PLAIN)
-            .body(body)?;
-        self.transport.send(&msg)?;
+        let to: Mailbox = to.parse().with_context(|| format!("bad address {to}"))?;
+        self.deliver(to.clone(), Some(format!("From {call}")), body)?;
         log::info!("sent message to {to}");
+        Ok(())
+    }
+
+    /// Email `text` alone, with no subject and no signature: for Google Voice, which
+    /// texts the body. Logs nothing and keeps the address out of its errors, since a
+    /// Google Voice reply address holds the conversation's token.
+    pub fn send_text(&self, to: &str, text: &str) -> Result<()> {
+        let to: Mailbox = to.parse().context("bad Google Voice reply address")?;
+        self.deliver(to, None, text.to_string())
+    }
+
+    fn deliver(&self, to: Mailbox, subject: Option<String>, body: String) -> Result<()> {
+        let mut msg = Message::builder().from(self.from.clone()).to(to);
+        if let Some(s) = subject {
+            msg = msg.subject(s);
+        }
+        let msg = msg.header(ContentType::TEXT_PLAIN).body(body)?;
+        self.transport.send(&msg)?;
         Ok(())
     }
 }
@@ -84,9 +109,23 @@ fn carrier(domain: &str) -> Option<&'static [&'static str]> {
     SMS_GATEWAYS.iter().copied().find(|g| g.contains(&domain))
 }
 
+/// Whether `address` is at a carrier email-to-SMS gateway.
+pub fn is_carrier_address(address: &str) -> bool {
+    let a = address.trim().to_ascii_lowercase();
+    a.rsplit_once('@')
+        .is_some_and(|(_, d)| carrier(d).is_some())
+}
+
+/// The 10-digit number of a carrier email-to-SMS address (lowercase).
+pub(crate) fn carrier_number(address: &str) -> Option<&str> {
+    let (local, domain) = address.rsplit_once('@')?;
+    carrier(domain)?;
+    us_number(local)
+}
+
 /// A 10-digit US number from an address local part: exactly the number, optionally
 /// with a leading `1` or `+1`.
-fn us_number(local: &str) -> Option<&str> {
+pub(crate) fn us_number(local: &str) -> Option<&str> {
     let n = match local.len() {
         12 => local.strip_prefix("+1")?,
         11 => local.strip_prefix('1')?,
@@ -117,7 +156,10 @@ pub fn contact_for<'c>(
     let (fl, fd) = from.rsplit_once('@')?;
     if let (Some(group), Some(n)) = (carrier(fd), us_number(fl)) {
         let by_number = contacts.iter().find(|c| {
-            let addr = c.address.trim().to_ascii_lowercase();
+            let Some(addr) = &c.address else {
+                return false;
+            };
+            let addr = addr.trim().to_ascii_lowercase();
             let Some((cl, cd)) = addr.rsplit_once('@') else {
                 return false;
             };
@@ -129,7 +171,11 @@ pub fn contact_for<'c>(
     }
     contacts
         .iter()
-        .find(|c| c.address.trim().eq_ignore_ascii_case(&from))
+        .find(|c| {
+            c.address
+                .as_deref()
+                .is_some_and(|a| a.trim().eq_ignore_ascii_case(&from))
+        })
         .filter(|_| authenticated(auth_results, &from, authserv_id))
 }
 
@@ -147,6 +193,26 @@ pub fn contact_for<'c>(
 /// This authenticates the domain, not the mailbox: another user of the contact's
 /// own provider could still pass, if that provider lets users set any From.
 pub fn authenticated(auth_results: &[&str], from_addr: &str, authserv_id: Option<&str>) -> bool {
+    passes(auth_results, from_addr, authserv_id, &["dkim", "spf"])
+}
+
+/// [`authenticated`] by DKIM alone. Google Voice mail must be signed: an SPF pass
+/// only says the mail left through Google's servers, which other Google users'
+/// mail does too.
+pub(crate) fn dkim_authenticated(
+    auth_results: &[&str],
+    from_addr: &str,
+    authserv_id: Option<&str>,
+) -> bool {
+    passes(auth_results, from_addr, authserv_id, &["dkim"])
+}
+
+fn passes(
+    auth_results: &[&str],
+    from_addr: &str,
+    authserv_id: Option<&str>,
+    methods: &[&str],
+) -> bool {
     let Some((_, from_domain)) = from_addr.rsplit_once('@') else {
         return false;
     };
@@ -154,8 +220,8 @@ pub fn authenticated(auth_results: &[&str], from_addr: &str, authserv_id: Option
         return false;
     };
     header.results.iter().any(|r| {
-        let signer = match (r.method.as_str(), r.result.as_str()) {
-            ("dkim", "pass") | ("spf", "pass") => r.domain(),
+        let signer = match r.result.as_str() {
+            "pass" if methods.contains(&r.method.as_str()) => r.domain(),
             _ => None,
         };
         signer.is_some_and(|d| aligned(&d, from_domain))
@@ -361,12 +427,53 @@ fn uid_sets(uids: &[u32]) -> Vec<String> {
         .collect()
 }
 
+/// How a message reached the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    Email,
+    /// A carrier email-to-SMS gateway.
+    Carrier,
+    GoogleVoice,
+}
+
 /// A message the node takes: who it is from, its de-duplication id and its text.
 #[derive(Debug)]
 pub struct Accepted<'c> {
     pub contact: &'c Contact,
     pub source_id: String,
     pub text: String,
+    pub via: Via,
+}
+
+/// A message the node does not take.
+#[derive(Debug)]
+pub struct Rejected<'c> {
+    pub why: String,
+    /// Worth a warning: probably a setup problem or a changed format, not just
+    /// someone else's mail.
+    pub warn: bool,
+    /// A contact who sent something the node could not read: they get a notice in
+    /// the inbox in place of their text.
+    pub notice: Option<&'c Contact>,
+    pub source_id: Option<String>,
+}
+
+impl<'c> Rejected<'c> {
+    fn info(why: impl Into<String>) -> Self {
+        Self {
+            why: why.into(),
+            warn: false,
+            notice: None,
+            source_id: None,
+        }
+    }
+
+    fn warn(why: impl Into<String>) -> Self {
+        Self {
+            warn: true,
+            ..Self::info(why)
+        }
+    }
 }
 
 /// Decide whether one fetched message goes in the inbox. `Err` says why not.
@@ -376,17 +483,121 @@ pub fn accept<'c>(
     contacts: &'c [Contact],
     authserv_id: Option<&str>,
 ) -> Result<Accepted<'c>, String> {
+    accept_with(raw, uid, contacts, authserv_id, None).map_err(|r| r.why)
+}
+
+/// [`accept`], with Google Voice texts to the number `gv` taken too.
+///
+/// Mail from Google Voice's domain is only ever judged as a Google Voice text: the
+/// sender's number must be a contact's `phone`, our own mail server must report a
+/// DKIM pass for it, and the body must be recognised as Google Voice's; anything
+/// else is refused. A contact's text that cannot be read gets a notice.
+pub fn accept_with<'c>(
+    raw: &[u8],
+    uid: u32,
+    contacts: &'c [Contact],
+    authserv_id: Option<&str>,
+    gv: Option<&Phone>,
+) -> Result<Accepted<'c>, Rejected<'c>> {
     let parsed = MessageParser::default()
         .parse(raw)
-        .ok_or("unparseable message")?;
-    let from = parsed
+        .ok_or_else(|| Rejected::info("unparseable message"))?;
+    let from = from_address(&parsed);
+    let auth_results = auth_headers(&parsed);
+    let source_id = parsed
+        .message_id()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("uid:{uid}"));
+    let domain = from
+        .rsplit_once('@')
+        .map(|(_, d)| d.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if domain == GOOGLE_VOICE_DOMAIN {
+        let gv = gv.ok_or_else(|| {
+            Rejected::warn("Google Voice mail, but [google_voice] is not configured")
+        })?;
+        let addr = parse_gv_from(&from)
+            .ok_or_else(|| Rejected::warn("Google Voice sender address not recognized"))?;
+        if addr.node != *gv {
+            return Err(Rejected::warn("Google Voice mail for another number"));
+        }
+        // The number is not logged: it is not a contact's.
+        let contact = contacts
+            .iter()
+            .find(|c| c.phone.as_ref() == Some(&addr.sender))
+            .ok_or_else(|| {
+                Rejected::info("Google Voice text from a number that is not a contact's phone")
+            })?;
+        let n = &contact.name;
+        if !dkim_authenticated(&auth_results, &from, authserv_id) {
+            return Err(Rejected::warn(format!(
+                "Google Voice mail from {n} without a DKIM pass from our mail server"
+            )));
+        }
+        let text = match google_voice::gv_text(&parsed) {
+            Ok(body) => body.text,
+            Err(e) => {
+                return Err(Rejected {
+                    why: format!("Google Voice mail from {n}: {e}"),
+                    warn: true,
+                    notice: Some(contact),
+                    source_id: Some(source_id),
+                })
+            }
+        };
+        let text = reacted(contact, text)?;
+        return Ok(Accepted {
+            contact,
+            source_id,
+            text,
+            via: Via::GoogleVoice,
+        });
+    }
+
+    let contact = contact_for(contacts, &from, &auth_results, authserv_id).ok_or_else(|| {
+        Rejected::info(format!(
+            "from {from:?}: not a contact, or not authenticated"
+        ))
+    })?;
+    let text = strip_reply(&parsed.body_text(0).unwrap_or_default());
+    if text.is_empty() {
+        return Err(Rejected::info(format!(
+            "from {}: no text in the body",
+            contact.name
+        )));
+    }
+    let via = if carrier(&domain).is_some() {
+        Via::Carrier
+    } else {
+        Via::Email
+    };
+    let text = match via {
+        Via::Carrier => reacted(contact, text)?,
+        _ => text,
+    };
+    Ok(Accepted {
+        contact,
+        source_id,
+        text,
+        via,
+    })
+}
+
+/// The From address, as written (a Google Voice token may be case-sensitive).
+pub(crate) fn from_address(parsed: &mail_parser::Message) -> String {
+    parsed
         .from()
         .and_then(|a| a.first())
         .and_then(|a| a.address())
         .unwrap_or("")
-        .to_string();
-    // In header order, topmost first.
-    let auth_results: Vec<&str> = parsed
+        .trim()
+        .to_string()
+}
+
+/// The Authentication-Results header values, in header order, topmost first.
+pub(crate) fn auth_headers<'a>(parsed: &'a mail_parser::Message) -> Vec<&'a str> {
+    parsed
         .headers()
         .iter()
         .filter(|h| h.name == HeaderName::AuthenticationResults)
@@ -396,28 +607,190 @@ pub fn accept<'c>(
                 .get(h.offset_start as usize..h.offset_end as usize)?;
             std::str::from_utf8(raw).ok()
         })
+        .collect()
+}
+
+/// What the believed Authentication-Results header says about DKIM, for
+/// `hfnode messages check`.
+pub(crate) fn auth_summary(auth_results: &[&str], authserv_id: Option<&str>) -> String {
+    let Some(h) = trusted_header(auth_results, authserv_id) else {
+        return "no Authentication-Results header believed".into();
+    };
+    let dkim: Vec<String> = h
+        .results
+        .iter()
+        .filter(|r| r.method == "dkim")
+        .map(|r| format!("dkim={} d={}", r.result, r.domain().unwrap_or_default()))
         .collect();
-    let contact = contact_for(contacts, &from, &auth_results, authserv_id)
-        .ok_or_else(|| format!("from {from:?}: not a contact, or not authenticated"))?;
-    let text = strip_reply(&parsed.body_text(0).unwrap_or_default());
-    if text.is_empty() {
-        return Err(format!("from {}: no text in the body", contact.name));
+    let id = if h.authserv_id.is_empty() {
+        "(no authserv-id)"
+    } else {
+        &h.authserv_id
+    };
+    if dkim.is_empty() {
+        format!("{id}: no DKIM result")
+    } else {
+        format!("{id}: {}", dkim.join(", "))
     }
-    let source_id = parsed
-        .message_id()
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("uid:{uid}"));
-    Ok(Accepted {
-        contact,
-        source_id,
-        text,
-    })
+}
+
+/// A phone's reaction to the operator's text, shortened for the air; a removed
+/// reaction is not read out at all. Anything else is returned unchanged.
+fn reacted<'c>(contact: &'c Contact, text: String) -> Result<String, Rejected<'c>> {
+    match sms_reaction(&text) {
+        None => Ok(text),
+        Some(Reaction::Said(said)) => {
+            // The quoted words are the operator's own.
+            log::info!("reaction from {}: {text}", contact.name);
+            Ok(said.to_string())
+        }
+        Some(Reaction::Removed) => Err(Rejected::info(format!(
+            "reaction removed by {}",
+            contact.name
+        ))),
+    }
+}
+
+/// A reaction sent as a text by a phone that cannot send it as a reaction (an
+/// iPhone tapback on an SMS conversation), e.g. `Liked “RUNNING LATE”`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reaction {
+    Said(&'static str),
+    Removed,
+}
+
+/// Whether the whole of `text` is a reaction text. Only for texts (Google Voice and
+/// carrier gateways): an email saying `Liked "the photos"` is just an email.
+pub fn sms_reaction(text: &str) -> Option<Reaction> {
+    const SAID: [(&str, &str); 6] = [
+        ("Liked", "LIKED YOUR MSG"),
+        ("Loved", "LOVED YOUR MSG"),
+        ("Disliked", "DISLIKED YOUR MSG"),
+        ("Laughed at", "LAUGHED AT YOUR MSG"),
+        ("Emphasized", "EMPHASIZED YOUR MSG"),
+        ("Questioned", "QUESTIONED YOUR MSG"),
+    ];
+    let text = text.trim();
+    for (verb, said) in SAID {
+        if let Some(rest) = text.strip_prefix(verb).and_then(|r| r.strip_prefix(' ')) {
+            if is_quoted(rest) {
+                return Some(Reaction::Said(said));
+            }
+        }
+    }
+    // "Reacted 😂 to “…”" and "Removed a like from “…”": anything in between.
+    let ends_quoted = |rest: &str, word: &str| {
+        rest.match_indices(word)
+            .any(|(i, _)| i > 0 && is_quoted(&rest[i + word.len()..]))
+    };
+    if let Some(rest) = text.strip_prefix("Reacted ") {
+        if ends_quoted(rest, " to ") {
+            return Some(Reaction::Said("REACTED TO YOUR MSG"));
+        }
+    }
+    let removed = text
+        .strip_prefix("Removed a ")
+        .or_else(|| text.strip_prefix("Removed an "));
+    if removed.is_some_and(|rest| ends_quoted(rest, " from ")) {
+        return Some(Reaction::Removed);
+    }
+    None
+}
+
+/// Whether `s` is a quotation: straight or curly quotes around at least one
+/// character.
+fn is_quoted(s: &str) -> bool {
+    let inner = s
+        .strip_prefix('"')
+        .or_else(|| s.strip_prefix('\u{201C}'))
+        .and_then(|r| r.strip_suffix('"').or_else(|| r.strip_suffix('\u{201D}')));
+    inner.is_some_and(|i| !i.is_empty())
+}
+
+/// Read and write timeouts on the node's IMAP socket: a stalled server fails the
+/// mail check instead of stopping it for good.
+const IMAP_IO_TIMEOUT: Duration = Duration::from_secs(60);
+const IMAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Log in to the node's mailbox.
+pub(crate) fn connect_imap(cfg: &Email) -> Result<imap::Session<imap::Connection>> {
+    let client = if cfg.imap_port == 993 {
+        connect_tls(
+            &cfg.imap_host,
+            (cfg.imap_host.as_str(), cfg.imap_port),
+            IMAP_CONNECT_TIMEOUT,
+            IMAP_IO_TIMEOUT,
+        )?
+    } else {
+        // STARTTLS: only the imap crate's own connection, which has no timeouts (the
+        // node warns about this when it starts).
+        imap::ClientBuilder::new(cfg.imap_host.as_str(), cfg.imap_port)
+            .tls_kind(imap::TlsKind::Rust)
+            .connect()
+            .context("IMAP connect")?
+    };
+    client
+        .login(&cfg.username, password(cfg)?)
+        .map_err(|(e, _)| anyhow!("IMAP login: {e}"))
+}
+
+/// An IMAP connection over implicit TLS (port 993) whose socket times out.
+pub(crate) fn connect_tls(
+    host: &str,
+    addrs: impl ToSocketAddrs,
+    connect: Duration,
+    io: Duration,
+) -> Result<imap::Client<imap::Connection>> {
+    let mut last = None;
+    let mut tcp = None;
+    for addr in addrs
+        .to_socket_addrs()
+        .with_context(|| format!("IMAP: looking up {host}"))?
+    {
+        match TcpStream::connect_timeout(&addr, connect) {
+            Ok(s) => {
+                tcp = Some(s);
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    let tcp = match (tcp, last) {
+        (Some(tcp), _) => tcp,
+        (None, Some(e)) => return Err(anyhow!(e).context(format!("IMAP connect to {host}"))),
+        (None, None) => anyhow::bail!("IMAP: no address for {host}"),
+    };
+    tcp.set_read_timeout(Some(io))?;
+    tcp.set_write_timeout(Some(io))?;
+    let tls = tls_connector()
+        .connect(host, tcp)
+        .map_err(|e| anyhow!("IMAP TLS with {host}: {e}"))?;
+    let mut client = imap::Client::new(Box::new(tls) as imap::Connection);
+    client.read_greeting().context("IMAP greeting")?;
+    Ok(client)
+}
+
+/// TLS with the system's root certificates, as the imap crate's own connection.
+fn tls_connector() -> RustlsConnector {
+    static CONNECTOR: OnceLock<RustlsConnector> = OnceLock::new();
+    CONNECTOR
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in rustls_native_certs::load_native_certs().unwrap_or_default() {
+                let _ = roots.add(cert);
+            }
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+                .into()
+        })
+        .clone()
 }
 
 /// Fetch unseen mail from contacts into the inbox. Only known contacts can get text
-/// keyed on the air (see [`contact_for`]); anything else is tagged
-/// [`IGNORED_KEYWORD`], left unread, and not fetched again. A message the server
-/// fails to fetch or flag is logged and skipped, and tried again next poll.
+/// keyed on the air (see [`contact_for`] and [`accept_with`]); anything else is
+/// tagged [`IGNORED_KEYWORD`], left unread, and not fetched again. A message the
+/// server fails to fetch or flag is logged and skipped, and tried again next poll.
 ///
 /// With `retry_ignored` (the node's first poll after starting), the keyword is
 /// first cleared from every message, so mail turned away under an older
@@ -428,14 +801,9 @@ pub fn poll_imap(
     contacts: &[Contact],
     inbox: &Arc<Mutex<Inbox>>,
     retry_ignored: bool,
+    gv: Option<&Phone>,
 ) -> Result<usize> {
-    let client = imap::ClientBuilder::new(cfg.imap_host.as_str(), cfg.imap_port)
-        .tls_kind(imap::TlsKind::Rust)
-        .connect()
-        .context("IMAP connect")?;
-    let mut session = client
-        .login(&cfg.username, password(cfg)?)
-        .map_err(|(e, _)| anyhow!("IMAP login: {e}"))?;
+    let mut session = connect_imap(cfg)?;
     session.select("INBOX")?;
     if retry_ignored {
         let mut tagged: Vec<u32> = session
@@ -459,35 +827,50 @@ pub fn poll_imap(
     uids.sort_unstable();
     let mut added = 0;
     for uid in uids {
-        let fetches = match session.uid_fetch(uid.to_string(), "BODY.PEEK[]") {
+        let fetches = match session.uid_fetch(uid.to_string(), "(BODY.PEEK[] INTERNALDATE)") {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("IMAP fetch of UID {uid} failed, skipped: {e}");
                 continue;
             }
         };
-        let Some(raw) = fetches
+        let Some(fetch) = fetches
             .iter()
             .filter(|f| f.uid.is_none_or(|u| u == uid))
-            .find_map(|f| f.body())
+            .find(|f| f.body().is_some())
         else {
             log::warn!("IMAP fetch of UID {uid} returned no body, skipped");
             continue;
         };
-        let flag = match accept(raw, uid, contacts, cfg.authserv_id.as_deref()) {
+        let raw = fetch.body().unwrap_or_default();
+        let now = super::unix_now();
+        let received = super::stamp(fetch.internal_date().map(|d| d.timestamp()), now);
+        let flag = match accept_with(raw, uid, contacts, cfg.authserv_id.as_deref(), gv) {
             Ok(m) => {
                 let mut ib = inbox.lock().map_err(|_| anyhow!("inbox lock poisoned"))?;
                 // On error nothing is flagged, so the mail stays unseen for next time.
                 // Ok(false) is a duplicate already on disk (the inbox never keeps
                 // anything in memory that it failed to save).
-                if ib.add(&m.contact.name, &m.source_id, &m.text, super::unix_now())? {
+                if ib.add(&m.contact.name, &m.source_id, &m.text, received)? {
                     added += 1;
                     log::info!("new message from {}", m.contact.name);
                 }
                 "\\Seen"
             }
-            Err(why) => {
-                log::info!("ignoring UID {uid}: {why}");
+            Err(r) => {
+                if r.warn {
+                    log::warn!("ignoring UID {uid}: {}", r.why);
+                } else {
+                    log::info!("ignoring UID {uid}: {}", r.why);
+                }
+                if let Some(c) = r.notice {
+                    let source = r.source_id.unwrap_or_else(|| format!("uid:{uid}"));
+                    let mut ib = inbox.lock().map_err(|_| anyhow!("inbox lock poisoned"))?;
+                    // Not flagged unless the notice is safely stored.
+                    if ib.add(&c.name, &format!("gv-unreadable:{source}"), UNREADABLE, now)? {
+                        added += 1;
+                    }
+                }
                 IGNORED_KEYWORD
             }
         };
@@ -498,6 +881,10 @@ pub fn poll_imap(
     session.logout()?;
     Ok(added)
 }
+
+/// What the field operator hears in place of a contact's text the node could not
+/// read.
+pub const UNREADABLE: &str = "TEXT NOT READABLE SEE NODE LOG";
 
 #[cfg(test)]
 mod tests {
@@ -524,11 +911,13 @@ mod tests {
         vec![
             Contact {
                 name: "MOM".into(),
-                address: "5551234567@vtext.com".into(),
+                address: Some("5551234567@vtext.com".into()),
+                ..Default::default()
             },
             Contact {
                 name: "BOB".into(),
-                address: "Bob@Example.com".into(),
+                address: Some("Bob@Example.com".into()),
+                ..Default::default()
             },
         ]
     }
@@ -569,7 +958,8 @@ mod tests {
         // A number-like address that is not at a carrier is not matched by number.
         let c = vec![Contact {
             name: "DAD".into(),
-            address: "5551234567@example.com".into(),
+            address: Some("5551234567@example.com".into()),
+            ..Default::default()
         }];
         assert_eq!(
             name(contact_for(&c, "5551234567@vtext.com", &[], None)),
@@ -728,6 +1118,183 @@ mod tests {
         assert_eq!(
             (m.contact.name.as_str(), m.source_id.as_str()),
             ("MOM", "uid:9")
+        );
+    }
+
+    mod google_voice_texts {
+        use super::super::*;
+        use crate::gateway::google_voice::tests::{contacts, gv_number, FIXTURE};
+
+        /// (contact, text, route) or (why, warn, notice for).
+        type Taken = Result<(String, String, Via), (String, bool, Option<String>)>;
+
+        fn take(raw: &str) -> Taken {
+            let c = contacts();
+            let gv = gv_number();
+            accept_with(raw.as_bytes(), 3, &c, Some("mx.google.com"), Some(&gv))
+                .map(|m| (m.contact.name.clone(), m.text, m.via))
+                .map_err(|r| (r.why, r.warn, r.notice.map(|c| c.name.clone())))
+        }
+
+        #[test]
+        fn a_text_from_a_contact_is_taken() {
+            let c = contacts();
+            let gv = gv_number();
+            let m =
+                accept_with(FIXTURE.as_bytes(), 3, &c, Some("mx.google.com"), Some(&gv)).unwrap();
+            assert_eq!(
+                (m.contact.name.as_str(), m.text.as_str(), m.via),
+                ("MOM", "Running late, home by 6", Via::GoogleVoice)
+            );
+            assert_eq!(m.source_id, "gv-1@txt.voice.google.com");
+            // Ten or eleven digits in either field.
+            for local in ["5550001111.15551234567", "15550001111.5551234567"] {
+                let raw = FIXTURE.replace(
+                    "15550001111.15551234567.AbCdEf1234@",
+                    &format!("{local}.AbCdEf1234@"),
+                );
+                assert_ne!(raw, FIXTURE);
+                assert_eq!(take(&raw).unwrap().0, "MOM", "{local}");
+            }
+            // DKIM by google.com is aligned with txt.voice.google.com.
+            let raw = FIXTURE.replace("header.i=@txt.voice.google.com", "header.d=google.com");
+            assert!(take(&raw).is_ok());
+        }
+
+        #[test]
+        fn anything_else_from_google_voice_is_refused() {
+            // Not configured.
+            let c = contacts();
+            let r = accept_with(FIXTURE.as_bytes(), 3, &c, None, None).unwrap_err();
+            assert!(r.warn && r.why.contains("not configured"), "{}", r.why);
+            for (from, to, says, warn) in [
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "15550002222.15551234567.AbCdEf1234@",
+                    "another number",
+                    true,
+                ),
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "15550001111.15551234567.Ab.Cd@",
+                    "not recognized",
+                    true,
+                ),
+                (
+                    "15550001111.15551234567.AbCdEf1234@",
+                    "1555000111x.15551234567.AbCdEf1234@",
+                    "not recognized",
+                    true,
+                ),
+                ("15551234567", "15559990000", "not a contact's phone", false),
+                ("dkim=pass", "dkim=none", "without a DKIM pass", true),
+            ] {
+                let raw = FIXTURE.replace(from, to);
+                assert_ne!(raw, FIXTURE);
+                let (why, w, notice) = take(&raw).unwrap_err();
+                assert!(why.contains(says), "{to}: {why}");
+                assert_eq!(w, warn, "{to}");
+                assert_eq!(notice, None, "{to}");
+                // A stranger's number is never in the log line.
+                assert!(!why.contains("9990000"), "{why}");
+            }
+        }
+
+        #[test]
+        fn unreadable_texts_from_a_contact_get_a_notice() {
+            let start = FIXTURE.find("--b1\r\nContent-Type: text/plain").unwrap();
+            let html = FIXTURE.find("--b1\r\nContent-Type: text/html").unwrap();
+            let cases = [
+                (format!("{}{}", &FIXTURE[..start], &FIXTURE[html..]), "without a text/plain part"),
+                (
+                    FIXTURE.replace("To respond to this text message, reply to this email or visit Google Voice <https://voice.google.com>.\r\n", ""),
+                    "unrecognized",
+                ),
+                (
+                    FIXTURE.replace("YOUR ACCOUNT", "MANAGE SETTINGS <https://voice.google.com/settings>\r\nYOUR ACCOUNT"),
+                    "footer left",
+                ),
+                (FIXTURE.replace("Running late, home by 6\r\n", ""), "no text"),
+            ];
+            for (raw, says) in cases {
+                let (why, warn, notice) = take(&raw).unwrap_err();
+                assert!(why.contains(says), "{says}: {why}");
+                assert!(warn);
+                assert_eq!(notice.as_deref(), Some("MOM"), "{says}");
+            }
+        }
+
+        #[test]
+        fn reactions_are_shortened_on_texts_only() {
+            let react = |text: &str| FIXTURE.replace("Running late, home by 6", text);
+            assert_eq!(
+                take(&react("Liked \u{201C}RUNNING LATE HOME SUN\u{201D}"))
+                    .unwrap()
+                    .1,
+                "LIKED YOUR MSG"
+            );
+            assert_eq!(
+                take(&react("Laughed at \"HI\"")).unwrap().1,
+                "LAUGHED AT YOUR MSG"
+            );
+            assert_eq!(
+                take(&react("Reacted \u{1F602} to \u{201C}RUNNING LATE\u{201D}"))
+                    .unwrap()
+                    .1,
+                "REACTED TO YOUR MSG"
+            );
+            let (why, warn, notice) =
+                take(&react("Removed a like from \u{201C}RUNNING LATE\u{201D}")).unwrap_err();
+            assert!(why.contains("reaction removed by MOM"), "{why}");
+            assert!(!warn && notice.is_none());
+            // Ordinary texts that start like one.
+            for text in [
+                "Liked it a lot",
+                "Loved \"",
+                "liked \"x\"",
+                "Reacted to nothing",
+            ] {
+                assert_eq!(take(&react(text)).unwrap().1, text);
+            }
+            // From an email contact the same words are just an email.
+            let c = super::contacts();
+            let mail = format!(
+                "Authentication-Results:{}From: Bob <bob@example.com>\r\nTo: n@example.org\r\n\r\nLiked \u{201C}RUNNING LATE\u{201D}\r\n",
+                super::GOOGLE_PASS
+            );
+            let m = accept_with(mail.as_bytes(), 1, &c, None, None).unwrap();
+            assert_eq!(
+                (m.text.as_str(), m.via),
+                ("Liked \u{201C}RUNNING LATE\u{201D}", Via::Email)
+            );
+            // From a carrier gateway it is a text.
+            let sms = "From: 5551234567@vtext.com\r\nTo: n@example.org\r\n\r\nLoved \"OK\"\r\n";
+            let m = accept_with(sms.as_bytes(), 2, &c, None, None).unwrap();
+            assert_eq!((m.text.as_str(), m.via), ("LOVED YOUR MSG", Via::Carrier));
+        }
+    }
+
+    #[test]
+    fn a_silent_imap_server_times_out() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let held: Vec<_> = l.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(30));
+            drop(held);
+        });
+        let start = std::time::Instant::now();
+        let r = connect_tls(
+            "localhost",
+            addr,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        assert!(r.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
         );
     }
 }
