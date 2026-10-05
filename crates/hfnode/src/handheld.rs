@@ -79,6 +79,13 @@ pub const STOP_WATCH_WAIT: Duration = Duration::from_millis(1500);
 /// of time keyed, which refuses `CW` past 165 s and gets back a second for every
 /// second off the air.
 pub const MAX_DUTY_BUDGET: Duration = Duration::from_secs(150);
+/// Allowed per character on top of a run's Morse length. A gap longer than the
+/// radio's break-in tail (a character gap below about 12 wpm, a word gap below about
+/// 28 wpm) ends the transmission, and the next element first switches the radio
+/// back to transmit: the audio path's 20 ms and the transmitter's set-up, from the
+/// firmware's code, not measured. The firmware times that element from when its
+/// carrier is on, so the switch-over adds to the run.
+pub const TX_START_ALLOWANCE: Duration = Duration::from_millis(50);
 /// When a hang test passes: the firmware restarted this long after it hung,
 /// its start-up included. The watchdog takes about [`WATCHDOG_RESET`], and the
 /// operator is told to switch the radio off if it is still sending after 10 s.
@@ -963,16 +970,20 @@ impl Rig for Handheld {
             return Err(RigError::Protocol(format!("{c:?} cannot be sent in Morse")));
         }
         let length = self.set.dot(self.wpm) * cw::units(&text);
+        // Each character may start with the radio switching back to transmit.
+        let starts = text.chars().filter(|&c| c != ' ').count() as u32;
+        let on_air = length.mul_f32(self.set.time_scale) + TX_START_ALLOWANCE * starts;
         // The firmware would cut it short; slow speeds can need more than a minute.
-        if length.mul_f32(self.set.time_scale) > self.hello.tx_limit {
+        if on_air > self.hello.tx_limit {
             return Err(RigError::Protocol(format!(
                 "{text:?} lasts {:.0} s at {} wpm, longer than the firmware's transmit limit \
                  ({} s): use a faster key_speed_wpm",
-                length.mul_f32(self.set.time_scale).as_secs_f32(),
+                on_air.as_secs_f32(),
                 self.wpm,
                 self.hello.tx_limit.as_secs()
             )));
         }
+        let start_up = (TX_START_ALLOWANCE * starts).div_f32(self.set.time_scale.max(0.001));
         let cmd = Command::Cw {
             wpm: self.wpm,
             text,
@@ -992,7 +1003,8 @@ impl Rig for Handheld {
             st.abandoned = false;
             st.since = Some(now);
             st.end = Some(now + length);
-            st.deadline = Some(now + (length + self.set.run_slack).min(self.set.max_run));
+            st.deadline =
+                Some(now + (length + start_up + self.set.run_slack).min(self.set.max_run));
             // Under the state lock, so that the keep-alive thread takes this run up
             // only once it has been sent.
             let sent = lock(&self.shared.link).request_reply(&cmd);

@@ -246,6 +246,26 @@ fn a_piece_longer_than_the_firmwares_limit_is_not_sent() {
 }
 
 #[test]
+fn the_switch_over_to_transmit_counts_against_the_firmwares_limit() {
+    // 30 M at 6 wpm: 59.4 s of Morse, and up to 30 switch-overs on top.
+    let set = Settings {
+        time_scale: 1.0,
+        ..settings()
+    };
+    let fw = firmware(1.0);
+    let link = Link::new(Box::new(fw.clone()), set.reply_timeout);
+    let mut h = Handheld::new(link, set, 6).unwrap();
+    let text = "M".repeat(30);
+    assert!(Duration::from_secs_f32(1.2 / 6.0) * cw::units(&text) <= Duration::from_secs(60));
+    let e = h.send_cw(&text).unwrap_err().to_string();
+    assert!(
+        e.contains("lasts 61 s at 6 wpm, longer than the firmware's transmit limit"),
+        "{e}"
+    );
+    assert!(fw.runs().is_empty());
+}
+
+#[test]
 fn dropping_the_rig_stops_the_firmware() {
     let (mut h, fw) = ready();
     h.send_cw(LONG).unwrap();

@@ -167,7 +167,8 @@ Each keying run is ended by the first of:
    ended well before its text could have gone out fails the transmission;
 2. the station's software watchdog (`max_key_seconds`), and its check that the radio
    is back on receive after each piece;
-3. the node sending `STOP` once the run has gone 2 s past the end of its text, or
+3. the node sending `STOP` once the run has gone 2 s past the end of its text (with
+   50 ms a character for the radio switching back to transmit after a gap), or
    `max_key_seconds` plus 5 s, whichever is sooner, which also fails the
    transmission;
 4. the firmware's link timeout (2 s): the node keeps the link alive only while a run

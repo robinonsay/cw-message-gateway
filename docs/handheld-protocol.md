@@ -143,8 +143,14 @@ So that the firmware's timing is known:
 - Until a run reads ended, or the node stops it (below), a keep-alive `STATUS` goes
   out every quarter of the link timeout or every 250 ms, whichever is more often,
   besides the reads above.
+- A run lasts the length of its text at its speed, plus the radio's switch back to
+  transmit wherever a gap has outlasted its break-in tail (a character gap below about
+  12 wpm, a word gap below about 28 wpm): the firmware times an element from when its
+  carrier is on. The node allows 50 ms for each character for that (from the
+  firmware's code, not measured), and refuses text whose length with that allowance
+  is over the firmware's transmit limit.
 - The node stops a run that goes on too long: 2 s past the length of its text at its
-  speed, or `max_key_seconds` plus 5 s, whichever is sooner. It sends `STOP`, stops
+  speed with that allowance, or `max_key_seconds` plus 5 s, whichever is sooner. It sends `STOP`, stops
   the keep-alives for that run, and fails the transmission. If `STATUS` still reads
   `tx` 1, it latches its transmit inhibit, and sends `STOP` again once
   `max_key_seconds` have passed since the run began and at each periodic check;
