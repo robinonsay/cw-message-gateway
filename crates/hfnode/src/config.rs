@@ -49,8 +49,9 @@ pub struct Station {
     /// The radio's CI-V address.
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
-    /// The last bring-up stage passed on this radio (docs/hardware-test-plan.md,
-    /// "Bring-up stages"). Commands that need a later stage are refused.
+    /// The last bring-up stage passed on the IC-7300 (docs/hardware-test-plan.md,
+    /// "Bring-up stages"). Commands that need a later stage are refused. A
+    /// handheld's is `handheld.commissioned`.
     #[serde(default)]
     pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.
@@ -901,7 +902,6 @@ mod tests {
             .replace("# rig = \"handheld\"", "rig = \"handheld\"")
             .replace("frequency_hz = 7_030_000", "frequency_hz = 144_060_000")
             .replace("# [handheld]", "[handheld]")
-            .replace("# baud = 38400", "baud = 38400")
             .replace("# power = \"low\"", "power = \"low\"");
         toml::from_str(&text).unwrap()
     }
@@ -912,6 +912,7 @@ mod tests {
         assert_eq!(cfg.station.rig, RigKind::Handheld);
         cfg.validate().unwrap();
         let h = cfg.handheld.clone().unwrap();
+        // Not in the example: ignored on the USB-C port, so left at its default.
         assert_eq!(h.baud, 38_400);
         assert_eq!(h.max_duty_percent, 50);
         assert_eq!(h.commissioned, crate::handheld::Stage::None);
@@ -928,6 +929,17 @@ mod tests {
         c.handheld.as_mut().unwrap().max_duty_percent = 10;
         c.handheld.as_mut().unwrap().duty_window_secs = 60;
         assert!(c.validate().is_err(), "6 s budget < max_key_seconds");
+        // Within the firmware's own limits: a minute's run, half the time keyed,
+        // 150 s at once.
+        let mut c = cfg.clone();
+        c.station.max_key_seconds = 61;
+        assert!(c.validate().is_err(), "max_key_seconds over 60");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().max_duty_percent = 60;
+        assert!(c.validate().is_err(), "over 50 %");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().duty_window_secs = 600;
+        assert!(c.validate().is_err(), "300 s at once");
         let mut c = cfg.clone();
         c.handheld.as_mut().unwrap().baud = 4800;
         assert!(c.validate().is_err());

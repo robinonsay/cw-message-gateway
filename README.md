@@ -359,7 +359,7 @@ the air.
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
 | `hfnode handheld --config C check` | no | A handheld running the CW firmware in `firmware/uv-k1` ([docs/handheld.md](docs/handheld.md)): its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
 | `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
-| `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it. |
+| `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it, as given: include your call. |
 | `hfnode handheld --config C linktest` | **yes** | Bring-up: check that the firmware stops on its own when the node goes silent. |
 | `hfnode handheld --config C hangtest` | **yes** | Bring-up: check that the firmware's watchdog ends a transmission when the firmware hangs. |
 | `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |

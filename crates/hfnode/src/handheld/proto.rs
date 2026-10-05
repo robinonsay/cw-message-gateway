@@ -153,11 +153,25 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
              turn it on in the CW menu"
         }
         (Command::Cw { .. }, "REFUSED") => {
-            "the radio would not transmit: the keypad's transmit lock, a frequency it \
-             does not transmit on, a low battery, or the key or paddle in use"
+            "the radio would not transmit: its TxLock setting for this channel, its \
+             busy-channel lock with someone on the frequency, a frequency it does not \
+             transmit on, a low battery, or the key or paddle in use"
         }
         (Command::Cw { .. }, "TX") => {
             "the radio is busy: transmitting, or recording or playing a CW memory"
+        }
+        (Command::Cw { .. }, "WAIT") => {
+            "the firmware is still checking that its last stop turned the transmitter \
+             off (for a second after it)"
+        }
+        (Command::Cw { .. }, "DUTY") => {
+            "the firmware's own limit on time keyed: it has been transmitting for more \
+             than half the time lately, and must rest on receive"
+        }
+        (Command::Cw { .. }, "CHECK") => {
+            "the firmware never read the radio chip transmitting during its last run, so \
+             it could not tell a transmitter stuck on: switch the radio off and on, and \
+             do not leave it to the node until this is understood"
         }
         (Command::Cw { .. }, "STOP") => "stopped before it began",
         (Command::TestHang, "RUN") => "nothing was being sent",
@@ -171,6 +185,11 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
 pub enum Reply {
     Ok(Vec<String>),
     Err(String),
+}
+
+/// Whether `body` is a reply (`OK` or `ERR`) to a command named as `cmd` is.
+pub fn answers(cmd: &Command, body: &str) -> bool {
+    body.split(' ').nth(1) == Some(cmd.name())
 }
 
 /// The reply in `body` to `cmd`.
@@ -188,7 +207,8 @@ pub fn parse_reply(cmd: &Command, body: &str) -> Result<Reply, String> {
     }
 }
 
-/// `OK HELLO <version> <tx limit, s> <link timeout, ms> <firmware name>`.
+/// `OK HELLO <version> <tx limit, s> <link timeout, ms> <uptime, ms> <firmware
+/// name>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub version: u32,
@@ -196,12 +216,15 @@ pub struct Hello {
     pub tx_limit: Duration,
     /// The firmware stops keying when no valid line has come for this long.
     pub link_timeout: Duration,
+    /// How long since the firmware started (its commands, after the radio's own
+    /// start-up), by its own clock.
+    pub uptime: Duration,
     pub name: String,
 }
 
 impl Hello {
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [version, tx, link, name @ ..] = f else {
+        let [version, tx, link, uptime, name @ ..] = f else {
             return Err(format!("HELLO reply {f:?}: too few fields"));
         };
         let num = |s: &str, what: &str| {
@@ -212,6 +235,7 @@ impl Hello {
             version: num(version, "version")?,
             tx_limit: Duration::from_secs(num(tx, "transmit limit")?.into()),
             link_timeout: Duration::from_millis(num(link, "link timeout")?.into()),
+            uptime: Duration::from_millis(num(uptime, "uptime")?.into()),
             name: name.join(" "),
         })
     }
@@ -337,6 +361,11 @@ mod tests {
         for l in lines {
             let (id, body) = decode(l).unwrap_or_else(|e| panic!("{l}: {e}"));
             assert_eq!(encode(id, body), l);
+            if let Some(f) = body.strip_prefix("OK HELLO ") {
+                let f: Vec<String> = f.split(' ').map(str::to_string).collect();
+                let h = Hello::parse(&f).unwrap();
+                assert_eq!(h.name, "NR7Y-CW HFNODE");
+            }
         }
     }
 
@@ -367,15 +396,17 @@ mod tests {
     #[test]
     fn reads_hello_status_and_freq() {
         assert_eq!(
-            Hello::parse(&words("1 60 2000 UV-K1 CW")),
+            Hello::parse(&words("1 60 2000 12340 UV-K1 CW")),
             Ok(Hello {
                 version: 1,
                 tx_limit: Duration::from_secs(60),
                 link_timeout: Duration::from_millis(2000),
+                uptime: Duration::from_millis(12340),
                 name: "UV-K1 CW".into(),
             })
         );
-        assert!(Hello::parse(&words("1 60")).is_err());
+        assert!(Hello::parse(&words("1 60 2000")).is_err());
+        assert!(Hello::parse(&words("1 60 2000 UV-K1 CW")).is_err());
         assert_eq!(
             Status::parse(&words("1 0")),
             Ok(Status {
@@ -435,15 +466,20 @@ mod tests {
         const LINE_H: &str = include_str!("../../../../firmware/uv-k1/app/hfnode_line.h");
         const PATCH: &str = include_str!("../../../../firmware/uv-k1/nr7y-hfnode.patch");
 
-        /// The value of `#define <name> <value>` in `src`.
+        /// The value of `#define <name> <value>` in `src`, the only one.
         fn define(src: &str, name: &str) -> u64 {
-            src.lines()
-                .find_map(|l| {
+            let found: Vec<u64> = src
+                .lines()
+                .filter_map(|l| {
                     let mut w = l.split_whitespace();
                     (w.next() == Some("#define") && w.next() == Some(name))
-                        .then(|| w.next().unwrap().parse().unwrap())
+                        .then(|| w.next().unwrap().trim_end_matches('u').parse().unwrap())
                 })
-                .unwrap_or_else(|| panic!("no #define {name}"))
+                .collect();
+            match found[..] {
+                [v] => v,
+                _ => panic!("{} #define {name}", found.len()),
+            }
         }
 
         #[test]
@@ -463,6 +499,21 @@ mod tests {
             // The CW reply comes once keying has begun, well within the node's wait.
             let start = Duration::from_millis(define(HFNODE_C, "HF_KEY_START_MS"));
             assert!(start + Duration::from_millis(100) < crate::handheld::REPLY_TIMEOUT);
+            // Its watchdog: the main loop stale this long, then the watchdog's own
+            // count of a 32768 Hz clock divided by 32.
+            let stale = Duration::from_millis(define(HFNODE_C, "HF_WDG_STALE_MS"));
+            let count =
+                Duration::from_millis(define(HFNODE_C, "HF_WDG_RELOAD") * 32 * 1000 / 32768);
+            assert!(
+                (stale + count).abs_diff(crate::handheld::WATCHDOG_RESET)
+                    < Duration::from_millis(100)
+            );
+            // The node waits out its watch of a stop, and stays within its key-down
+            // budget.
+            let watch = Duration::from_millis(define(HFNODE_C, "HF_STOP_WATCH_MS"));
+            assert!(watch + Duration::from_millis(300) <= crate::handheld::STOP_WATCH_WAIT);
+            let budget = Duration::from_millis(define(HFNODE_C, "HF_DUTY_REFUSE_MS"));
+            assert!(crate::handheld::MAX_DUTY_BUDGET + Duration::from_secs(10) <= budget);
         }
 
         #[test]

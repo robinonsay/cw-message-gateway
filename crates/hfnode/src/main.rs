@@ -977,8 +977,9 @@ fn run_node(cfg: &Config, alerts: &alert::Alerts, storm: Option<Arc<StormHold>>)
         RigKind::Handheld => {
             let rig = open_handheld(cfg, Some(handheld::Action::Run))?;
             serve(cfg, rig, parts, |st| {
-                st.check()
-                    .context("the handheld did not read back as set up")
+                st.check().context(
+                    "the handheld is not set up as the config says: change it at the radio",
+                )
             })
         }
     }
@@ -1188,24 +1189,35 @@ fn handheld_hang_test(cfg: &Config) -> Result<()> {
     if handheld_settings(&mut rig, cfg) > 0 {
         bail!("change those at the radio first (`hfnode handheld check`)");
     }
+    let text = rig.hang_test_text()?;
     println!(
         "keying, then hanging the firmware: its watchdog must reset the radio, which ends \
          the transmission about {} s later. Listen on the other handheld; if the node's \
          handheld is still sending after 10 s, switch it off.",
         handheld::WATCHDOG_RESET.as_secs()
     );
-    let hung = rig.hang_test("TEST TEST TEST TEST TEST TEST");
+    let outcome = rig.hang_test(&text)?;
     drop(rig);
-    let t0 = Instant::now();
-    if hung.is_ok() {
-        std::thread::sleep(handheld::WATCHDOG_RESET + Duration::from_secs(2));
-    }
-    // The reset drops the radio's USB port: open it again once it is back. Opening
-    // stops anything it is sending and checks that it reads receive.
+    let (hung_at, confirmed) = match outcome {
+        handheld::HangTest::Hung { at, confirmed } => (at, confirmed),
+        handheld::HangTest::Failed { error, keyed } => {
+            // Stopped; but a carrier may have gone out, and needs the call.
+            if keyed {
+                let rig = open_handheld(cfg, None)?;
+                let mut st = handheld_station(cfg, rig)?;
+                send_text(&mut st, &format!("DE {}", cfg.station.node_call))?;
+            }
+            return Err(error);
+        }
+    };
+    // Its port goes with the reset: wait for that before opening it again, so as
+    // not to hold the old one. Opening stops anything it is sending and checks that
+    // it reads receive.
+    std::thread::sleep(handheld::WATCHDOG_RESET + Duration::from_secs(2));
     let reopened = loop {
         match open_handheld(cfg, None) {
             Ok(r) => break Ok(r),
-            Err(e) if t0.elapsed() < Duration::from_secs(30) => {
+            Err(e) if hung_at.elapsed() < Duration::from_secs(30) => {
                 log::debug!("handheld not back yet: {e:#}");
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -1216,14 +1228,35 @@ fn handheld_hang_test(cfg: &Config) -> Result<()> {
         "the handheld did not answer after the hang, so its watchdog did not reset it: if it \
          is still transmitting, switch it off now",
     )?;
-    hung?;
-    // The test text carries no call: identify now.
+    // When it restarted, from how long it has been up.
+    let restarted = rig
+        .started_at()
+        .map(|t| t.saturating_duration_since(hung_at));
+    // The test text carries no call: identify now, whatever the result.
     let mut st = handheld_station(cfg, rig)?;
     send_text(&mut st, &format!("DE {}", cfg.station.node_call))?;
+    let after = match restarted {
+        Some(d) if handheld::HANG_RESTART.contains(&d) => d,
+        Some(d) if d.is_zero() => bail!(
+            "the handheld did not restart: the hang did not happen, or its watchdog did not \
+             reset it (something else ended the transmission)"
+        ),
+        Some(d) => bail!(
+            "the handheld restarted {:.1} s after the hang: not its watchdog's doing (about \
+             {} s), so if you switched it off and on, the watchdog failed",
+            d.as_secs_f32(),
+            handheld::WATCHDOG_RESET.as_secs()
+        ),
+        None => bail!("the handheld reports being up for longer than this computer has"),
+    };
+    if !confirmed {
+        println!("(the firmware's reply to the hang was lost; it restarted all the same)");
+    }
     println!(
-        "passed: the firmware restarted after it hung, and reads receive. If the carrier \
-         stopped within about {} s on the other handheld, set commissioned = \"done\".",
-        handheld::WATCHDOG_RESET.as_secs()
+        "passed: the firmware's watchdog restarted it {:.1} s after it hung, and it reads \
+         receive. If you heard the carrier stop on the other handheld, set commissioned = \
+         \"done\".",
+        after.as_secs_f32()
     );
     Ok(())
 }

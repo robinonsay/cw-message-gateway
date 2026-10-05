@@ -24,15 +24,22 @@
 //   - it is stopped once it has lasted HF_TX_LIMIT_S;
 //   - it is stopped once no valid line has arrived for HF_LINK_TIMEOUT_MS, so a
 //     crashed or killed hfnode, or a pulled cable, ends it;
-//   - a stop, by hfnode's STOP or by one of these limits, is checked: if the
-//     transmitter still reads on HF_STOP_GRACE_MS later, the watchdog is no longer
-//     fed, and resets the radio;
+//   - a stop, by hfnode's STOP or by one of these limits, is checked: the
+//     transmitter must read off by HF_STOP_GRACE_MS after the stop and stay off
+//     until HF_STOP_WATCH_MS (a held paddle keys it again), or the watchdog is no
+//     longer fed, and resets the radio; a STOP that finds the CW transmitter on
+//     outside a run is checked the same way;
 //   - the watchdog resets the radio if the main loop stops for HF_WDG_STALE_MS,
 //     since a hang would leave the keyer, and maybe the carrier, where they were.
-// A reset turns the transmitter off: the start-up code resets the BK4819 (main.c,
-// BK4819_Init) within milliseconds. The radio's own transmit time-out timer does not
-// run in CW (cwapp.c clears it on every key-down), so these are the firmware's only
-// limits.
+// Across runs, time keyed is kept to a budget (HF_DUTY_REFUSE_MS), so that a host
+// that keeps sending CW cannot keep the transmitter on for more than about half the
+// time. These limits are timed by hfnode's own clock, counted from SysTick
+// (HFNODE_WatchdogTick), not by the keyer's timer (millis), so that a fault in one
+// does not stop both the keyer and its limits.
+// A reset should turn the transmitter off: the start-up code resets the BK4819
+// (main.c, BK4819_Init), though only after the bootloader and the display's
+// start-up. The radio's own transmit time-out timer does not run in CW (cwapp.c
+// clears it on every key-down), so these are the firmware's only limits.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -68,7 +75,20 @@
 // From a stop to the transmitter reading off; the keyer's own break-in tail is
 // shorter (cw_suspend_limit, 300 ms), and a stop cuts it short anyway.
 #define HF_STOP_GRACE_MS      500
+// How long after a stop the transmitter is watched, and CW refused (ERR CW WAIT):
+// long enough for a held paddle to key it again, at the keyer's slowest speeds.
+#define HF_STOP_WATCH_MS      1000
+// The key-down budget: time in runs adds to it, time out of them takes from it, and
+// CW is refused (ERR CW DUTY) while it is this high. Above what hfnode's own duty
+// cycle allows (half of any 5 minutes, 150 s).
+#define HF_DUTY_REFUSE_MS     165000u
+// A run whose text went out with the CW engine transmitting on at least this many
+// passes of the main loop must have read the BK4819 transmitting at least once;
+// if not, hf_tx_on cannot see the transmitter, and no more CW is taken.
+#define HF_CHECK_MIN_PASSES   5
 #define HF_WDG_STALE_MS       1000
+// HFNODE_WatchdogTick's period: SysTick's.
+#define HF_TICK_MS            10
 // The watchdog counts LSI (about 32 kHz) / 32: 2048 counts is about 2 s.
 #define HF_WDG_RELOAD         2048
 #define HF_QUIET_MAX_MS       60000
@@ -95,7 +115,7 @@ typedef enum {
     RUN_NONE = 0,
     RUN_STARTING,   // accepted, waiting for the first key-down to reply
     RUN_KEYING,     // replied; until the text is out and the transmitter is off
-    RUN_STOPPING,   // stopped; until the transmitter reads off
+    RUN_STOPPING,   // stopped; the transmitter watched for HF_STOP_WATCH_MS
 } HF_Run_t;
 
 static HF_LineReader_t s_reader;
@@ -106,11 +126,21 @@ static uint8_t s_txq_len[HF_TXQ];
 static uint8_t s_txq_head;
 static uint8_t s_txq_count;
 
+// hfnode's clock, in ms: counted by HFNODE_WatchdogTick.
+static volatile uint32_t s_ms;
+static uint32_t          s_init_ms;
+
 static HF_Run_t s_run;
 static uint8_t  s_run_id;        // the CW command's id, for its deferred reply
 static uint32_t s_run_start_ms;
 static uint32_t s_stop_ms;       // when RUN_STOPPING began
 static uint32_t s_last_line_ms;
+static uint16_t s_tx_passes;     // passes of this run with the CW engine transmitting
+static bool     s_saw_dsp;       // the BK4819 read transmitting during this run
+static bool     s_readback_bad;  // a run went out without it: CW refused
+
+static uint32_t s_duty_ms;       // the key-down budget used
+static uint32_t s_duty_at;
 
 static uint32_t s_squelch_open_ms;   // last time the squelch was seen open
 static uint32_t s_tx_off_ms;         // last time the transmitter was seen on
@@ -119,6 +149,10 @@ static volatile bool     s_wdg_started;
 static volatile bool     s_run_armed;
 static volatile bool     s_wdg_starve;   // a stop failed: let the watchdog reset the radio
 static volatile uint32_t s_loop_beat_ms;
+
+static uint32_t hf_ms(void) { return s_ms; }
+
+static uint32_t hf_since(uint32_t t) { return s_ms - t; }
 
 // ---------------------------------------------------------------------------
 // Replies
@@ -171,15 +205,27 @@ static bool hf_tx_soft(void)
     return gCurrentFunction == FUNCTION_TRANSMIT || gCW_State != CW_INACTIVE;
 }
 
-// The transmitter's state: the firmware's, and the BK4819's transmit DSP, which is
-// on whenever the chip is set up to transmit (RX_TurnOn clears it).
-static bool hf_tx_on(void)
+// The BK4819's transmit DSP, which is on whenever the chip is set up to transmit
+// (RX_TurnOn clears it).
+static bool hf_dsp_tx(void)
 {
-    if (hf_tx_soft())
-        return true;
     return (BK4819_ReadRegister(BK4819_REG_30) & BK4819_REG_30_ENABLE_TX_DSP) != 0;
 }
 
+// The transmitter's state: the firmware's, and the BK4819's.
+static bool hf_tx_on(void)
+{
+    return hf_tx_soft() || hf_dsp_tx();
+}
+
+// The transmitter on in CW: the CW engine's, or the radio's while it is in CW.
+static bool hf_cw_tx_on(void)
+{
+    return hf_tx_on() && (gCW_State != CW_INACTIVE || gTxVfo->Modulation == MODULATION_CW);
+}
+
+// The firmware's own state only: the BK4819 is read where it matters, in STATUS and
+// in a run's end and stop checks.
 static bool hf_busy(void)
 {
     if (s_run != RUN_NONE || hf_tx_soft() || gCW_PlaybackActive || gCW_Recording
@@ -212,16 +258,15 @@ static void hf_end_run(void)
     s_run_armed = false;
 }
 
-// Stop the run, and keep it until the transmitter reads off (hf_run_limits).
+// Stop the run and watch the transmitter (hf_run_limits). A stop already being
+// watched keeps the time of the first: repeated STOPs must not put off the reset.
 static void hf_halt(void)
 {
     hf_stop();
-    if (!hf_tx_on()) {
-        hf_end_run();
+    if (s_run == RUN_STOPPING)
         return;
-    }
     s_run = RUN_STOPPING;
-    s_stop_ms = millis();
+    s_stop_ms = hf_ms();
     s_run_armed = true;
 }
 
@@ -243,7 +288,7 @@ static const char *hf_mode_name(uint8_t m)
 
 static uint32_t hf_quiet_ms(void)
 {
-    const uint32_t q = millis_since(s_squelch_open_ms);
+    const uint32_t q = hf_since(s_squelch_open_ms);
     return q > HF_QUIET_MAX_MS ? HF_QUIET_MAX_MS : q;
 }
 
@@ -298,13 +343,27 @@ static void hf_cw(uint8_t id, char *arg)
         hf_error(id, "CW", "BKIN");
         return;
     }
+    if (s_readback_bad) {
+        hf_error(id, "CW", "CHECK");
+        return;
+    }
+    if (s_duty_ms >= HF_DUTY_REFUSE_MS) {
+        hf_error(id, "CW", "DUTY");
+        return;
+    }
+    if (s_run == RUN_STOPPING) {
+        hf_error(id, "CW", "WAIT");
+        return;
+    }
     if (hf_busy() || !CW_StartTextPlayback(text, wpm)) {
         hf_error(id, "CW", "TX");
         return;
     }
     s_run = RUN_STARTING;
     s_run_id = id;
-    s_run_start_ms = millis();
+    s_run_start_ms = hf_ms();
+    s_tx_passes = 0;
+    s_saw_dsp = false;
     s_run_armed = true;
 }
 
@@ -316,11 +375,12 @@ static void hf_command(uint8_t id, char *body)
         *arg++ = 0;
 
     if (!strcmp(body, "HELLO") && !arg) {
-        sprintf_(out, "OK HELLO %u %u %u %s", HF_VERSION, HF_TX_LIMIT_S, HF_LINK_TIMEOUT_MS,
-                 HF_NAME);
+        sprintf_(out, "OK HELLO %u %u %u %u %s", HF_VERSION, HF_TX_LIMIT_S, HF_LINK_TIMEOUT_MS,
+                 (unsigned)hf_since(s_init_ms), HF_NAME);
         hf_reply(id, out);
     } else if (!strcmp(body, "STATUS") && !arg) {
-        const bool tx = s_run != RUN_NONE || hf_tx_on();
+        // Once stopped, the transmitter as it reads; the watch goes on behind it.
+        const bool tx = s_run == RUN_STARTING || s_run == RUN_KEYING || hf_tx_on();
         sprintf_(out, "OK STATUS %u %u", tx ? 1u : 0u, (unsigned)hf_quiet_ms());
         hf_reply(id, out);
     } else if (!strcmp(body, "FREQ") && !arg) {
@@ -343,10 +403,13 @@ static void hf_command(uint8_t id, char *body)
         // is off.
         if (s_run == RUN_STARTING)
             hf_error(s_run_id, "CW", "STOP");
-        if (s_run == RUN_NONE)
-            hf_stop();   // the CW engine keyed by hand, say: not checked
-        else
+        // Outside a run, a CW transmitter on (keyed by hand, or by a held paddle
+        // after a run) is checked as a run's stop is; anything else is the
+        // operator's, and left alone.
+        if (s_run != RUN_NONE || hf_cw_tx_on())
             hf_halt();
+        else
+            hf_stop();
         hf_reply(id, "OK STOP");
     } else if (!strcmp(body, "CW") && arg) {
         hf_cw(id, arg);
@@ -358,8 +421,9 @@ static void hf_command(uint8_t id, char *body)
             return;
         }
         hf_reply(id, "OK TEST HANG");
+        // Let the reply go out, then stop. (On the keyer's timer: if that has
+        // stopped, this hangs a moment early, which is the test anyway.)
         const uint32_t t0 = millis();
-        // Let the reply go out, then stop.
         while (s_txq_count > 0 && millis_since(t0) < 20)
             hf_flush();
         HF_HANG();
@@ -389,7 +453,7 @@ static void hf_read(void)
         char *body;
         // A damaged line is not a line: no reply, and it does not keep the link.
         if (HF_LineParse(s_reader.buf, &id, &body)) {
-            s_last_line_ms = millis();
+            s_last_line_ms = hf_ms();
             hf_command(id, body);
         }
     }
@@ -400,13 +464,17 @@ static void hf_run_limits(void)
     if (s_run == RUN_NONE)
         return;
     if (s_run == RUN_STOPPING) {
-        if (!hf_tx_on()) {
+        const uint32_t t = hf_since(s_stop_ms);
+        if (hf_tx_on()) {
+            // Still on, or on again: stop it again, and past the grace time let the
+            // watchdog reset the radio. Starved, it is not fed again even if the
+            // transmitter then reads off: a radio that failed to stop is not trusted.
+            hf_stop();
+            if (t >= HF_STOP_GRACE_MS)
+                s_wdg_starve = true;
+        } else if (t >= HF_STOP_WATCH_MS) {
             hf_end_run();
-            return;
         }
-        hf_stop();
-        if (millis_since(s_stop_ms) >= HF_STOP_GRACE_MS)
-            s_wdg_starve = true;
         return;
     }
     if (gTxVfo->Modulation != MODULATION_CW) {
@@ -416,19 +484,27 @@ static void hf_run_limits(void)
         hf_halt();
         return;
     }
-    if (millis_since(s_run_start_ms) >= HF_TX_LIMIT_S * 1000u
-        || millis_since(s_last_line_ms) >= HF_LINK_TIMEOUT_MS) {
+    if (hf_since(s_run_start_ms) >= HF_TX_LIMIT_S * 1000u
+        || hf_since(s_last_line_ms) >= HF_LINK_TIMEOUT_MS) {
         if (s_run == RUN_STARTING)
             hf_error(s_run_id, "CW", "TX");
         hf_halt();
         return;
+    }
+    // The BK4819 must be seen transmitting while the CW engine is, or the stop
+    // checks above could not see a stuck transmitter.
+    if (gCW_State == CW_TRANSMITTING) {
+        if (s_tx_passes < UINT16_MAX)
+            s_tx_passes++;
+        if (!s_saw_dsp)
+            s_saw_dsp = hf_dsp_tx();
     }
     if (s_run == RUN_STARTING) {
         // Keyed: transmitting, or already in the break-in tail of a first element.
         if (gCW_State != CW_INACTIVE) {
             hf_reply(s_run_id, "OK CW");
             s_run = RUN_KEYING;
-        } else if (!gCW_PlaybackActive || millis_since(s_run_start_ms) >= HF_KEY_START_MS) {
+        } else if (!gCW_PlaybackActive || hf_since(s_run_start_ms) >= HF_KEY_START_MS) {
             // The radio refused to transmit (TX lock, frequency, battery), or a
             // paddle or key stopped the playback before it began.
             hf_error(s_run_id, "CW", "REFUSED");
@@ -437,28 +513,46 @@ static void hf_run_limits(void)
         return;
     }
     // Keying: over once the text is out and the transmitter is off again.
-    if (!gCW_PlaybackActive && !hf_tx_on())
+    if (!gCW_PlaybackActive && !hf_tx_on()) {
+        if (!s_saw_dsp && s_tx_passes >= HF_CHECK_MIN_PASSES)
+            s_readback_bad = true;
         hf_end_run();
+    }
+}
+
+// The key-down budget: time in runs (stopping included) adds, time out of them
+// takes away.
+static void hf_duty(void)
+{
+    const uint32_t now = hf_ms();
+    const uint32_t dt = now - s_duty_at;
+    s_duty_at = now;
+    if (s_run != RUN_NONE)
+        s_duty_ms += dt;
+    else
+        s_duty_ms = s_duty_ms > dt ? s_duty_ms - dt : 0;
 }
 
 static void hf_squelch(void)
 {
-    const uint32_t now = millis();
+    const uint32_t now = hf_ms();
     if (hf_tx_soft()) {
         s_tx_off_ms = now;
         return;
     }
-    if (g_SquelchLost && millis_since(s_tx_off_ms) >= HF_SQUELCH_HOLDOFF_MS)
+    if (g_SquelchLost && hf_since(s_tx_off_ms) >= HF_SQUELCH_HOLDOFF_MS)
         s_squelch_open_ms = now;
 }
 
 void HFNODE_Init(void)
 {
-    const uint32_t now = millis();
+    const uint32_t now = hf_ms();
+    s_init_ms = now;
     s_last_line_ms = now;
     s_squelch_open_ms = now;
     s_tx_off_ms = now;
     s_loop_beat_ms = now;
+    s_duty_at = now;
     // Read only what arrives from now on.
     s_rx_read = VCP_RxBufPointer >= VCP_RX_BUF_SIZE ? 0 : VCP_RxBufPointer;
 
@@ -467,7 +561,9 @@ void HFNODE_Init(void)
     LL_IWDG_EnableWriteAccess(IWDG);
     LL_IWDG_SetPrescaler(IWDG, LL_IWDG_PRESCALER_32);
     LL_IWDG_SetReloadCounter(IWDG, HF_WDG_RELOAD);
-    while (!LL_IWDG_IsReady(IWDG)) {
+    // Bounded: started, the watchdog resets the radio if this never ends. If the
+    // settings never take, it keeps its shorter defaults, which are fed all the same.
+    for (uint32_t i = 0; i < 1000000u && !LL_IWDG_IsReady(IWDG); i++) {
     }
     LL_IWDG_ReloadCounter(IWDG);
     s_wdg_started = true;
@@ -475,19 +571,21 @@ void HFNODE_Init(void)
 
 void HFNODE_Poll(void)
 {
-    s_loop_beat_ms = millis();
+    s_loop_beat_ms = hf_ms();
     hf_read();
     hf_run_limits();
+    hf_duty();
     hf_squelch();
     hf_flush();
 }
 
 void HFNODE_WatchdogTick(void)
 {
+    s_ms += HF_TICK_MS;
     if (!s_wdg_started || s_wdg_starve)
         return;
     // Outside a run the watchdog is always fed (a hang there is no worse than
     // before); a hard fault stops this interrupt too, and so resets the radio.
-    if (!s_run_armed || millis_since(s_loop_beat_ms) < HF_WDG_STALE_MS)
+    if (!s_run_armed || hf_since(s_loop_beat_ms) < HF_WDG_STALE_MS)
         LL_IWDG_ReloadCounter(IWDG);
 }

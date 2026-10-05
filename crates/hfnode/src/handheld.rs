@@ -23,12 +23,15 @@
 //!   to keep the firmware's link timeout from expiring, and no longer, so that the
 //!   link timeout ends the run if the node dies or the cable is pulled; the firmware
 //!   has a transmit limit of its own of at most a minute, checks that every stop
-//!   turned the transmitter off, and has a hardware watchdog that resets the radio
-//!   if it hangs during a run (firmware/uv-k1/README.md). The radio's own time-out
-//!   timer does not work in CW.
+//!   turned the transmitter off and kept it off for a second (refusing `CW` with
+//!   `WAIT` meanwhile, which the node waits out), keeps its own budget of time
+//!   keyed, and has a hardware watchdog that resets the radio if it hangs during a
+//!   run (firmware/uv-k1/README.md). The radio's own time-out timer does not work
+//!   in CW.
 //! - **No tuner**: a window start checks the radio and transmits nothing.
 //! - **A small transmitter**: at most `max_duty_percent` of any `duty_window_secs`
-//!   on the air; a long reply waits on receive between keying runs.
+//!   on the air, within the firmware's own budget ([`MAX_DUTY_BUDGET`]); a long
+//!   reply waits on receive between keying runs.
 //! - **A shared channel**: the node keys only once the squelch has been closed for
 //!   `busy_quiet_ms` (the firmware reports how long), and gives up after
 //!   `busy_max_wait_secs`.
@@ -68,6 +71,19 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 /// the radio: a second before it stops feeding the watchdog, and the watchdog's own
 /// 2 s (2048 counts of a 32 kHz clock divided by 32; the clock is not precise).
 pub const WATCHDOG_RESET: Duration = Duration::from_secs(3);
+/// After a stop the firmware watches the transmitter for a second, and answers `CW`
+/// with `ERR CW WAIT` meanwhile: the node tries again for this long.
+pub const STOP_WATCH_WAIT: Duration = Duration::from_millis(1500);
+/// The most time on the air the duty cycle may allow at once
+/// (`duty_window_secs` times `max_duty_percent`): within the firmware's own budget
+/// of time keyed, which refuses `CW` past 165 s and gets back a second for every
+/// second off the air.
+pub const MAX_DUTY_BUDGET: Duration = Duration::from_secs(150);
+/// When a hang test passes: the firmware restarted this long after it hung,
+/// its start-up included. The watchdog takes about [`WATCHDOG_RESET`], and the
+/// operator is told to switch the radio off if it is still sending after 10 s.
+pub const HANG_RESTART: std::ops::RangeInclusive<Duration> =
+    Duration::from_secs(1)..=Duration::from_secs(8);
 
 /// The US amateur bands a UV-K1 or UV-K5 covers, in Hz, where CW may be sent
 /// anywhere (47 CFR 97.305(a), from memory, not checked against the eCFR): 2 m,
@@ -100,8 +116,8 @@ pub fn band_of(hz: u64) -> Option<(u64, u64)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
-    /// Nothing has passed: `hfnode handheld check`, `setup` and `rx`, `listen` and
-    /// `record` only; none of them keys the radio.
+    /// Nothing has passed: `hfnode handheld check` and `rx`, `listen` and `record`
+    /// only; none of them keys the radio.
     #[default]
     None,
     /// `hfnode listen` decoded the other handheld's Morse correctly. Allows
@@ -185,8 +201,16 @@ pub fn validate(cfg: &Config) -> Result<()> {
     if ![9600, 19_200, 38_400, 57_600, 115_200].contains(&h.baud) {
         bail!("handheld.baud must be 9600, 19200, 38400, 57600 or 115200");
     }
-    if !(10..=100).contains(&h.max_duty_percent) {
-        bail!("handheld.max_duty_percent must be 10-100");
+    if s.max_key_seconds > MAX_FIRMWARE_TX_LIMIT.as_secs() {
+        bail!(
+            "station.max_key_seconds must be {} or less with a handheld: the firmware \
+             ends any keying run at its own limit",
+            MAX_FIRMWARE_TX_LIMIT.as_secs()
+        );
+    }
+    // The firmware keeps the transmitter to about half the time.
+    if !(10..=50).contains(&h.max_duty_percent) {
+        bail!("handheld.max_duty_percent must be 10-50");
     }
     if !(60..=3600).contains(&h.duty_window_secs) {
         bail!("handheld.duty_window_secs must be 60-3600");
@@ -194,6 +218,13 @@ pub fn validate(cfg: &Config) -> Result<()> {
     // The longest keying run the station allows must fit in the budget, or it
     // could never be keyed.
     let budget = h.duty_window_secs * u64::from(h.max_duty_percent) / 100;
+    if budget > MAX_DUTY_BUDGET.as_secs() {
+        bail!(
+            "handheld.max_duty_percent of handheld.duty_window_secs allows {budget} s on \
+             the air at once; the firmware's own limit allows {} s",
+            MAX_DUTY_BUDGET.as_secs()
+        );
+    }
     if budget < s.max_key_seconds {
         bail!(
             "handheld.max_duty_percent of handheld.duty_window_secs allows {budget} s on \
@@ -340,6 +371,22 @@ impl Shared {
         lock(&self.link).request(cmd)
     }
 
+    /// `CW`, tried again while the firmware answers `WAIT` (it is still watching
+    /// its last stop), for up to [`STOP_WATCH_WAIT`].
+    fn request_cw(&self, cmd: &Command) -> civ::Result<Vec<String>> {
+        let until = Instant::now() + STOP_WATCH_WAIT;
+        loop {
+            match lock(&self.link).request_reply(cmd)? {
+                proto::Reply::Ok(fields) => return Ok(fields),
+                proto::Reply::Err(code) if code == "WAIT" && Instant::now() < until => {
+                    log::debug!("handheld: still checking its last stop; trying again");
+                    thread::sleep(Duration::from_millis(100));
+                }
+                proto::Reply::Err(code) => return Err(link::refused(cmd, &code)),
+            }
+        }
+    }
+
     /// Read the firmware's status, and note the end of the run under way if it has
     /// ended.
     fn status(&self) -> civ::Result<Status> {
@@ -367,7 +414,8 @@ impl Shared {
         Ok(s)
     }
 
-    /// `STOP`, which the firmware answers once its transmitter is off.
+    /// `STOP`. The firmware answers at once; its transmitter may still read on for
+    /// a moment after, so callers confirm receive with `STATUS`.
     fn stop(&self) -> civ::Result<()> {
         let run = lock(&self.state).run;
         self.request(&Command::Stop)?;
@@ -439,14 +487,27 @@ pub struct Handheld {
     busy_looked: Option<Instant>,
     keeper: Option<JoinHandle<()>>,
     describe: String,
+    /// When its `HELLO` was answered.
+    hello_at: Instant,
     /// The hang test stopped the firmware: nothing more is sent to it.
     hung: bool,
+}
+
+/// How the bring-up's hang test went, short of the restart.
+#[derive(Debug)]
+pub enum HangTest {
+    /// The firmware hung from about `at`, or may have: `confirmed` is false when
+    /// the reply to `TEST HANG` was lost.
+    Hung { at: Instant, confirmed: bool },
+    /// It did not hang; `keyed` if a carrier may have gone out (it was stopped).
+    Failed { error: anyhow::Error, keyed: bool },
 }
 
 impl Handheld {
     /// Take over the firmware behind `link`: check its `HELLO`, stop anything it is
     /// sending and confirm receive. Keys nothing.
     pub fn new(mut link: Link, set: Settings, wpm: u32) -> Result<Self> {
+        let hello_at = Instant::now();
         let hello = link
             .request(&Command::Hello)
             .map_err(anyhow::Error::from)
@@ -500,8 +561,15 @@ impl Handheld {
             busy_looked: None,
             keeper: Some(keeper),
             describe,
+            hello_at,
             hung: false,
         })
+    }
+
+    /// When the firmware started, by its `HELLO` (its start-up before that not
+    /// counted).
+    pub fn started_at(&self) -> Option<Instant> {
+        self.hello_at.checked_sub(self.hello.uptime)
     }
 
     /// Open the handheld configured in `cfg`. Keys nothing.
@@ -571,7 +639,7 @@ impl Handheld {
         }
         let t0 = Instant::now();
         // Not marked keyed, so that nothing keeps the link alive.
-        let sent = self.shared.request(&Command::Cw {
+        let sent = self.shared.request_cw(&Command::Cw {
             wpm: self.wpm,
             text: text.to_string(),
         });
@@ -600,14 +668,33 @@ impl Handheld {
         }
     }
 
+    /// Text for the hang test at the node's speed: long enough to outlast the
+    /// watchdog by 2 s, within one keying run.
+    pub fn hang_test_text(&self) -> Result<String> {
+        let need = WATCHDOG_RESET + Duration::from_secs(2);
+        let mut text = String::from("TEST ");
+        while self.set.dot(self.wpm) * cw::units(&text) < need {
+            if text.len() == MAX_CW_CHARS {
+                bail!(
+                    "no text of {MAX_CW_CHARS} characters lasts {} s at {} wpm",
+                    need.as_secs(),
+                    self.wpm
+                );
+            }
+            text.push('0');
+        }
+        Ok(text)
+    }
+
     /// The bring-up's hang test: key `text`, which must last well past
     /// [`WATCHDOG_RESET`], then have the firmware stop its main loop, as a hang or a
     /// crash would. Only its watchdog can end the transmission then: its own limits
-    /// and `STOP` all run in that loop. Returns once the hang has begun. The reset
-    /// drops the radio's USB port, so the handheld must then be opened again, and
-    /// found on receive; nothing more is sent to this one, not even `STOP` when it
-    /// is dropped.
-    pub fn hang_test(&mut self, text: &str) -> Result<()> {
+    /// and `STOP` all run in that loop. Returns once the hang has begun, or may have.
+    /// The reset drops the radio's USB port, so the handheld must then be opened
+    /// again, and found restarted ([`Handheld::started_at`]) and on receive; nothing
+    /// more is sent to this one, not even `STOP` when it is dropped. An error: nothing
+    /// was keyed.
+    pub fn hang_test(&mut self, text: &str) -> Result<HangTest> {
         let length = self.set.dot(self.wpm) * cw::units(text);
         if length < WATCHDOG_RESET + Duration::from_secs(2) {
             bail!(
@@ -622,30 +709,56 @@ impl Handheld {
         let t0 = Instant::now();
         // Not marked keyed, so that nothing keeps the link alive: the firmware stops
         // reading at once anyway.
-        let sent = self.shared.request(&Command::Cw {
+        let sent = self.shared.request_cw(&Command::Cw {
             wpm: self.wpm,
             text: text.to_string(),
         });
         if let Err(e) = sent {
+            // A lost reply: it may have keyed.
+            let keyed = matches!(e, RigError::Timeout);
             let _ = self.shared.stop();
-            bail!("the CW command failed: {e}");
+            return Ok(HangTest::Failed {
+                error: anyhow::anyhow!("the CW command failed: {e}"),
+                keyed,
+            });
         }
+        let sent_hang = Instant::now();
         let hang = self.shared.request(&Command::TestHang);
         lock(&self.shared.state)
             .on_air
             .push_back((t0, Instant::now() + WATCHDOG_RESET));
-        if let Err(e) = hang {
-            if matches!(e, RigError::Timeout) {
-                // Lost: it may have hung all the same.
+        match hang {
+            Ok(_) => {
                 self.hung = true;
-            } else {
-                self.shared.stop().context("stopping it")?;
+                self.shared.closed.store(true, Ordering::SeqCst);
+                Ok(HangTest::Hung {
+                    at: Instant::now(),
+                    confirmed: true,
+                })
             }
-            bail!("the firmware did not take the hang test: {e}");
+            // Lost: it may have hung all the same.
+            Err(RigError::Timeout) => {
+                self.hung = true;
+                self.shared.closed.store(true, Ordering::SeqCst);
+                Ok(HangTest::Hung {
+                    at: sent_hang,
+                    confirmed: false,
+                })
+            }
+            Err(e) => {
+                let stopped = self.shared.stop();
+                Ok(HangTest::Failed {
+                    error: match stopped {
+                        Ok(()) => anyhow::anyhow!("the firmware did not take the hang test: {e}"),
+                        Err(s) => anyhow::anyhow!(
+                            "the firmware did not take the hang test ({e}), and stopping it \
+                             failed: {s}"
+                        ),
+                    },
+                    keyed: true,
+                })
+            }
         }
-        self.hung = true;
-        self.shared.closed.store(true, Ordering::SeqCst);
-        Ok(())
     }
 
     fn freq(&mut self) -> civ::Result<(u64, u64)> {
@@ -835,10 +948,12 @@ impl Rig for Handheld {
 
     /// Have the firmware key `text`, and return once it has started: the firmware
     /// answers once it has keyed. If the reply is lost the run may or may not have
-    /// started, so the node sends `STOP`.
+    /// started, so the node sends `STOP`. Spaces at either end are left out: a
+    /// word gap before the first element would outlast the firmware's wait for it
+    /// at slow speeds.
     fn send_cw(&mut self, text: &str) -> civ::Result<()> {
-        let text = text.to_ascii_uppercase();
-        if text.trim().is_empty() || text.chars().count() > MAX_CW_CHARS {
+        let text = text.trim_matches(' ').to_ascii_uppercase();
+        if text.is_empty() || text.chars().count() > MAX_CW_CHARS {
             return Err(RigError::Protocol(format!(
                 "{} characters: 1 to {MAX_CW_CHARS} per keying run",
                 text.chars().count()
@@ -847,28 +962,57 @@ impl Rig for Handheld {
         if let Some(c) = text.chars().find(|&c| !cw::is_sendable(c)) {
             return Err(RigError::Protocol(format!("{c:?} cannot be sent in Morse")));
         }
-        let now = Instant::now();
         let length = self.set.dot(self.wpm) * cw::units(&text);
-        let mut st = lock(&self.shared.state);
-        if st.keyed {
-            return Err(RigError::Protocol("still transmitting".into()));
+        // The firmware would cut it short; slow speeds can need more than a minute.
+        if length.mul_f32(self.set.time_scale) > self.hello.tx_limit {
+            return Err(RigError::Protocol(format!(
+                "{text:?} lasts {:.0} s at {} wpm, longer than the firmware's transmit limit \
+                 ({} s): use a faster key_speed_wpm",
+                length.mul_f32(self.set.time_scale).as_secs_f32(),
+                self.wpm,
+                self.hello.tx_limit.as_secs()
+            )));
         }
-        if let Some(f) = st.fault.take() {
-            return Err(RigError::Protocol(f));
-        }
-        st.run += 1;
-        st.keyed = true;
-        st.abandoned = false;
-        st.since = Some(now);
-        st.end = Some(now + length);
-        st.deadline = Some(now + (length + self.set.run_slack).min(self.set.max_run));
-        // Under the state lock, so that the keep-alive thread takes this run up only
-        // once it has been sent.
-        let sent = lock(&self.shared.link).request(&Command::Cw {
+        let cmd = Command::Cw {
             wpm: self.wpm,
             text,
-        });
-        drop(st);
+        };
+        let wait_until = Instant::now() + STOP_WATCH_WAIT;
+        let sent = loop {
+            let now = Instant::now();
+            let mut st = lock(&self.shared.state);
+            if st.keyed {
+                return Err(RigError::Protocol("still transmitting".into()));
+            }
+            if let Some(f) = st.fault.take() {
+                return Err(RigError::Protocol(f));
+            }
+            st.run += 1;
+            st.keyed = true;
+            st.abandoned = false;
+            st.since = Some(now);
+            st.end = Some(now + length);
+            st.deadline = Some(now + (length + self.set.run_slack).min(self.set.max_run));
+            // Under the state lock, so that the keep-alive thread takes this run up
+            // only once it has been sent.
+            let sent = lock(&self.shared.link).request_reply(&cmd);
+            match sent {
+                // Still watching its last stop: nothing keyed. Try again shortly,
+                // with the run's times from then.
+                Ok(proto::Reply::Err(code)) if code == "WAIT" && now < wait_until => {
+                    st.keyed = false;
+                    st.since = None;
+                    st.end = None;
+                    st.deadline = None;
+                    drop(st);
+                    log::debug!("handheld: still checking its last stop; trying again");
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Ok(proto::Reply::Ok(_)) => break Ok(()),
+                Ok(proto::Reply::Err(code)) => break Err(link::refused(&cmd, &code)),
+                Err(e) => break Err(e),
+            }
+        };
         if let Err(e) = sent {
             log::error!("handheld: CW command failed ({e}); stopping in case it keyed");
             if let Err(s) = self.shared.stop() {

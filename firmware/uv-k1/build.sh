@@ -6,8 +6,11 @@
 #
 # Fetches the upstream firmware at the commit the patch was made for, applies the
 # patch, adds hfnode's files and builds. Writes <work-dir>/nr7y.cw.hfnode.bin, the
-# file to flash with UVTools2.
+# file to flash with UVTools2. The work dir is build.sh's own: the upstream checkout
+# in it is reset and cleaned on every build, so build.sh only reuses one it cloned
+# itself.
 set -eu
+unset CDPATH
 
 UPSTREAM=https://github.com/briand/uv-k1-k5v3-firmware-custom.git
 COMMIT=47075bf64c5e7c390c16e7c265b24e38ffcea27c
@@ -37,11 +40,23 @@ if ! command -v python >/dev/null 2>&1; then
     export PATH
 fi
 
-if [ ! -d "$src/.git" ]; then
+# Marks a checkout build.sh cloned, inside .git so that `git clean` keeps it.
+mark=.git/hfnode-build
+if [ ! -e "$src" ]; then
     git clone "$UPSTREAM" "$src"
+    : >"$src/$mark"
 fi
 cd "$src"
-git cat-file -e "$COMMIT^{commit}" 2>/dev/null || git fetch origin
+if [ ! -f "$mark" ] || [ "$(git rev-parse --git-dir 2>/dev/null)" != .git ] ||
+    [ "$(git remote get-url origin 2>/dev/null)" != "$UPSTREAM" ]; then
+    echo "build.sh: $src was not cloned by build.sh; it would be reset and" >&2
+    echo "cleaned, so it is left alone: delete it or choose another work dir" >&2
+    exit 1
+fi
+git cat-file -e "$COMMIT^{commit}" 2>/dev/null || git fetch origin "$COMMIT" || {
+    echo "build.sh: cannot fetch upstream commit $COMMIT" >&2
+    exit 1
+}
 # From the upstream commit every time, with nothing left from an earlier build.
 git checkout --quiet --force --detach "$COMMIT"
 git clean --quiet -fdx
@@ -51,11 +66,13 @@ cp "$here/app/hfnode.c" "$here/app/hfnode.h" "$here/app/hfnode_line.c" \
 
 cmake --preset CW -B build/CW-HFNODE -DENABLE_HFNODE=ON -DTARGET=nr7y.cw.hfnode
 cmake --build build/CW-HFNODE
-# The patch only builds hfnode in when the CW mod and USB are on: make sure it did.
-grep -rqs -e "-DENABLE_HFNODE" build/CW-HFNODE || {
-    echo "build.sh: the build has no ENABLE_HFNODE: hfnode is not in it" >&2
+bin=build/CW-HFNODE/nr7y.cw.hfnode.bin
+# The patch only builds hfnode in when the CW mod and USB are on: make sure it did,
+# by its HELLO name (app/hfnode.c, HF_NAME) in the binary.
+LC_ALL=C grep -qaF "NR7Y-CW HFNODE" "$bin" || {
+    echo "build.sh: $bin has no hfnode in it" >&2
     exit 1
 }
-cp build/CW-HFNODE/nr7y.cw.hfnode.bin "$work/"
+cp "$bin" "$work/"
 echo
-echo "built $work/nr7y.cw.hfnode.bin ($(wc -c <"$work/nr7y.cw.hfnode.bin") bytes)"
+echo "built $work/nr7y.cw.hfnode.bin ($(wc -c <"$work/nr7y.cw.hfnode.bin" | tr -d ' ') bytes)"

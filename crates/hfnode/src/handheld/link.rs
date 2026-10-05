@@ -119,6 +119,14 @@ impl Link {
     /// error naming its code. A command that may be repeated is sent up to three
     /// times while its reply is lost.
     pub fn request(&mut self, cmd: &Command) -> civ::Result<Vec<String>> {
+        match self.request_reply(cmd)? {
+            Reply::Ok(fields) => Ok(fields),
+            Reply::Err(code) => Err(refused(cmd, &code)),
+        }
+    }
+
+    /// As [`Link::request`], but an `ERR` reply is returned, not made an error.
+    pub fn request_reply(&mut self, cmd: &Command) -> civ::Result<Reply> {
         let tries = if cmd.repeatable() { 3 } else { 1 };
         let mut last = RigError::Timeout;
         for attempt in 0..tries {
@@ -127,16 +135,7 @@ impl Link {
                 thread::sleep(Duration::from_millis(20));
             }
             match self.once(cmd) {
-                Ok(Reply::Ok(fields)) => return Ok(fields),
-                Ok(Reply::Err(code)) => {
-                    let why = proto::explain(cmd, &code)
-                        .map(|w| format!(" ({w})"))
-                        .unwrap_or_default();
-                    return Err(RigError::Protocol(format!(
-                        "the handheld refused {}: {code}{why}",
-                        cmd.body()
-                    )));
-                }
+                Ok(r) => return Ok(r),
                 Err(e @ RigError::Timeout) => last = e,
                 Err(e) => return Err(e),
             }
@@ -157,7 +156,9 @@ impl Link {
                 return Err(RigError::Timeout);
             };
             match proto::decode(&line) {
-                Ok((got, body)) if got == id => {
+                // A reply under this id to another command was left from before this
+                // link was opened (ids start again at 01): stale too.
+                Ok((got, body)) if got == id && proto::answers(cmd, body) => {
                     return proto::parse_reply(cmd, body).map_err(RigError::Protocol)
                 }
                 // A late reply to an earlier command.
@@ -166,6 +167,14 @@ impl Link {
             }
         }
     }
+}
+
+/// The error for the firmware's `ERR <command> <code>` reply to `cmd`.
+pub fn refused(cmd: &Command, code: &str) -> RigError {
+    let why = proto::explain(cmd, code)
+        .map(|w| format!(" ({w})"))
+        .unwrap_or_default();
+    RigError::Protocol(format!("the handheld refused {}: {code}{why}", cmd.body()))
 }
 
 #[cfg(test)]
@@ -224,6 +233,8 @@ mod tests {
             Box::new(|id| proto::encode(id.wrapping_sub(1), "OK STATUS 1 0")),
             // Damaged on the way: one character changed, the checksum not.
             Box::new(|id| proto::encode(id, "OK STATUS 1 0").replace("S 1", "S 0")),
+            // Its id, to another command: left from before this link was opened.
+            reply("OK STOP"),
             reply("OK STATUS 0 900"),
         ]);
         let mut link = Link::new(Box::new(s.clone()), Duration::from_millis(50));

@@ -17,8 +17,9 @@
 
 // Lets hfnode key the radio over the USB-C virtual COM port, with the command set
 // of hfnode's docs/handheld-protocol.md, and with the limits that make that safe to
-// leave to a computer: a transmit limit per run, a link timeout, and a hardware
-// watchdog that resets the radio if its main loop stops during a run.
+// leave to a computer: a transmit limit per run, a link timeout, a check of every
+// stop, a key-down budget, and a hardware watchdog that resets the radio if its
+// main loop stops during a run or a stop fails.
 
 #ifndef APP_HFNODE_H
 #define APP_HFNODE_H
@@ -30,8 +31,8 @@ void HFNODE_Init(void);
 // limits on a run.
 void HFNODE_Poll(void);
 
-// From SysTick, every 10 ms: feeds the watchdog unless a run is on and the main
-// loop has stopped.
+// From SysTick, every 10 ms: counts hfnode's own clock, and feeds the watchdog
+// unless a run is on and the main loop has stopped, or a stop has failed.
 void HFNODE_WatchdogTick(void);
 
 #endif

@@ -147,8 +147,11 @@ static void reset_radio(void)
     s_txq_head = s_txq_count = 0;
     s_run = RUN_NONE;
     s_run_armed = s_wdg_starve = s_wdg_started = false;
+    s_duty_ms = 0;
+    s_readback_bad = false;
 
     g_now = 1000;
+    s_ms = 1000;   // SysTick's count, kept with the clock by run_for
     g_auto_ms = 0;
     gCurrentFunction = FUNCTION_FOREGROUND;
     gCW_State = CW_INACTIVE;
@@ -391,7 +394,7 @@ static void test_cw_chars(void)
 static void test_queries(void)
 {
     reset_radio();
-    expect(1, "HELLO", "OK HELLO 1 60 2000 NR7Y-CW HFNODE");
+    expect(1, "HELLO", "OK HELLO 1 60 2000 0 NR7Y-CW HFNODE");
     expect(2, "STATUS", "OK STATUS 0 0");
     expect(3, "FREQ", "OK FREQ 144060000 144060000");
     g_tx_freq.Frequency = 14466000;
@@ -418,6 +421,9 @@ static void test_queries(void)
     expect(17, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ERR ABCDEFGHIJKLMNOPQRST UNKNOWN");
     expect(18, "TEST", "ERR TEST UNKNOWN");
     CHECK(g_tx_freq.Frequency == 14466000);
+    // How long since it started, by its own clock.
+    run_for(12345, false);
+    expect(19, "HELLO", "OK HELLO 1 60 2000 12340 NR7Y-CW HFNODE");
 }
 
 static void test_damaged_lines_do_nothing(void)
@@ -512,9 +518,12 @@ static void test_the_link_timeout_ends_a_run(void)
     }
     CHECK(s_run == RUN_KEYING);
     run_for(260, false);   // past 2 s from the CW line, the last good one
-    CHECK(s_run == RUN_NONE && g_end_tx_calls == 1 && g_stop_playback_calls == 1);
+    CHECK(s_run == RUN_STOPPING && g_end_tx_calls == 1 && g_stop_playback_calls == 1);
     CHECK(!g_reg30_tx && !gCW_PlaybackActive);
     CHECK(!status_tx());
+    // Watched for a second, then over; the watchdog fed all along.
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE && !s_run_armed && !s_wdg_starve);
 }
 
 static void test_the_transmit_limit_ends_a_run(void)
@@ -522,11 +531,11 @@ static void test_the_transmit_limit_ends_a_run(void)
     reset_radio();
     const uint32_t accepted = g_now;
     start_run(1, "TEST");
-    while (s_run != RUN_NONE && g_now - accepted < 70000) {
+    while (s_run == RUN_KEYING && g_now - accepted < 70000) {
         run_for(250, false);
         status_tx();
     }
-    CHECK(s_run == RUN_NONE && g_end_tx_calls == 1);
+    CHECK(s_run == RUN_STOPPING && g_end_tx_calls == 1);
     // 60 s from the CW being accepted, within the last 250 ms run here.
     const uint32_t lasted = g_now - accepted;
     CHECK(lasted >= 60000 && lasted <= 60250);
@@ -540,12 +549,16 @@ static void test_a_cw_that_never_keys_is_refused(void)
     CHECK(g_usb_out[0] == 0 && s_run == RUN_STARTING);
     run_for(2, false);
     expect_reply(5, "ERR CW REFUSED");
-    CHECK(s_run == RUN_NONE && !gCW_PlaybackActive);
+    CHECK(s_run == RUN_STOPPING && !gCW_PlaybackActive);
+    // Stopped, so watched for a second, and CW refused meanwhile.
+    expect(6, "CW 20 TEST", "ERR CW WAIT");
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE);
     // A paddle stopping the playback before it keyed: refused at once.
-    expect(6, "CW 20 TEST", "");
+    expect(7, "CW 20 TEST", "");
     gCW_PlaybackActive = false;
     loop();
-    expect_reply(6, "ERR CW REFUSED");
+    expect_reply(7, "ERR CW REFUSED");
 }
 
 static void test_stop(void)
@@ -557,17 +570,28 @@ static void test_stop(void)
     loop();
     expect_reply(1, "ERR CW STOP");
     expect_reply(2, "OK STOP");
-    CHECK(s_run == RUN_NONE && !gCW_PlaybackActive);
-    // Keying.
+    CHECK(s_run == RUN_STOPPING && !gCW_PlaybackActive);
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE);
+    // Keying: off at once, as STATUS says, and watched for a second.
     start_run(3, "TEST");
     expect(4, "STOP", "OK STOP");
-    CHECK(s_run == RUN_NONE && !g_reg30_tx && gCW_State == CW_INACTIVE);
+    CHECK(s_run == RUN_STOPPING && !g_reg30_tx && gCW_State == CW_INACTIVE);
     CHECK(!status_tx());
-    // With nothing running: still stops the CW engine (keyed by hand, say).
+    expect(8, "CW 20 TEST", "ERR CW WAIT");
+    run_for(990, false);
+    CHECK(s_run == RUN_STOPPING);
+    run_for(10, false);
+    CHECK(s_run == RUN_NONE && !s_wdg_starve);
+    // With nothing running: the CW engine keyed by hand, say, is stopped and
+    // watched too.
     key_down();
     expect(5, "STOP", "OK STOP");
-    CHECK(gCW_State == CW_INACTIVE && !g_reg30_tx);
+    CHECK(gCW_State == CW_INACTIVE && !g_reg30_tx && s_run == RUN_STOPPING);
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE && !s_wdg_starve);
     expect(6, "STOP", "OK STOP");
+    CHECK(s_run == RUN_NONE);   // nothing on: nothing to watch
     // A transmission in another mode is the operator's.
     g_vfo_tx.Modulation = MODULATION_FM;
     gCurrentFunction = FUNCTION_TRANSMIT;
@@ -608,6 +632,60 @@ static void test_a_stop_that_fails_resets_the_radio(void)
     CHECK(g_wdg_reloads == fed);
 }
 
+// The node goes on sending STOP while the transmitter will not go off: each STOP
+// must not put the reset off.
+static void test_repeated_stops_do_not_put_off_the_reset(void)
+{
+    reset_radio();
+    start_run(1, "TEST");
+    g_end_tx_fails = true;
+    for (uint8_t id = 2; id < 7; id++) {
+        expect(id, "STOP", "OK STOP");
+        run_for(100, false);
+    }
+    CHECK(s_run == RUN_STOPPING && status_tx());
+    CHECK(s_wdg_starve);   // 500 ms from the first STOP
+    const int fed = g_wdg_reloads;
+    for (uint8_t id = 7; id < 40; id++) {
+        expect(id, "STOP", "OK STOP");
+        run_for(100, false);
+    }
+    CHECK(g_wdg_reloads == fed);
+}
+
+// A paddle held (or stuck) keys the radio again after the keyer is stopped.
+static void test_a_held_paddle_after_a_stop_resets_the_radio(void)
+{
+    reset_radio();
+    start_run(1, "TEST");
+    expect(2, "STOP", "OK STOP");
+    CHECK(!status_tx());
+    // On again within the grace time: stopped again, no reset yet.
+    run_for(300, false);
+    key_down();
+    loop();
+    CHECK(!g_reg30_tx && gCW_State == CW_INACTIVE && !s_wdg_starve);
+    // On again after it: the watchdog is no longer fed.
+    run_for(300, false);
+    key_down();
+    loop();
+    CHECK(s_wdg_starve && !g_reg30_tx);
+    // After a run's watch, a STOP from the node that finds it keyed is watched
+    // the same way.
+    reset_radio();
+    start_run(1, "TEST");
+    text_done();
+    loop();
+    CHECK(s_run == RUN_NONE);
+    key_down();
+    expect(2, "STOP", "OK STOP");
+    CHECK(s_run == RUN_STOPPING && s_run_armed);
+    run_for(600, false);
+    key_down();
+    loop();
+    CHECK(s_wdg_starve);
+}
+
 static void test_a_stop_by_a_limit_is_checked_too(void)
 {
     reset_radio();
@@ -626,13 +704,80 @@ static void test_switching_out_of_cw_ends_a_run(void)
     g_vfo_tx.Modulation = MODULATION_FM;
     loop();
     expect_reply(1, "ERR CW MODE");
-    CHECK(s_run == RUN_NONE);
+    CHECK(s_run == RUN_STOPPING);
     g_vfo_tx.Modulation = MODULATION_CW;
+    run_for(1000, false);
     start_run(2, "TEST");
     g_vfo_tx.Modulation = MODULATION_FM;
     loop();
     // The CW engine is stopped whatever the mode now reads.
-    CHECK(s_run == RUN_NONE && gCW_State == CW_INACTIVE && !g_reg30_tx);
+    CHECK(s_run == RUN_STOPPING && gCW_State == CW_INACTIVE && !g_reg30_tx);
+}
+
+// Time in runs is kept to a budget: a host sending CW after CW gets about half
+// the time on the air.
+static void test_the_key_down_budget(void)
+{
+    reset_radio();
+    uint8_t id = 1;
+    uint32_t keyed = 0;
+    const uint32_t t0 = g_now;
+    // A host that sends the next CW as soon as each ends, for ten minutes.
+    while (g_now - t0 < 600000) {
+        host_send(id, "CW 20 TEST");
+        loop();
+        uint8_t got;
+        const char *r = next_reply(&got);
+        if (!strcmp(r, "ERR CW DUTY")) {
+            run_for(1000, false);
+        } else {
+            CHECK(r[0] == 0);
+            run_for(10, false);
+            key_down();
+            loop();
+            expect_reply(id, "OK CW");
+            // 50 s of text, kept alive.
+            for (int i = 0; i < 200; i++) {
+                run_for(250, false);
+                status_tx();
+            }
+            text_done();
+            loop();
+            keyed += 50000;
+        }
+        id = id == 0xFF ? 1 : id + 1;
+    }
+    // The first 165 s go out back to back; then about half the time.
+    CHECK(keyed >= 300000 && keyed <= 400000);
+    CHECK(s_duty_ms < HF_DUTY_REFUSE_MS + 60000);
+}
+
+// A run whose text went out without the BK4819 ever reading transmitting: the
+// stop checks could not see a stuck transmitter, so no more CW.
+static void test_a_transmitter_that_never_reads_on_refuses_cw(void)
+{
+    reset_radio();
+    expect(1, "CW 20 E", "");
+    run_for(10, false);
+    gCW_State = CW_TRANSMITTING;   // the CW engine keyed, the BK4819 reads receive
+    gCurrentFunction = FUNCTION_TRANSMIT;
+    loop();
+    expect_reply(1, "OK CW");
+    for (int i = 0; i < 10; i++)
+        loop();
+    text_done();
+    loop();
+    CHECK(s_run == RUN_NONE && s_readback_bad);
+    expect(2, "CW 20 TEST", "ERR CW CHECK");
+    // Read on even once, it is fine.
+    reset_radio();
+    start_run(1, "E");
+    g_reg30_tx = false;
+    for (int i = 0; i < 10; i++)
+        loop();
+    text_done();
+    loop();
+    CHECK(s_run == RUN_NONE && !s_readback_bad);
 }
 
 static void test_the_watchdog(void)
@@ -743,8 +888,12 @@ int main(void)
     test_a_cw_that_never_keys_is_refused();
     test_stop();
     test_a_stop_that_fails_resets_the_radio();
+    test_repeated_stops_do_not_put_off_the_reset();
+    test_a_held_paddle_after_a_stop_resets_the_radio();
     test_a_stop_by_a_limit_is_checked_too();
     test_switching_out_of_cw_ends_a_run();
+    test_the_key_down_budget();
+    test_a_transmitter_that_never_reads_on_refuses_cw();
     test_the_watchdog();
     test_the_hang_test();
     test_quiet_time();

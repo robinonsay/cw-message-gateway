@@ -78,12 +78,13 @@ fn opening_stops_the_firmware_and_confirms_receive() {
 
 #[test]
 fn firmware_without_limits_of_its_own_is_refused() {
-    for (version, tx_limit, link) in [
-        (2, 60_000, 100),
-        (1, 0, 100),
-        (1, 61_000, 100),
-        (1, 60_000, 500),
-        (1, 60_000, 5000),
+    // One thing wrong at a time.
+    for (version, tx_limit, link, why) in [
+        (2, 60_000, 1000, "version 2"),
+        (1, 0, 1000, "transmit limit is 0 s"),
+        (1, 61_000, 1000, "transmit limit is 61 s"),
+        (1, 60_000, 500, "link timeout is 500 ms"),
+        (1, 60_000, 5000, "link timeout is 5000 ms"),
     ] {
         let fw = firmware(SCALE);
         fw.set_hello(
@@ -91,11 +92,12 @@ fn firmware_without_limits_of_its_own_is_refused() {
             Duration::from_millis(tx_limit),
             Duration::from_millis(link),
         );
-        assert!(
-            open(&fw, settings()).is_err(),
-            "{version} {tx_limit} {link}"
-        );
+        let e = open(&fw, settings()).err().unwrap().to_string();
+        assert!(e.contains(why), "{e}");
     }
+    let fw = firmware(SCALE);
+    fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(1000));
+    assert!(open(&fw, settings()).is_ok());
     let fw = firmware(SCALE);
     fw.set_silent(true);
     let e = open(&fw, settings()).err().unwrap();
@@ -193,8 +195,54 @@ fn a_lost_cw_reply_is_followed_by_stop() {
 #[test]
 fn a_garbled_reply_is_asked_again() {
     let (mut h, fw) = ready();
+    let before = fw.received().len();
     fw.garble_replies(1);
     assert!(!h.is_transmitting().unwrap());
+    let sent: Vec<String> = fw.received()[before..]
+        .iter()
+        .map(|r| r.1.clone())
+        .collect();
+    assert_eq!(sent, ["STATUS", "STATUS"]);
+}
+
+#[test]
+fn a_cw_just_after_a_stop_waits_for_the_firmwares_check() {
+    let (mut h, fw) = ready();
+    h.send_cw("E").unwrap();
+    h.stop_cw().unwrap();
+    let t0 = Instant::now();
+    h.send_cw("TEST").unwrap();
+    let waited = t0.elapsed();
+    assert!(
+        waited > super::mock::STOP_WATCH - Duration::from_millis(200),
+        "{waited:?}"
+    );
+    // Its times from when it was taken: it runs to its end, not stopped early.
+    assert!(wait_receive(&mut h, Duration::from_secs(2)));
+    assert_eq!(off(&fw, 1).1, Off::Done);
+    assert!(h.is_transmitting().is_ok());
+    // Leading and trailing spaces are not sent.
+    thread::sleep(super::mock::STOP_WATCH);
+    h.send_cw(" HI ").unwrap();
+    assert_eq!(fw.runs()[2].text, "HI");
+}
+
+#[test]
+fn a_piece_longer_than_the_firmwares_limit_is_not_sent() {
+    // 30 zeros at 6 wpm: 132 s.
+    let set = Settings {
+        time_scale: 1.0,
+        ..settings()
+    };
+    let fw = firmware(1.0);
+    let link = Link::new(Box::new(fw.clone()), set.reply_timeout);
+    let mut h = Handheld::new(link, set, 6).unwrap();
+    let e = h.send_cw(&"0".repeat(30)).unwrap_err().to_string();
+    assert!(
+        e.contains("longer than the firmware's transmit limit"),
+        "{e}"
+    );
+    assert!(fw.runs().is_empty());
 }
 
 #[test]
@@ -281,24 +329,65 @@ fn the_hang_test_is_ended_by_the_watchdog() {
     fw.set_watchdog(Some(Duration::from_millis(100)));
     assert!(h.hang_test("E").is_err(), "too short to tell");
     assert!(fw.runs().is_empty());
-    h.hang_test(LONG).unwrap();
+    let HangTest::Hung { at, confirmed } = h.hang_test(LONG).unwrap() else {
+        panic!("not hung")
+    };
+    assert!(confirmed);
     assert!(fw.hung() && fw.transmitting());
     drop(h);
-    let sent: Vec<String> = fw.received().into_iter().map(|r| r.1).collect();
-    assert_eq!(sent.last().map(String::as_str), Some("TEST HANG"));
     assert!(fw.wait_receive(Duration::from_secs(1)));
     assert_eq!(off(&fw, 0).1, Off::Watchdog);
-    // Opened again: found on receive.
+    // Nothing sent once hung, not even the STOP of dropping it: the firmware
+    // would have taken that once it was back.
+    let sent: Vec<String> = fw.received().into_iter().map(|r| r.1).collect();
+    assert_eq!(sent.last().map(String::as_str), Some("TEST HANG"));
+    // Opened again: found restarted, about the watchdog's time after the hang, and
+    // on receive.
     let mut h = open(&fw, set.clone()).unwrap();
+    let restarted = h.started_at().unwrap().saturating_duration_since(at);
+    assert!(
+        restarted > Duration::from_millis(50) && restarted < Duration::from_millis(300),
+        "{restarted:?}"
+    );
     assert!(!h.is_transmitting().unwrap());
 
-    // A firmware without the hang test, or nothing keyed: refused, and stopped.
-    fw.set_endless(true);
-    h.send_cw("TEST").unwrap();
-    h.stop_cw().unwrap();
-    fw.set_refuse_tx(true);
-    assert!(h.hang_test(LONG).is_err());
+    // A firmware without the hang test: refused, stopped, and reported as keyed,
+    // since the CW went out.
+    let text = h.hang_test_text().unwrap();
+    let (mut h, fw) = ready_with(set.clone());
+    fw.set_no_hang_test(true);
+    match h.hang_test(&text).unwrap() {
+        HangTest::Failed { keyed, error } => {
+            assert!(keyed);
+            assert!(format!("{error:#}").contains("UNKNOWN"), "{error:#}");
+        }
+        HangTest::Hung { .. } => panic!("hung"),
+    }
     assert!(!fw.hung() && !fw.transmitting());
+    assert_eq!(off(&fw, 0).1, Off::Stop);
+    // A CW refused outright: nothing keyed.
+    let (mut h, fw) = ready_with(set.clone());
+    fw.set_refuse_tx(true);
+    match h.hang_test(&text).unwrap() {
+        HangTest::Failed { keyed, error } => {
+            assert!(!keyed, "{error:#}");
+            assert!(format!("{error:#}").contains("REFUSED"), "{error:#}");
+        }
+        HangTest::Hung { .. } => panic!("hung"),
+    }
+    assert!(!fw.hung() && !fw.transmitting());
+    // Hang text at any speed the node allows.
+    for wpm in [5, 20, 50] {
+        let set = Settings {
+            time_scale: 1.0,
+            ..settings()
+        };
+        let link = Link::new(Box::new(firmware(1.0)), set.reply_timeout);
+        let h = Handheld::new(link, set, wpm).unwrap();
+        let text = h.hang_test_text().unwrap();
+        assert!(text.len() <= MAX_CW_CHARS, "{wpm} {text}");
+        assert!(h.set.dot(wpm) * cw::units(&text) >= WATCHDOG_RESET + Duration::from_secs(2));
+    }
 }
 
 #[test]
@@ -332,6 +421,9 @@ fn a_busy_frequency_is_waited_for_and_then_given_up_on() {
     let mut set = settings();
     set.busy_quiet = Duration::from_millis(100);
     let (mut h, fw) = ready_with(set);
+    // Quiet only since the firmware started.
+    assert!(h.rest_needed(Duration::ZERO).unwrap() > Duration::ZERO);
+    thread::sleep(Duration::from_millis(150));
     assert_eq!(h.rest_needed(Duration::ZERO).unwrap(), Duration::ZERO);
     fw.set_busy_for(Duration::from_millis(200));
     // In use now: the whole quiet time to wait.
@@ -437,7 +529,7 @@ fn the_station_keys_a_handheld_without_tuning_or_reading_meters() {
 }
 
 #[test]
-fn the_station_watchdog_stops_firmware_that_keeps_sending() {
+fn the_station_stops_firmware_that_keeps_sending() {
     let mut set = settings();
     // The rig's own deadline out of the way, to test the station's.
     set.run_slack = Duration::from_secs(3600);
@@ -478,9 +570,27 @@ fn firmware_that_will_not_stop_inhibits_transmitting() {
     fw.set_no_link_watchdog(true);
     assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
     assert!(st.tx_inhibited());
-    // Its own transmit limit ends it.
-    assert!(fw.wait_receive(Duration::from_secs(2)));
-    assert_eq!(off(&fw, 0).1, Off::Limit);
+    // The station goes on sending STOP; the firmware's check of the first one has
+    // its watchdog reset the radio all the same.
+    let received = fw.received();
+    let keyed = received
+        .iter()
+        .position(|r| r.1.starts_with("CW "))
+        .unwrap();
+    let first_stop = received[keyed..]
+        .iter()
+        .find(|r| r.1 == "STOP")
+        .expect("a STOP after keying")
+        .0;
+    assert!(fw.wait_receive(super::mock::STOP_RESET + Duration::from_secs(1)));
+    let r = &fw.runs()[0];
+    let (at, why) = r.off.unwrap();
+    assert_eq!(why, Off::Watchdog);
+    assert!(
+        at <= first_stop + super::mock::STOP_RESET,
+        "{:?}",
+        at - first_stop
+    );
 }
 
 #[test]
@@ -504,6 +614,8 @@ fn a_radio_set_otherwise_is_not_keyed() {
     fw.set_power("HIGH");
     assert!(st.transmit(&tx(&["TEST"])).is_err());
     assert!(fw.runs().is_empty());
+    // The node's own checks refused them: not one CW was sent.
+    assert!(fw.received().iter().all(|r| !r.1.starts_with("CW ")));
     assert!(!st.tx_inhibited());
     fw.set_power("LOW2");
     st.transmit(&tx(&["TEST"])).unwrap();
