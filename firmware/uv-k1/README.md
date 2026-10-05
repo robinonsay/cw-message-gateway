@@ -79,9 +79,14 @@ are not taken there.
 
 ## Building
 
-It needs git, CMake 3.22 or later, Ninja, Python 3 and the Arm GNU toolchain
-(`arm-none-eabi-gcc` with its C library). The earlier version was built on Ubuntu
-24.04 with arm-none-eabi-gcc 13.2; the Mac steps have not been tried.
+CI builds it on every push, with build.sh on Ubuntu 24.04 (the `handheld firmware
+build` job in [.github/workflows/ci.yml](../../.github/workflows/ci.yml)): the run's
+`uv-k1-firmware` download holds `nr7y.cw.hfnode.bin` and its SHA-256, which the job's
+log prints too. Nothing needs building by hand.
+
+To build it yourself, it needs git, CMake 3.22 or later, Ninja, Python 3 and the Arm
+GNU toolchain (`arm-none-eabi-gcc` with its C library). The earlier version was built
+on Ubuntu 24.04 with arm-none-eabi-gcc 13.2; the Mac steps have not been tried.
 
 On a Mac (Homebrew):
 
@@ -99,9 +104,10 @@ firmware/uv-k1/build.sh
 ```
 
 It fetches the upstream firmware at the commit the patch was made for, and writes
-`firmware/uv-k1/build/nr7y.cw.hfnode.bin`. The build directory is build.sh's own (it
-resets and cleans the checkout in it on every build) and is ignored by git; delete it
-to start again.
+`firmware/uv-k1/build/nr7y.cw.hfnode.bin` and its SHA-256 in
+`nr7y.cw.hfnode.bin.sha256`. A compiler warning in hfnode's own files fails the
+build. The build directory is build.sh's own (it resets and cleans the checkout in it
+on every build) and is ignored by git; delete it to start again.
 
 ## Flashing
 
