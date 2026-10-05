@@ -71,13 +71,14 @@ Errors are `ERR <command> <code>`:
 |---|---|---|
 | Key-down | 1000 ms | Past it the key opens and the box trips: every `CW` is refused until it is power-cycled. No element is longer than a dash at 5 wpm (720 ms). |
 | Run | 60 s | `CW` text longer than this is refused; a run is ended at it. |
-| Link timeout | 2000 ms | A run ends when no valid line has arrived for this long, and at once when the USB port closes or the cable comes out. |
+| Link timeout | 2000 ms | A run ends when no valid line has arrived for this long, and at once when USB goes away: the cable comes out, or the computer resets or suspends the box's USB. |
 | Watchdog | 500 ms | The RP2350's hardware watchdog, fed only by the 1 ms control loop that times the key. If the loop stalls, the chip resets and the key opens. |
 
 The key is open at power-up, at every reset and while USB connects, and whenever
-no run is under way. The serial port's DTR and RTS lines never key the radio:
-opening the port changes nothing, and closing it (DTR dropping) ends a run like the
-cable coming out.
+no run is under way. The box never reads the serial port's DTR and RTS lines
+(hfnode holds both down): opening or closing the port does nothing by itself. When
+hfnode closes the port or stops, its check-ins stop and the link timeout ends the
+run.
 
 ## How hfnode uses it
 

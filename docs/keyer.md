@@ -21,8 +21,8 @@ before; `station.rig` picks one or the other.
 
 ## What you need
 
-- A Raspberry Pi Pico 2 (RP2350; the Pico 2 W works too, its radio unused), with
-  headers or wires soldered on.
+- A Raspberry Pi Pico 2 (RP2350), with headers or wires soldered on. Not the Pico
+  2 W: its GP25 belongs to its wireless chip, not an LED.
 - A PC817 optocoupler (a 4N25 or 4N35 also works), a 470 Ω resistor and a 4.7 kΩ
   resistor.
 - A plug for the radio's key jack: a 6.35 mm (1/4") stereo plug for the IC-7300
@@ -174,8 +174,9 @@ Fastest first:
 2. **The box's hardware watchdog.** If its 1 ms control loop stalls for 0.5 s, the
    chip resets and its key pin goes back to open.
 3. **The box's link timeout.** A run stops when no line has come from the node for
-   2 s (the node checks in every 0.25 s while keying), and at once when the USB
-   cable comes out: the computer crashed, hfnode was killed, the cable was pulled.
+   2 s (the node checks in every 0.25 s while keying): hfnode was killed or hung,
+   the computer crashed. It stops at once when USB goes away: the cable pulled, the
+   computer's USB reset or suspended.
 4. **The box's run limit.** No run longer than 60 s.
 5. **The node's sidetone check after every piece.** It must hear the sidetone
    follow the box's elements (or it stops and keys nothing more until its next
