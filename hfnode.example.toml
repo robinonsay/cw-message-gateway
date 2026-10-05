@@ -76,7 +76,8 @@ from_address = "hfnode@example.com"
 poll_secs = 300
 # Replies from email contacts must pass DKIM or SPF for the From domain, as reported
 # in your mail server's Authentication-Results header. Name that server here (the
-# first word of its header) if it does not add the topmost one.
+# first word of its header) if it does not add the topmost one. Gmail: "mx.google.com"
+# (set it with [google_voice]).
 # authserv_id = "mx.example.com"
 # Emailed once if the node stops transmitting after a radio fault (it writes
 # state_dir/tx-inhibited), and again at each start while that file is there. Use
@@ -84,11 +85,31 @@ poll_secs = 300
 # address gets only the start of it. Leave it out to only log it.
 alert_to = "you@example.com"
 
-# Contacts the field operator can name in TX. For SMS use the carrier's
-# email-to-SMS address; replies from the phone come back by email.
+# Texting from a Google Voice number on the [email] Gmail account: texts to it arrive
+# as mail, and the node texts back by email. A contact can be texted only after they
+# have texted this number once. See docs/texting.md.
+[google_voice]
+number = "+1 555 000 1111"        # the node's Google Voice number
+# tag = "{call} via HF radio, replies are read on air:"   # starts every text
+
+# iMessage through Messages on this Mac, as its Apple ID. Mac only, and only when the
+# node is started by hfnode.command in Terminal: see docs/texting.md.
+# [imessage]
+# db = "~/Library/Messages/chat.db"
+# poll_secs = 60
+# reply_hours = 48                # replies are read only this long after an iMessage TX
+# tag = "{call} via HF radio, replies are read on air:"
+
+# Contacts the field operator can name in TX. Each needs at least one of:
+#   phone    texted from the [google_voice] number (US and Canadian numbers)
+#   imessage an iMessage handle, phone number or Apple ID email (Mac only); a list
+#            is fine: replies from any are read, TX goes to the first
+#   address  email
+# TX tries iMessage, then Google Voice, or else email (never both: see docs/texting.md).
 [[contacts]]
 name = "MOM"
-address = "5551234567@vtext.com"
+phone = "+1 555 123 4567"
+# imessage = "+1 555 123 4567"
 
 [[contacts]]
 name = "BOB"

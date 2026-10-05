@@ -13,7 +13,8 @@
 
 use crate::audio::{Block, BlockReceiver};
 use crate::config::{Config, Schedule};
-use crate::gateway::{self, filter, LiveServices};
+use crate::gateway::imessage::{self, ImShared};
+use crate::gateway::{self, filter, google_voice, route, LiveServices};
 use crate::inbox::Inbox;
 use crate::places::LastPlaces;
 use crate::session::{Outcome, Services, Session, SessionConfig};
@@ -27,7 +28,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -150,60 +151,216 @@ pub fn screen_inbox(
     }
 }
 
-/// Poll email and screen new messages until the process exits.
-pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>) {
-    let Some(email) = cfg.email.clone() else {
+/// Read email, texts and iMessages, and screen new messages, until the process
+/// exits. Each inbound route polls in a thread of its own, so one that hangs (a
+/// stalled mail server) holds up neither the others nor the screening.
+pub fn spawn_inbound(cfg: Config, inbox: Arc<Mutex<Inbox>>, im: Option<Arc<ImShared>>) {
+    if cfg.email.is_none() && cfg.imessage.is_none() {
         return;
-    };
-    thread::spawn(move || {
-        let filter = if cfg.filter.enabled {
-            match filter::Screener::new(&cfg.filter) {
-                Ok(f) => {
-                    log::info!("inbound filter: {}", f.describe());
-                    Some(f)
-                }
-                Err(e) => {
-                    log::error!(
-                        "inbound filter not available, inbound messages will be held: {e:#}"
-                    );
-                    None
-                }
-            }
-        } else {
-            log::warn!("inbound filter disabled: third-party text will be transmitted unscreened");
-            None
-        };
-        // Mail ignored under an earlier configuration is considered again once.
-        let mut retry_ignored = true;
-        let mut timeouts = HashMap::new();
-        loop {
-            match gateway::email::poll_imap(&email, &cfg.contacts, &inbox, retry_ignored) {
-                Ok(n) => {
-                    retry_ignored = false;
-                    if n > 0 {
-                        log::info!("{n} new inbound message(s)");
+    }
+    for w in cfg.warnings() {
+        log::warn!("{w}");
+    }
+    let notify = start_screening(cfg.clone(), inbox.clone());
+    if let Some(email) = cfg.email.clone() {
+        let cfg = cfg.clone();
+        let inbox = inbox.clone();
+        // Mail ignored under an earlier configuration is considered again once, and
+        // the first look for Google Voice reply addresses reads back through the
+        // mailbox.
+        let mut first = true;
+        spawn_route(
+            "imap",
+            Duration::from_secs(email.poll_secs.max(30)),
+            move || {
+                let gv = cfg.google_voice.as_ref().map(|g| &g.number);
+                if let Some(n) = gv {
+                    if let Err(e) =
+                        google_voice::learn_gv(&email, n, &cfg.contacts, &cfg.state_dir, first)
+                    {
+                        log::warn!("Google Voice address check failed: {e:#}");
                     }
                 }
-                Err(e) => log::warn!("IMAP poll failed: {e:#}"),
-            }
-            screen_inbox(&cfg, &inbox, filter.as_ref(), &mut timeouts);
-            thread::sleep(Duration::from_secs(email.poll_secs.max(30)));
+                let added = gateway::email::poll_imap(&email, &cfg.contacts, &inbox, first, gv)?;
+                first = false;
+                Ok(added)
+            },
+            notify.clone(),
+        );
+    }
+    match (cfg.imessage.clone(), im) {
+        (Some(imcfg), Some(shared)) => {
+            let cfg = cfg.clone();
+            let runner = imessage::OsaRunner::osascript();
+            let every = Duration::from_secs(imcfg.poll_secs);
+            thread::Builder::new()
+                .name("imessage".into())
+                .spawn(move || {
+                    let mut warned = Warned::default();
+                    report_probe(&imessage::probe(&imcfg, &runner, &shared));
+                    log_routes(&cfg, Some(&shared));
+                    let mut probed = Instant::now();
+                    loop {
+                        if shared.db_ok() {
+                            match imessage::poll(
+                                &imcfg,
+                                &cfg.contacts,
+                                &cfg.state_dir,
+                                &inbox,
+                                gateway::unix_now(),
+                            ) {
+                                Ok(n) if n > 0 => {
+                                    log::info!("{n} new iMessage(s)");
+                                    let _ = notify.send(());
+                                }
+                                Ok(_) => {}
+                                Err(e) => warned.warn(format!("iMessage check failed: {e:#}")),
+                            }
+                        }
+                        let ready = shared.db_ok() && shared.send_ready().is_ok();
+                        if !ready && probed.elapsed() >= REPROBE {
+                            report_probe(&imessage::probe(&imcfg, &runner, &shared));
+                            probed = Instant::now();
+                        }
+                        thread::sleep(every);
+                    }
+                })
+                .expect("starting the iMessage thread");
         }
-    });
+        _ => log_routes(&cfg, None),
+    }
 }
 
-pub fn live_services(cfg: &Config, inbox: Arc<Mutex<Inbox>>) -> Result<LiveServices> {
+/// How often iMessage is checked again while it cannot be used.
+const REPROBE: Duration = Duration::from_secs(600);
+
+fn report_probe(r: &imessage::Readiness) {
+    match r {
+        imessage::Readiness::Ready => log::info!("iMessage ready"),
+        imessage::Readiness::NotReady(why) => log::error!("iMessage not available: {why}"),
+        imessage::Readiness::Unknown => {}
+    }
+}
+
+/// How TX would reach each contact, in the log at start-up.
+fn log_routes(cfg: &Config, im: Option<&ImShared>) {
+    let gv = google_voice::GvStore::read(&cfg.state_dir);
+    let state = gateway::imessage_state(cfg, im);
+    let a = gateway::avail(cfg, cfg.email.is_some(), &state);
+    for c in &cfg.contacts {
+        let line = route::describe(c, &a, &gv);
+        if line.starts_with("NO ROUTE") {
+            log::warn!("route: {} {line}", c.name);
+        } else {
+            log::info!("route: {} {line}", c.name);
+        }
+    }
+}
+
+/// The same failure is logged at most once an hour.
+#[derive(Default)]
+struct Warned(HashMap<String, Instant>);
+
+impl Warned {
+    fn warn(&mut self, msg: String) {
+        let due = self
+            .0
+            .get(&msg)
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(3600));
+        if due {
+            log::warn!("{msg}");
+            self.0.insert(msg, Instant::now());
+        }
+    }
+}
+
+/// Run `poll` every `every` in a thread of its own, waking the screening when it
+/// adds messages.
+fn spawn_route(
+    name: &str,
+    every: Duration,
+    mut poll: impl FnMut() -> Result<usize> + Send + 'static,
+    notify: Sender<()>,
+) {
+    let label = name.to_string();
+    thread::Builder::new()
+        .name(label.clone())
+        .spawn(move || loop {
+            match poll() {
+                Ok(n) if n > 0 => {
+                    log::info!("{n} new inbound message(s)");
+                    let _ = notify.send(());
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("{label} check failed: {e:#}"),
+            }
+            thread::sleep(every);
+        })
+        .expect("starting an inbound thread");
+}
+
+/// The screening thread, the only caller of [`screen_inbox`]: it screens whenever a
+/// route adds messages, and every minute, to retry messages held while the filter
+/// was down.
+fn start_screening(cfg: Config, inbox: Arc<Mutex<Inbox>>) -> Sender<()> {
+    let (notify, wake) = mpsc::channel::<()>();
+    thread::Builder::new()
+        .name("screen".into())
+        .spawn(move || {
+            let filter = if cfg.filter.enabled {
+                match filter::Screener::new(&cfg.filter) {
+                    Ok(f) => {
+                        log::info!("inbound filter: {}", f.describe());
+                        Some(f)
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "inbound filter not available, inbound messages will be held: {e:#}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                log::warn!(
+                    "inbound filter disabled: third-party text will be transmitted unscreened"
+                );
+                None
+            };
+            let mut timeouts = HashMap::new();
+            loop {
+                screen_inbox(&cfg, &inbox, filter.as_ref(), &mut timeouts);
+                match wake.recv_timeout(Duration::from_secs(60)) {
+                    Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                    // Every route stopped: still retry held messages.
+                    Err(RecvTimeoutError::Disconnected) => thread::sleep(Duration::from_secs(60)),
+                }
+            }
+        })
+        .expect("starting the screening thread");
+    notify
+}
+
+pub fn live_services(
+    cfg: &Config,
+    inbox: Arc<Mutex<Inbox>>,
+    im: Option<Arc<ImShared>>,
+) -> Result<LiveServices> {
     let field_call = cfg.station.field_calls.first().cloned().unwrap_or_default();
     let mailer = match &cfg.email {
         Some(e) => Some(gateway::email::Mailer::new(e, &field_call)?),
         None => None,
     };
     let weather = cfg.weather.as_ref().map(gateway::weather::Nws::new);
+    let imessage = match (&cfg.imessage, im) {
+        (Some(c), Some(shared)) => Some(imessage::ImSender::new(c, &cfg.state_dir, shared)),
+        _ => None,
+    };
     Ok(LiveServices {
         cfg: cfg.clone(),
         inbox,
         mailer,
         weather,
+        imessage,
     })
 }
 
@@ -368,6 +525,11 @@ pub fn run<R: Rig + 'static>(
     run_with_clock(cfg, station, audio, session, svc, &gateway::unix_now)
 }
 
+/// A reply that took longer than this to prepare (a send that hung) is not keyed:
+/// the field operator has given up waiting and may be transmitting again. Their
+/// repeated `OK`, or `AGN`, keys it.
+const LATE_REPLY: Duration = Duration::from_secs(90);
+
 /// [`run`], with the listening schedule following `clock` (Unix seconds) instead of
 /// the system clock, e.g. a time-scaled one in tests.
 pub fn run_with_clock<R: Rig + 'static>(
@@ -377,6 +539,18 @@ pub fn run_with_clock<R: Rig + 'static>(
     session: &mut Session,
     svc: &mut dyn Services,
     clock: &dyn Fn() -> u64,
+) -> Result<()> {
+    run_with(cfg, station, audio, session, svc, clock, LATE_REPLY)
+}
+
+fn run_with<R: Rig + 'static>(
+    cfg: &Config,
+    station: &mut Station<R>,
+    audio: &BlockReceiver,
+    session: &mut Session,
+    svc: &mut dyn Services,
+    clock: &dyn Fn() -> u64,
+    late_reply: Duration,
 ) -> Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
     let rx_log = cfg.state_dir.join("rx.log");
@@ -546,8 +720,15 @@ pub fn run_with_clock<R: Rig + 'static>(
             }
             log::info!("heard: {text}");
             log_rx(&rx_log, &text);
-            match session.handle(&text, Instant::now(), svc) {
+            let started = Instant::now();
+            match session.handle(&text, started, svc) {
                 Outcome::Silent(why) => log::info!("no reply: {why}"),
+                Outcome::Transmit(t) if started.elapsed() > late_reply => log::warn!(
+                    "reply not keyed: preparing it took {} s, longer than the field operator \
+                     waits; a repeated OK or AGN keys it: {}",
+                    started.elapsed().as_secs(),
+                    t.text()
+                ),
                 Outcome::Transmit(t) => {
                     if tuned_at.is_none_or(|at| secs_since(at, clock()) >= retune_secs) {
                         // The last tune is too old to trust, and any lockout since it
@@ -599,10 +780,18 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         sent: Vec<(String, String)>,
+        /// How long a send takes.
+        delay: Duration,
     }
 
     impl Services for Fake {
-        fn send_message(&mut self, dest: &str, text: &str) -> Result<(), String> {
+        fn send_message(
+            &mut self,
+            dest: &str,
+            _from_call: &str,
+            text: &str,
+        ) -> Result<(), crate::session::SendError> {
+            thread::sleep(self.delay);
             self.sent.push((dest.into(), text.into()));
             Ok(())
         }
@@ -642,6 +831,10 @@ mod tests {
         /// The next window starts, straight from the first, once the radio has
         /// accepted this many keyer pieces: while it transmits.
         next_window_at_piece: Option<usize>,
+        /// How long each message send takes.
+        send_delay: Duration,
+        /// Replaces [`LATE_REPLY`].
+        late_reply: Option<Duration>,
     }
 
     /// Unix time at the top of an hour: inside the default window (minutes 0-9).
@@ -765,14 +958,25 @@ mod tests {
             sc.again_window = w;
         }
         let mut session = build_session_with(&cfg, sc).unwrap();
-        let mut svc = Fake::default();
+        let mut svc = Fake {
+            delay: opts.send_delay,
+            ..Fake::default()
+        };
         let clock = move || match phase.load(Ordering::SeqCst) {
             0 => WINDOW_OPEN,
             1 => WINDOW_OPEN + 30 * 60,
             _ => WINDOW_OPEN + 60 * 60,
         };
-        let end =
-            run_with_clock(&cfg, &mut station, &rx, &mut session, &mut svc, &clock).unwrap_err();
+        let end = run_with(
+            &cfg,
+            &mut station,
+            &rx,
+            &mut session,
+            &mut svc,
+            &clock,
+            opts.late_reply.unwrap_or(LATE_REPLY),
+        )
+        .unwrap_err();
         assert!(end.to_string().contains("audio source ended"));
         let (keyed, tunes) = {
             let rig = station.rig();
@@ -832,6 +1036,70 @@ mod tests {
         assert_eq!(h.sent, [("MOM".into(), "RUNNING LATE HOME SUN".into())]);
         assert_eq!(h.last_seq, 43);
         assert!(!h.rx_log.contains("K E"), "{}", h.rx_log);
+    }
+
+    #[test]
+    fn a_reply_that_took_too_long_is_keyed_only_when_asked_again() {
+        let k = Keyer::new(8000, 610.0, 18.0);
+        let mut audio = k.render(&format!("W5XXX 42 {} TX MOM HI K", code(42)), 3000.0);
+        audio.extend(ms(cw::duration_ms("R 42 TX MOM HI ? DE N0DE K", 18) + 6000));
+        audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+        audio.extend(ms(6000));
+        // Heard nothing back: the operator sends OK again.
+        audio.extend(k.render(&format!("OK 43 {} K", code(43)), 0.0));
+        audio.extend(ms(8000));
+        // Wide margins: on a busy CI runner even the open (which saves last_seq) can
+        // take a few hundred ms.
+        let h = run_node_with(
+            audio,
+            Opts {
+                send_delay: Duration::from_millis(2500),
+                late_reply: Some(Duration::from_millis(1200)),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(h.sent, [("MOM".into(), "HI".into())], "{}", h.rx_log);
+        // After the start-up ID.
+        assert_eq!(
+            h.keyed,
+            "DE N0DE R 42 TX MOM HI ? DE N0DE K SENT 43 DE N0DE K"
+        );
+    }
+
+    #[test]
+    fn screening_goes_on_while_a_route_hangs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        cfg.filter.enabled = false;
+        let inbox = Arc::new(Mutex::new(
+            Inbox::open(dir.path().join("inbox.json")).unwrap(),
+        ));
+        let notify = start_screening(cfg, inbox.clone());
+        spawn_route(
+            "hangs",
+            Duration::from_secs(1),
+            || loop {
+                thread::sleep(Duration::from_secs(3600));
+            },
+            notify.clone(),
+        );
+        let ib = inbox.clone();
+        let mut once = true;
+        spawn_route(
+            "adds",
+            Duration::from_millis(50),
+            move || {
+                let added = once && ib.lock().unwrap().add("MOM", "a", "SEE YOU SUN", 0)?;
+                once = false;
+                Ok(usize::from(added))
+            },
+            notify,
+        );
+        let start = Instant::now();
+        while inbox.lock().unwrap().ready().is_empty() {
+            assert!(start.elapsed() < Duration::from_secs(2), "not screened");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

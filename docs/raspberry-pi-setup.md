@@ -263,8 +263,11 @@ range checked.
 Keep `state_dir = "/var/lib/hfnode"` and `key_file = "/etc/hfnode/node.key"` to match
 the systemd unit. The node creates `last_seq`, `inbox.json`, `rx.log`,
 `health.csv` and `wx_last.json` (the last weather place each field callsign
-confirmed, used for `WX` alone) in `state_dir`, and `tx-inhibited` if it stops
-transmitting (section 10).
+confirmed, used for `WX` alone) in `state_dir`, `google_voice.json` with
+`[google_voice]` set, and `tx-inhibited` if it stops transmitting (section 10).
+
+To reach contacts by text from a Google Voice number as well as by email, see
+[texting.md](texting.md). (iMessage needs a Mac.)
 
 `max_key_seconds` (default 45) must be shorter than the hardware PTT timer.
 

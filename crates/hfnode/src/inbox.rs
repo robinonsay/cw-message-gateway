@@ -67,6 +67,11 @@ impl Inbox {
         &self.path
     }
 
+    /// Whether a message from `source_id` is held (in any state).
+    pub fn has_source(&self, source_id: &str) -> bool {
+        self.data.messages.iter().any(|m| m.source_id == source_id)
+    }
+
     fn save(&self) -> Result<()> {
         let dir = match self.path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
