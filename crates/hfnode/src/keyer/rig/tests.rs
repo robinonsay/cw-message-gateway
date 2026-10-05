@@ -166,10 +166,15 @@ fn a_box_whose_control_loop_hangs_is_reset_by_its_watchdog() {
         "{longest} ms"
     );
     drop(st);
-    // The node learns the run ended early, and then that the key is open.
+    // The node learns the run ended early, and then, once the audio covers the
+    // time the box went quiet, that the key is open.
     let first = r.is_transmitting();
     assert!(first.is_err(), "{first:?}");
-    assert!(!r.is_transmitting().unwrap());
+    let deadline = Instant::now() + radio_secs(4.0);
+    while r.is_transmitting().unwrap() {
+        assert!(Instant::now() < deadline, "{:?}", r.transmit_detail());
+        thread::sleep(radio_secs(0.1));
+    }
 }
 
 #[test]

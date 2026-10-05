@@ -132,6 +132,12 @@ pub trait Rig: Send {
     fn keying_confirmed(&mut self) -> Result<Option<bool>> {
         Ok(None)
     }
+    /// Why [`Rig::is_transmitting`] last answered `true`, if the rig can say more
+    /// than that (a keyer box: the sidetone heard after its key opened). It goes
+    /// into the reason an inhibit gives.
+    fn transmit_detail(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Split `text` into pieces the keyer accepts, on word boundaries where possible.

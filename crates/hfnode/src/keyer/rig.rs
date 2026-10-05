@@ -519,6 +519,16 @@ impl Rig for KeyerRig {
         false
     }
 
+    fn transmit_detail(&mut self) -> Option<String> {
+        match self.key_state(Instant::now()) {
+            KeyState::Held(why) => Some(why),
+            KeyState::Unsure => {
+                Some("the audio does not yet show the radio's key open after the box's".into())
+            }
+            KeyState::Open => None,
+        }
+    }
+
     fn has_meters(&self) -> bool {
         false
     }

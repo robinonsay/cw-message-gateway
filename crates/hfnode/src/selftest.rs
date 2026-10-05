@@ -31,16 +31,20 @@
 //!
 //! Codes come from [`TEST_KEY`], a fixed key for tests only.
 
-use crate::audio::{self, Block, BlockSender};
+mod any_radio;
+
+pub use any_radio::{KeyerFault, MAX_SCALE as KEYER_MAX_SCALE};
+
+use crate::audio::{self, Block, BlockReceiver, BlockSender};
 use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
-use crate::session::{SendError, Services, WxError};
+use crate::session::{SendError, Services, Session, WxError};
 use crate::station::{InhibitNotice, Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
 use civ::ic7300::Ic7300;
-use civ::mock::{Fault, Foldback, MockConfig, MockPort, MockRadio, ReplyFault, Report, Settings};
+use civ::mock::{Fault, Foldback, MockConfig, MockRadio, ReplyFault, Report, Settings};
 use civ::Rig;
 use cw::{Keyer, Noise};
 use protocol::{parse, Vocabulary};
@@ -79,6 +83,8 @@ const BLOCK_SECS: f32 = 0.05;
 /// 0.4 s.
 const AHEAD_TX: usize = 200;
 const AHEAD: usize = 8;
+/// Samples of the operator's audio kept queued ahead of a keyer-box radio's.
+const KEYER_AHEAD: usize = 4 * BLOCK;
 /// Real time the operator may fall behind its schedule and still catch up, sending
 /// blocks back to back as the node takes them (never ahead of the schedule); beyond
 /// it the schedule restarts from now, so a node that is slow to take the audio slows
@@ -201,6 +207,10 @@ pub struct RadioSetup {
     /// Someone at the radio keeps nudging the dial 10 Hz up and back, so that CI-V
     /// Transceive frames arrive unasked all through the scenario.
     pub dial_nudges: bool,
+    /// Any radio keyed through its key jack by the keyer box, its headphone audio
+    /// heard through a sound card, instead of the mock IC-7300 (the fields above
+    /// are the IC-7300's): see [`any_radio`].
+    pub keyer: bool,
 }
 
 impl Default for RadioSetup {
@@ -212,6 +222,7 @@ impl Default for RadioSetup {
             faults: Vec::new(),
             sidetone: false,
             dial_nudges: false,
+            keyer: false,
         }
     }
 }
@@ -267,6 +278,8 @@ pub enum Step {
     /// A whole transaction on the next two unused lines, as the operating guide
     /// says to work one; see [`Exchange`].
     Exchange(Exchange),
+    /// A fault at the keyer box or the radio it keys.
+    Keyer(KeyerFault),
 }
 
 /// A change made at the radio's front panel, behind the node's back.
@@ -589,9 +602,10 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn keying_confirmed(&mut self) -> civ::Result<Option<bool>> {
         self.inner.keying_confirmed()
     }
+    fn transmit_detail(&mut self) -> Option<String> {
+        self.inner.transmit_detail()
+    }
 }
-
-type NodeRig = TimeScaled<Ic7300<MockPort>>;
 
 /// A scratch directory, removed when dropped.
 struct Scratch(PathBuf);
@@ -676,10 +690,60 @@ enum Heard {
     Nothing,
 }
 
+/// The radio the node drives: the mock IC-7300, or any radio on the keyer box.
+enum AirRadio {
+    Ic7300(MockRadio),
+    Keyer(any_radio::KeyerAir),
+}
+
+impl AirRadio {
+    fn ic7300(&self) -> Result<&MockRadio, String> {
+        match self {
+            Self::Ic7300(r) => Ok(r),
+            Self::Keyer(_) => Err("this step needs the mock IC-7300".into()),
+        }
+    }
+
+    fn keyer(&self) -> Result<&any_radio::KeyerAir, String> {
+        match self {
+            Self::Ic7300(_) => Err("this step needs the keyer box".into()),
+            Self::Keyer(k) => Ok(k),
+        }
+    }
+
+    fn transmitting(&self) -> bool {
+        match self {
+            Self::Ic7300(r) => r.transmitting(),
+            Self::Keyer(k) => k.transmitting(),
+        }
+    }
+
+    fn audible(&self) -> bool {
+        match self {
+            Self::Ic7300(r) => r.audible(),
+            Self::Keyer(k) => k.audible(),
+        }
+    }
+
+    fn tunes(&self) -> u32 {
+        match self {
+            Self::Ic7300(r) => r.tunes(),
+            Self::Keyer(_) => 0,
+        }
+    }
+
+    fn keyed_from(&self, from: usize) -> Vec<civ::mock::Keyed> {
+        match self {
+            Self::Ic7300(r) => r.keyed_from(from),
+            Self::Keyer(k) => k.keyed_from(from),
+        }
+    }
+}
+
 /// The operator, on the air: the audio it puts into the node and what it hears
 /// from the mock radio.
 struct Air {
-    radio: MockRadio,
+    radio: AirRadio,
     tx: Option<BlockSender>,
     book: CodeBook,
     fist: Fist,
@@ -733,16 +797,78 @@ impl Air {
         self.log.push(line);
     }
 
-    /// Send one block of audio, paced to the time scale and held back while the
-    /// node has not taken what was already sent.
+    /// Send one block of audio. To the mock IC-7300's node it goes paced to the time
+    /// scale and held back while the node has not taken what was already sent; to
+    /// a radio on the keyer box, whose headphone audio runs in real time as a sound
+    /// card's would, a few blocks ahead of it.
     fn tick(&mut self) -> Result<(), String> {
+        match &self.radio {
+            AirRadio::Ic7300(_) => self.pace()?,
+            AirRadio::Keyer(k) => {
+                while k.queued() >= KEYER_AHEAD {
+                    if Instant::now() > self.deadline {
+                        return Err("scenario took too long".into());
+                    }
+                    thread::sleep(Duration::from_micros(200));
+                }
+            }
+        }
+        let mut samples: Vec<f32> = (0..BLOCK)
+            .map(|_| self.keying.pop_front().unwrap_or(0.0))
+            .collect();
+        if self.fist.snr_db.is_some() {
+            let seed = if self.in_tx {
+                mix(&[self.fist.seed, self.tx_index, self.tx_block])
+            } else {
+                mix(&[self.fist.seed, u64::MAX, self.blocks])
+            };
+            Noise::new(seed).add(&mut samples, self.sigma);
+        }
+        if self.in_tx {
+            self.tx_block += 1;
+        }
+        match &self.radio {
+            AirRadio::Ic7300(radio) => {
+                let to = radio.now();
+                let from = to.saturating_sub(Duration::from_secs_f32(BLOCK_SECS));
+                // On transmit the radio receives nothing: the operator's signal is lost.
+                for (a, b) in radio.transmit_between(from, to) {
+                    let n = samples.len();
+                    samples[at(from, a, n).min(n)..at(from, b, n).min(n)].fill(0.0);
+                }
+                if self.sidetone {
+                    add_sidetone(radio, &mut samples, from, to);
+                }
+                let block = Block {
+                    at: Instant::now(),
+                    samples,
+                };
+                let tx = self.tx.as_ref().ok_or("audio closed")?;
+                tx.send(block).map_err(|_| "the node stopped listening")?;
+            }
+            AirRadio::Keyer(k) => k.push(samples),
+        }
+        self.blocks += 1;
+        let tunes = self.radio.tunes();
+        if tunes > self.tunes_noted {
+            self.tunes_noted = tunes;
+            self.note("NODE  (tuning)");
+        }
+        Ok(())
+    }
+
+    /// Wait until the mock IC-7300's node is due its next block of audio.
+    fn pace(&mut self) -> Result<(), String> {
+        let AirRadio::Ic7300(radio) = &self.radio else {
+            return Ok(());
+        };
         let tx = self.tx.as_ref().ok_or("audio closed")?;
         loop {
             let now = Instant::now();
             if now > self.deadline {
                 return Err("scenario took too long".into());
             }
-            let ahead = if self.radio.transmitting() {
+            let ahead = if radio.transmitting() {
                 AHEAD_TX
             } else {
                 AHEAD
@@ -771,61 +897,17 @@ impl Air {
             .nudge_hz
             .filter(|_| self.blocks.is_multiple_of(NUDGE_BLOCKS))
         {
-            self.radio.turn_dial(hz + 10);
-            self.radio.turn_dial(hz);
-        }
-        let mut samples: Vec<f32> = (0..BLOCK)
-            .map(|_| self.keying.pop_front().unwrap_or(0.0))
-            .collect();
-        if self.fist.snr_db.is_some() {
-            let seed = if self.in_tx {
-                mix(&[self.fist.seed, self.tx_index, self.tx_block])
-            } else {
-                mix(&[self.fist.seed, u64::MAX, self.blocks])
-            };
-            Noise::new(seed).add(&mut samples, self.sigma);
-        }
-        let to = self.radio.now();
-        let from = to.saturating_sub(Duration::from_secs_f32(BLOCK_SECS));
-        // On transmit the radio receives nothing: the operator's signal is lost.
-        for (a, b) in self.radio.transmit_between(from, to) {
-            let n = samples.len();
-            samples[at(from, a, n).min(n)..at(from, b, n).min(n)].fill(0.0);
-        }
-        if self.sidetone {
-            self.add_sidetone(&mut samples, from, to);
-        }
-        if self.in_tx {
-            self.tx_block += 1;
-        }
-        let block = Block {
-            at: Instant::now(),
-            samples,
-        };
-        tx.send(block).map_err(|_| "the node stopped listening")?;
-        self.blocks += 1;
-        let tunes = self.radio.tunes();
-        if tunes > self.tunes_noted {
-            self.tunes_noted = tunes;
-            self.note("NODE  (tuning)");
+            radio.turn_dial(hz + 10);
+            radio.turn_dial(hz);
         }
         Ok(())
     }
 
-    /// Mix in the radio's keying over `from..to`, the block's radio time.
-    fn add_sidetone(&self, samples: &mut [f32], from: Duration, to: Duration) {
-        let n = samples.len();
-        let w = 2.0 * std::f32::consts::PI * PITCH_HZ / SAMPLE_RATE as f32;
-        for (a, b) in self.radio.key_down_between(from, to) {
-            let start = from.as_secs_f32() * SAMPLE_RATE as f32;
-            for (i, s) in samples
-                .iter_mut()
-                .enumerate()
-                .take(at(from, b, n).min(n))
-                .skip(at(from, a, n))
-            {
-                *s += SIDETONE * (w * (start + i as f32)).sin();
-            }
+    /// Close the node's audio, which makes `node::run` return.
+    fn close_audio(&mut self) {
+        self.tx = None;
+        if let AirRadio::Keyer(k) = &mut self.radio {
+            k.close();
         }
     }
 
@@ -883,6 +965,7 @@ impl Air {
     /// started, it is listening again. Whatever it keyed meanwhile is the window's
     /// ID, not an answer.
     fn window_start(&mut self, tunes: u32) -> Result<(), String> {
+        self.radio.ic7300()?;
         while self.radio.tunes() == tunes {
             self.tick()?;
         }
@@ -1034,17 +1117,20 @@ impl Air {
             }
             Step::Inject(f) => {
                 self.note(format!("RADIO fault {f:?}"));
-                self.radio.inject(f.clone());
+                self.radio.ic7300()?.inject(f.clone());
                 Ok(())
             }
             Step::SetSwr(swr) => {
                 self.note(format!("RADIO SWR now {swr}"));
-                self.radio.configure(|c| c.swr = *swr);
+                self.radio.ic7300()?.configure(|c| c.swr = *swr);
                 Ok(())
             }
             Step::ClearStuck => {
                 self.note("RADIO stuck transmit cleared (hardware timer)");
-                self.radio.clear_stuck();
+                match &self.radio {
+                    AirRadio::Ic7300(r) => r.clear_stuck(),
+                    AirRadio::Keyer(k) => k.clear_stuck(),
+                }
                 Ok(())
             }
             Step::Wait(s) => self.idle(*s),
@@ -1067,11 +1153,12 @@ impl Air {
             }
             Step::Panel(p) => {
                 self.note(format!("RADIO front panel: {p:?}"));
+                let radio = self.radio.ic7300()?;
                 match *p {
-                    Panel::Dial(hz) => self.radio.turn_dial(hz),
-                    Panel::Mode(mode, filter) => self.radio.select_mode(mode, filter),
-                    Panel::Split(tx_hz) => self.radio.set_split(tx_hz),
-                    Panel::DeltaTx(on) => self.radio.set_delta_tx(on),
+                    Panel::Dial(hz) => radio.turn_dial(hz),
+                    Panel::Mode(mode, filter) => radio.select_mode(mode, filter),
+                    Panel::Split(tx_hz) => radio.set_split(tx_hz),
+                    Panel::DeltaTx(on) => radio.set_delta_tx(on),
                 }
                 Ok(())
             }
@@ -1084,6 +1171,11 @@ impl Air {
                 t => Err(format!("{t} tuner cycles so far, expected {n}")),
             },
             Step::Exchange(x) => self.exchange(x),
+            Step::Keyer(f) => {
+                self.note(format!("RADIO {f}"));
+                self.radio.keyer()?.fault(f);
+                Ok(())
+            }
         }
     }
 
@@ -1182,6 +1274,23 @@ impl Air {
     }
 }
 
+/// Mix in the mock IC-7300's keying over `from..to`, the block's radio time.
+fn add_sidetone(radio: &MockRadio, samples: &mut [f32], from: Duration, to: Duration) {
+    let n = samples.len();
+    let w = 2.0 * std::f32::consts::PI * PITCH_HZ / SAMPLE_RATE as f32;
+    for (a, b) in radio.key_down_between(from, to) {
+        let start = from.as_secs_f32() * SAMPLE_RATE as f32;
+        for (i, s) in samples
+            .iter_mut()
+            .enumerate()
+            .take(at(from, b, n).min(n))
+            .skip(at(from, a, n))
+        {
+            *s += SIDETONE * (w * (start + i as f32)).sin();
+        }
+    }
+}
+
 fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
     let key = dir.join("test.key");
     std::fs::write(&key, TEST_KEY)?;
@@ -1199,6 +1308,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         key_speed_wpm = {wpm}
         chunk_chars = {chunk}
         chunk_pause_ms = {pause}
+        {rig}
         [audio]
         sample_rate = {SAMPLE_RATE}
         pitch_hz = {PITCH_HZ}
@@ -1223,6 +1333,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [[weather.presets]]
         number = 2
         grid = "DL89ME"
+        {keyer}
         "#,
         wpm = s.node.key_wpm,
         chunk = s.node.chunk_chars,
@@ -1235,6 +1346,15 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         },
         check = s.node.check_minutes,
         retune = s.node.retune_minutes,
+        // Room for 30 characters at 18 wpm, which the box needs.
+        rig = match s.radio.keyer {
+            true => "rig = \"keyer\"\n        max_key_seconds = 50",
+            false => "",
+        },
+        keyer = match s.radio.keyer {
+            true => "[keyer]\n        commissioned = \"done\"",
+            false => "",
+        },
     ))?;
     cfg.state_dir = dir.join("state");
     cfg.auth.key_file = key;
@@ -1335,8 +1455,8 @@ fn match_overs(keyed: &[civ::mock::Keyed], expect: &[Over]) -> Result<(), String
     }
 }
 
-fn describe(r: &Report) -> String {
-    r.keyed
+fn describe(keyed: &[civ::mock::Keyed]) -> String {
+    keyed
         .iter()
         .filter(|k| k.on_air)
         .map(|k| {
@@ -1359,12 +1479,7 @@ fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
 }
 
 /// What the node thread hands back when `node::run` returns.
-type Finished = (
-    anyhow::Result<()>,
-    Station<NodeRig>,
-    crate::session::Session,
-    FakeServices,
-);
+type Finished<R> = (anyhow::Result<()>, Station<R>, Session, FakeServices);
 
 /// Run one scenario at `scale` times real time.
 pub fn run(s: &Scenario, scale: f32) -> Outcome {
@@ -1385,6 +1500,9 @@ pub fn run(s: &Scenario, scale: f32) -> Outcome {
 }
 
 fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
+    if s.radio.keyer {
+        return any_radio::run_inner(s, scale, out);
+    }
     let scale = scale.clamp(1.0, MAX_SCALE);
     let dir = Scratch::new(&s.name).context("scratch directory")?;
     let cfg = config(s, &dir.0, scale)?;
@@ -1403,12 +1521,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         inner: Ic7300::with_port(radio.port(), cfg.station.civ_address),
         scale,
     };
-    if s.node.inhibited_at_start {
-        std::fs::write(
-            cfg.state_dir.join(crate::station::INHIBIT_FILE),
-            format!("{CLOCK_START} radio not confirmed on receive (no reply from radio)\n"),
-        )?;
-    }
+    inhibit_at_start(s, &cfg)?;
     let station = Station::new(
         rig,
         station_config(&cfg, scale),
@@ -1418,10 +1531,89 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     let (alert_tx, alerts) = mpsc::channel();
     station.notify_inhibit(alert_tx);
     station.configure().context("configuring the mock radio")?;
-    let mut sc = node::session_config(&cfg);
+    let (session, svc) = node_side(s, &cfg, scale)?;
+
+    let (tx, rx) = audio::queue(usize::MAX);
+    let clock_radio = radio.clone();
+    // The listening schedule runs in radio time.
+    let done = spawn_node(&cfg, station, session, svc, rx, move || {
+        CLOCK_START + clock_radio.now().as_secs()
+    });
+    let mut air = air(s, AirRadio::Ic7300(radio.clone()), Some(tx), book, scale);
+    let Some((station, session, svc)) = operate(s, &mut air, &done, out) else {
+        return Ok(());
+    };
+    let inhibited = station.tx_inhibited();
+    // How the node left the radio, before dropping the station forces receive (as
+    // on shutdown) and would hide it.
+    let left = radio.report();
+    let settings = radio.settings();
+    let stops = radio
+        .commands()
+        .iter()
+        .filter(|(_, body)| body[..] == [0x17, 0xFF])
+        .count();
+    drop(station);
+    let notices: Vec<_> = alerts.try_iter().collect();
+    let r = radio.report();
+    out.radio_time = r.now;
+
+    let e = &s.expect;
+    out.checks.push(keyed_check(&r.keyed, &e.keyed));
+
+    let tunes_at: Vec<Duration> = radio
+        .commands()
+        .iter()
+        .filter(|(_, b)| b[..] == [0x1C, 0x01, 0x02])
+        .map(|(t, _)| *t)
+        .collect();
+    out.checks
+        .push(station_id_check(&r.keyed, &tunes_at, e, scale));
+    gateway_checks(&cfg, e, &session, &svc, out)?;
+
+    out.checks.push(check(
+        "ci-v",
+        r.violations.is_empty(),
+        if r.violations.is_empty() {
+            format!(
+                "{} commands, no protocol violations",
+                radio.commands().len()
+            )
+        } else {
+            r.violations
+                .iter()
+                .map(|v| format!("{:02X?}: {}", v.bytes, v.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        },
+    ));
+
+    out.checks.push(settings_check(&cfg, &settings));
+    out.checks.push(forced_receive_check(e, stops, "17 FF"));
+    out.checks
+        .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
+    out.checks.push(alert_check(e, &s.node, &notices));
+    reception_checks(&cfg, e, out);
+    Ok(())
+}
+
+/// Leave the inhibit file a fault before a restart would, if the scenario says.
+fn inhibit_at_start(s: &Scenario, cfg: &Config) -> Result<()> {
+    if s.node.inhibited_at_start {
+        std::fs::write(
+            cfg.state_dir.join(crate::station::INHIBIT_FILE),
+            format!("{CLOCK_START} radio not confirmed on receive (no reply from radio)\n"),
+        )?;
+    }
+    Ok(())
+}
+
+/// The node's session, with its timeouts scaled, and the fake gateways.
+fn node_side(s: &Scenario, cfg: &Config, scale: f32) -> Result<(Session, FakeServices)> {
+    let mut sc = node::session_config(cfg);
     sc.pending_timeout = sc.pending_timeout.div_f32(scale);
     sc.again_window = sc.again_window.div_f32(scale);
-    let session = node::build_session_with(&cfg, sc)?;
+    let session = node::build_session_with(cfg, sc)?;
     let svc = FakeServices {
         inbox: inbox(&s.node),
         fail_send: s.node.fail_send,
@@ -1429,25 +1621,38 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         weather_error: s.node.weather_error.clone(),
         ..FakeServices::default()
     };
+    Ok((session, svc))
+}
 
-    let (tx, rx) = audio::queue(usize::MAX);
-    let (done_tx, done_rx) = mpsc::channel::<Finished>();
+/// Run the node as `hfnode run` does, on a thread of its own, its listening
+/// schedule on `clock`; it returns when its audio closes.
+fn spawn_node<R: Rig + Send + 'static>(
+    cfg: &Config,
+    station: Station<R>,
+    session: Session,
+    svc: FakeServices,
+    rx: BlockReceiver,
+    clock: impl Fn() -> u64 + Send + 'static,
+) -> mpsc::Receiver<Finished<R>> {
+    let (done_tx, done_rx) = mpsc::channel::<Finished<R>>();
     let node_cfg = cfg.clone();
-    let clock_radio = radio.clone();
     thread::spawn(move || {
         let (mut station, mut session, mut svc) = (station, session, svc);
-        // The listening schedule runs in radio time.
-        let clock = move || CLOCK_START + clock_radio.now().as_secs();
         let end =
             node::run_with_clock(&node_cfg, &mut station, &rx, &mut session, &mut svc, &clock);
         drop(rx);
         let _ = done_tx.send((end, station, session, svc));
     });
+    done_rx
+}
 
+/// The operator for `s`, on `radio`.
+fn air(s: &Scenario, radio: AirRadio, tx: Option<BlockSender>, book: CodeBook, scale: f32) -> Air {
     let snr = s.fist.snr_db.unwrap_or(f32::INFINITY);
-    let mut air = Air {
-        radio: radio.clone(),
-        tx: Some(tx),
+    let tune_at_start = !s.node.inhibited_at_start && !s.radio.keyer;
+    Air {
+        radio,
+        tx,
         book,
         fist: s.fist.clone(),
         sigma: Noise::sigma_for_snr(AMPLITUDE, snr, SAMPLE_RATE, 2500.0),
@@ -1471,13 +1676,23 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         wrong_read_backs: 0,
         restarts: 0,
         extra: 0,
-        tune_at_start: !s.node.inhibited_at_start,
+        tune_at_start,
         first_try: false,
         tunes_noted: 0,
-    };
+    }
+}
+
+/// Work the script, close the node's audio and wait for `node::run` to return:
+/// the `script` and `ended` checks, and what the node thread handed back.
+fn operate<R: Rig + 'static>(
+    s: &Scenario,
+    air: &mut Air,
+    done: &mpsc::Receiver<Finished<R>>,
+    out: &mut Outcome,
+) -> Option<(Station<R>, Session, FakeServices)> {
     let failures = air.operate(&s.script);
     // Closing the audio ends node::run.
-    air.tx = None;
+    air.close_audio();
     out.transcript = std::mem::take(&mut air.log);
     out.facts = Facts {
         operator_sent: std::mem::take(&mut air.sent),
@@ -1498,14 +1713,13 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
 
-    let finished = done_rx.recv_timeout(Duration::from_secs(30));
-    let Ok((end, station, session, svc)) = finished else {
+    let Ok((end, station, session, svc)) = done.recv_timeout(Duration::from_secs(30)) else {
         out.checks.push(check(
             "ended",
             false,
             "node::run did not return within 30 s",
         ));
-        return Ok(());
+        return None;
     };
     let ended = matches!(&end, Err(e) if e.to_string().contains("audio source ended"));
     out.checks.push(check(
@@ -1516,45 +1730,34 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
             Err(e) => format!("{e:#}"),
         },
     ));
-    let inhibited = station.tx_inhibited();
+    Some((station, session, svc))
+}
+
+/// The node's overs, its station IDs aside, against `expect`.
+fn keyed_check(keyed: &[civ::mock::Keyed], expect: &[Over]) -> Check {
+    let id = format!("DE {NODE_CALL}");
+    let overs: Vec<civ::mock::Keyed> = keyed.iter().filter(|k| k.text != id).cloned().collect();
+    let matched = match_overs(&overs, expect);
+    check(
+        "keyed",
+        matched.is_ok(),
+        match matched {
+            Ok(()) => format!("{} overs: {}", expect.len(), describe(keyed)),
+            Err(why) => format!("{why}; radio keyed: {}", describe(keyed)),
+        },
+    )
+}
+
+/// What the gateways did, and the last line used, in memory and on disk.
+fn gateway_checks(
+    cfg: &Config,
+    e: &Expect,
+    session: &Session,
+    svc: &FakeServices,
+    out: &mut Outcome,
+) -> Result<()> {
     let last_seq = session.last_seq();
     let stored = SeqStore::new(cfg.state_dir.join("last_seq")).load()?;
-    // How the node left the radio, before dropping the station forces receive (as
-    // on shutdown) and would hide it.
-    let left = radio.report();
-    let settings = radio.settings();
-    let stops = radio
-        .commands()
-        .iter()
-        .filter(|(_, body)| body[..] == [0x17, 0xFF])
-        .count();
-    drop(station);
-    let notices: Vec<_> = alerts.try_iter().collect();
-    let r = radio.report();
-    out.radio_time = r.now;
-
-    let e = &s.expect;
-    let id = format!("DE {NODE_CALL}");
-    let overs: Vec<civ::mock::Keyed> = r.keyed.iter().filter(|k| k.text != id).cloned().collect();
-    let keyed = match_overs(&overs, &e.keyed);
-    out.checks.push(check(
-        "keyed",
-        keyed.is_ok(),
-        match keyed {
-            Ok(()) => format!("{} overs: {}", e.keyed.len(), describe(&r)),
-            Err(why) => format!("{why}; radio keyed: {}", describe(&r)),
-        },
-    ));
-
-    let tunes_at: Vec<Duration> = radio
-        .commands()
-        .iter()
-        .filter(|(_, b)| b[..] == [0x1C, 0x01, 0x02])
-        .map(|(t, _)| *t)
-        .collect();
-    out.checks
-        .push(station_id_check(&r.keyed, &tunes_at, e, scale));
-
     out.facts.sent = svc.sent.clone();
     out.facts.read = svc.read.clone();
     let weather: Vec<String> = e.weather.clone();
@@ -1583,37 +1786,24 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         last_seq == e.last_seq && stored == e.last_seq,
         format!("{last_seq} (stored {stored}), expected {}", e.last_seq),
     ));
+    Ok(())
+}
 
-    out.checks.push(check(
-        "ci-v",
-        r.violations.is_empty(),
-        if r.violations.is_empty() {
-            format!(
-                "{} commands, no protocol violations",
-                radio.commands().len()
-            )
-        } else {
-            r.violations
-                .iter()
-                .map(|v| format!("{:02X?}: {}", v.bytes, v.reason))
-                .collect::<Vec<_>>()
-                .join("; ")
-        },
-    ));
-
-    out.checks.push(settings_check(&cfg, &settings));
-    out.checks.push(check(
+/// Whether the node made the radio stop (`what`: how) while it ran, as it must
+/// after any fault and never otherwise.
+fn forced_receive_check(e: &Expect, stops: usize, what: &str) -> Check {
+    check(
         "forced receive",
         (stops > 0) == e.forced_receive,
         format!(
-            "17 FF sent {stops} times while the node ran, expected {}",
+            "{what} sent {stops} times while the node ran, expected {}",
             if e.forced_receive { "some" } else { "none" }
         ),
-    ));
-    out.checks
-        .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
-    out.checks.push(alert_check(e, &s.node, &notices));
+    )
+}
 
+/// What the node decoded: everything expected, and never itself.
+fn reception_checks(cfg: &Config, e: &Expect, out: &mut Outcome) {
     let rx_log = std::fs::read_to_string(cfg.state_dir.join("rx.log")).unwrap_or_default();
     // `<unix time>,<text>`.
     out.facts.received = rx_log
@@ -1650,7 +1840,6 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
             format!("node decoded itself: {echoes:?}")
         },
     ));
-    Ok(())
 }
 
 /// Whether a keyer piece ends with the node's callsign: an ID, or the end of an over.
@@ -3299,6 +3488,8 @@ pub fn scenarios() -> Vec<Scenario> {
         .to_vec();
         s
     });
+    let keyer = any_radio::scenarios(&v);
+    v.extend(keyer);
     v
 }
 

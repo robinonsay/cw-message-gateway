@@ -61,6 +61,42 @@ enum Usb {
     Back(u64),
 }
 
+/// One `CW` command the box took.
+#[derive(Debug, Clone)]
+pub struct Run {
+    pub text: String,
+    pub wpm: u32,
+    /// When it was taken and when it ended (box ms): its last key-up, or when it
+    /// was stopped.
+    pub start: u64,
+    pub end: Option<u64>,
+    pub ended: keyer_core::keyer::Ended,
+}
+
+impl Run {
+    /// The characters keyed in full by `t` (box ms).
+    pub fn sent_by(&self, t: u64) -> String {
+        let elapsed = t.saturating_sub(self.start);
+        let words: Vec<&str> = self.text.split(' ').collect();
+        let mut done = String::new();
+        let mut text = String::new();
+        for (i, w) in words.iter().enumerate() {
+            for (j, c) in w.char_indices() {
+                let upto = format!("{text}{}", &w[..j + c.len_utf8()]);
+                match keyer_core::morse::run_ms(upto.as_bytes(), self.wpm) {
+                    Ok(ms) if u64::from(ms) <= elapsed => done = upto,
+                    _ => return done,
+                }
+            }
+            text.push_str(w);
+            if i + 1 < words.len() {
+                text.push(' ');
+            }
+        }
+        done
+    }
+}
+
 /// What the box sees and does.
 pub struct BoxState {
     keyer: Keyer,
@@ -72,6 +108,8 @@ pub struct BoxState {
     hung_at: Option<u64>,
     /// Lines the box took, for tests.
     pub lines: Vec<String>,
+    /// Every `CW` command it took, in order.
+    pub runs: Vec<Run>,
     /// Times it restarted.
     pub resets: u32,
 }
@@ -85,8 +123,28 @@ impl BoxState {
             replies: VecDeque::new(),
             hung_at: None,
             lines: Vec::new(),
+            runs: Vec::new(),
             resets: 0,
         }
+    }
+
+    /// Close the open run, if the box is no longer keying it.
+    fn close_run(&mut self, now: u64) {
+        let running = self.keyer.running() && !self.keyer.hung();
+        let Some(run) = self.runs.last_mut().filter(|r| r.end.is_none()) else {
+            return;
+        };
+        if running {
+            return;
+        }
+        let last_up = self
+            .keys
+            .iter()
+            .rev()
+            .find(|&&(at, down)| !down && at >= run.start)
+            .map(|&(at, _)| at);
+        run.end = Some(last_up.unwrap_or(now).min(now));
+        run.ended = self.keyer.ended();
     }
 
     /// Bring the box up to `now`: its keying, its watchdog, its USB.
@@ -99,6 +157,10 @@ impl BoxState {
                 // The watchdog: the chip resets, its pin goes low, USB re-enumerates.
                 if self.keyer.key_down() {
                     keys.push_back((reset, false));
+                }
+                if let Some(run) = self.runs.last_mut().filter(|r| r.end.is_none()) {
+                    run.end = Some(reset);
+                    run.ended = keyer_core::keyer::Ended::None;
                 }
                 self.keyer = Keyer::new(Limits::BOX, Boot::Watchdog, reset);
                 self.hung_at = None;
@@ -117,6 +179,7 @@ impl BoxState {
                 self.usb = Usb::Up;
             }
         }
+        self.close_run(now);
         while self.keys.len() > 4096 {
             self.keys.pop_front();
         }
@@ -132,6 +195,10 @@ impl BoxState {
 
     pub fn ended(&self) -> keyer_core::keyer::Ended {
         self.keyer.ended()
+    }
+
+    pub fn trip(&self) -> keyer_core::keyer::Trip {
+        self.keyer.trip()
     }
 
     /// The key-down stretches that overlap `from..to` (box ms); one still down
@@ -197,12 +264,25 @@ impl MockBox {
                 ks.push((now, false));
             }
             s.keys.extend(ks);
+            if let Some(run) = s.runs.last_mut().filter(|r| r.end.is_none()) {
+                run.end = Some(now);
+                run.ended = keyer_core::keyer::Ended::Usb;
+            }
             s.usb = Usb::Unplugged;
         } else if s.usb == Usb::Unplugged {
             s.keyer = Keyer::new(Limits::BOX, Boot::Power, now);
             s.usb = Usb::Back(now + USB_RESET_MS);
         }
     }
+}
+
+/// The speed and text of a `CW` line (`<id> CW <wpm> <text>*<check>`).
+fn cw_command(line: &str) -> Option<(u32, String)> {
+    let body = line.split_once('*').map_or(line, |(b, _)| b);
+    let (_, rest) = body.split_once(' ')?;
+    let rest = rest.strip_prefix("CW ")?;
+    let (wpm, text) = rest.split_once(' ')?;
+    Some((wpm.parse().ok()?, text.to_string()))
 }
 
 struct MockTransport {
@@ -233,6 +313,17 @@ impl Transport for MockTransport {
             s.hung_at.get_or_insert(now);
         }
         if let Some(r) = reply {
+            if r.as_str().contains(" OK CW*") {
+                if let Some((wpm, text)) = cw_command(line) {
+                    s.runs.push(Run {
+                        text,
+                        wpm,
+                        start: now,
+                        end: None,
+                        ended: keyer_core::keyer::Ended::None,
+                    });
+                }
+            }
             s.replies.push_back(r.as_str().to_string());
         }
         Ok(())

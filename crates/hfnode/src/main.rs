@@ -131,13 +131,15 @@ enum Cmd {
         #[command(subcommand)]
         action: FilterCmd,
     },
-    /// Run the closed-loop scenarios against a mock IC-7300: no radio, sound card,
+    /// Run the closed-loop scenarios against a mock IC-7300, and the `keyer-` ones
+    /// against a mock keyer box and the radio it keys: no radio, sound card,
     /// network or config needed. Exits non-zero if any fails.
     Selftest {
         /// Run only these scenarios (exact name, or a prefix such as `fault-`).
         #[arg(long)]
         scenario: Vec<String>,
-        /// Times faster than real time, 1 to 200; lower it on a slow machine.
+        /// Times faster than real time, 1 to 200 (the `keyer-` scenarios at most
+        /// 20); lower it on a slow machine.
         #[arg(long, default_value_t = selftest::DEFAULT_SCALE)]
         scale: f32,
         /// Scenarios run at once (default: one per CPU).
@@ -1273,9 +1275,18 @@ fn run_selftest(
     let jobs = jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .clamp(1, picked.len().max(1));
+    let on_keyer = picked.iter().filter(|s| s.radio.keyer).count();
     println!(
-        "{} scenarios against the mock IC-7300 at {scale}x real time, {jobs} at once",
-        picked.len()
+        "{} scenarios at {scale}x real time, {jobs} at once: {} against the mock IC-7300{}",
+        picked.len(),
+        picked.len() - on_keyer,
+        match on_keyer {
+            0 => String::new(),
+            n => format!(
+                ", {n} against the mock keyer box and radio (at most {}x)",
+                selftest::KEYER_MAX_SCALE
+            ),
+        }
     );
     let t0 = Instant::now();
     let next = std::sync::atomic::AtomicUsize::new(0);

@@ -248,7 +248,12 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
         deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS));
         match r.is_transmitting() {
             Ok(false) => return Ok(()),
-            Ok(true) => last = RigError::Protocol("radio still reports transmit".into()),
+            Ok(true) => {
+                last = RigError::Protocol(match r.transmit_detail() {
+                    Some(why) => format!("radio still reports transmit: {why}"),
+                    None => "radio still reports transmit".into(),
+                })
+            }
             Err(e) => last = e,
         }
     }

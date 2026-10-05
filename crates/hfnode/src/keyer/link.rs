@@ -186,6 +186,10 @@ impl Link {
             }
             match self.once(cmd) {
                 Ok(r) => return Ok(r),
+                // No port to write to (the box unplugged): asking again cannot help.
+                Err(RigError::Io(e)) if e.kind() == io::ErrorKind::NotConnected => {
+                    return Err(RigError::Io(e))
+                }
                 Err(e @ (RigError::Timeout | RigError::Io(_))) => last = e,
                 Err(e) => return Err(e),
             }

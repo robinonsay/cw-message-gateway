@@ -1,6 +1,7 @@
-//! Closed-loop tests against the byte-level mock IC-7300: a scripted field operator
-//! keys CW audio into the whole node, listens to what the mock radio keys and
-//! reacts to it. One test per scenario in [`hfnode::selftest::scenarios`].
+//! Closed-loop tests against the byte-level mock IC-7300, and (the `keyer-` ones)
+//! the mock keyer box and the radio it keys: a scripted field operator keys CW
+//! audio into the whole node, listens to what the radio keys and reacts to it. One
+//! test per scenario in [`hfnode::selftest::scenarios`].
 //!
 //! The scenarios run time-scaled ([`selftest::DEFAULT_SCALE`] times real time).
 //! On a slow machine, such as a Raspberry Pi, set `HFNODE_E2E_SCALE` lower, for
@@ -97,6 +98,12 @@ const NAMES: &[&str] = &[
     "front-panel-delta-tx",
     "front-panel-idle",
     "other-stations",
+    "keyer-tx",
+    "keyer-rx-long",
+    "keyer-agn",
+    "keyer-cable-out",
+    "keyer-stuck-key",
+    "keyer-box-unplugged",
 ];
 
 macro_rules! scenario_tests {
@@ -192,6 +199,12 @@ scenario_tests! {
     front_panel_delta_tx => "front-panel-delta-tx",
     front_panel_idle => "front-panel-idle",
     other_stations => "other-stations",
+    keyer_tx => "keyer-tx",
+    keyer_rx_long => "keyer-rx-long",
+    keyer_agn => "keyer-agn",
+    keyer_cable_out => "keyer-cable-out",
+    keyer_stuck_key => "keyer-stuck-key",
+    keyer_box_unplugged => "keyer-box-unplugged",
 }
 
 /// Every test vector decodes to what the manifest says: the clean ones to exactly
