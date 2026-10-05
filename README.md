@@ -15,6 +15,10 @@ Every request is read back and does nothing until the field operator confirms it
 with a second code. Message content travels in the clear. The codes only prove who
 is sending.
 
+**Any other CW radio** works too: the node hears it through its headphone jack and a
+sound card, and keys it through its key jack with a small USB box built from a
+Raspberry Pi Pico 2 (`station.rig = "keyer"`; see [docs/keyer.md](docs/keyer.md)).
+
 > **Hardware status.** Every CI-V command in `crates/civ/src/ic7300.rs` cites
 > ICOM's IC-7300 Full Manual (IC-7300_ENG_FM_12b), Section 19, and the bytes match it.
 > The code has not yet run against a real radio, so follow the
@@ -42,6 +46,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Email, text and iMessage connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in), `google_voice.rs` (texts from a Google Voice number, through the same mailbox), `imessage.rs` (Messages on a Mac), `route.rs` (which one TX uses); see [docs/texting.md](docs/texting.md) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
 | Radio control over CI-V | `crates/civ` (`Rig` trait, framing, IC-7300 driver, `SimRig` and the byte-level `mock` for tests) |
+| Any radio through its key and headphone jacks | `crates/keyer-core` (the keyer box's protocol, Morse timing and limits, shared with its firmware), `firmware/pico2-keyer` (the box), `crates/hfnode/src/keyer/` (the keyer rig, the sidetone monitor, the mock box and radio); see [docs/keyer.md](docs/keyer.md) |
 | Station safety: reduced power, radio set up and checked before every transmission, tune at start-up (and before a reply once the last tune is old), SWR check, software PTT watchdog, chunked keying, health log | `crates/hfnode/src/station.rs` |
 | Station ID (47 CFR 97.119(a)): `DE <call>` after the tune when the node starts listening (at start-up or a window's top) if it matched, and between chunks (or before the first, after a long over from the field) so that no more than 8 minutes pass from one ID of the node's to its next (the rule allows 10; an ID 10 minutes old no longer counts, and the time runs from the start of the next transmission); a tune before a reply is identified by the reply | `crates/hfnode/src/station.rs` (`open_window`, `ID_INTERVAL`) |
 | Owner alert when the node stops transmitting (transmit inhibit) | `crates/hfnode/src/alert.rs` (email to `[email] alert_to`; the latch is in `station.rs`) |
@@ -61,6 +66,7 @@ crates/
   protocol/   grammar, fuzzy snapping, replies, chunking, text sanitizing
   civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig,
               mock: a byte-level IC-7300 that answers as the manual's Section 19 says
+  keyer-core/ the keyer box's lines, Morse timing and limits (no_std, also in its firmware)
   hfnode/     config, inbox, session state machine, station safety layer,
               gateways (SMTP/IMAP, NWS, reply filter), node loop, CLI (src/main.rs)
               selftest: scripted field operator + scenarios against the mock radio
@@ -70,6 +76,7 @@ crates/
 hfnode.example.toml   annotated example configuration
 deploy/               start-up: hfnode.service (systemd, Linux), hfnode-supervise.sh
                       and macos/ (Terminal or launchd), windows/ (Task Scheduler)
+firmware/pico2-keyer/ the keyer box's firmware (Raspberry Pi Pico 2)
 docs/                 setup, testing and operating guides
 ```
 
@@ -189,7 +196,9 @@ is one of the bench steps.
 `hfnode selftest` needs no config, radio, sound card or network. It runs the whole
 node (decoder, parser, session, station safety layer and the real IC-7300 CI-V
 driver) against `civ::mock`, a byte-level IC-7300, with a scripted field operator
-on the other end:
+on the other end. The `keyer-` scenarios run it on the keyer rig instead, against a
+mock keyer box (the firmware's own keyer code) and a radio whose headphone audio,
+sidetone included, goes to the node in real time; they run at most 20x real time:
 
 ```sh
 hfnode selftest                          # all scenarios, PASS/FAIL table; exit code 1 on failure
@@ -399,6 +408,7 @@ files listed in [docs/texting.md](docs/texting.md#files-in-state_dir).
 - [docs/macos-setup.md](docs/macos-setup.md): running the node on a Mac.
 - [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
+- [docs/keyer.md](docs/keyer.md): any radio through the keyer box: parts, wiring, flashing, radio settings, bring-up. Its protocol: [docs/keyer-protocol.md](docs/keyer-protocol.md).
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/texting.md](docs/texting.md): reaching contacts by text (Google Voice) and iMessage, and checking it.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
