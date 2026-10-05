@@ -86,9 +86,12 @@ run.
   `STATUS`, which must show the key open, no run and no trip.
 - Each piece of a transmission (at most 30 characters) is one `CW` run. Before it:
   `STATUS` (no run, no trip), and the radio's audio arriving at band level with no
-  tone held at the radio.
+  steady tone at the sidetone pitch (a carrier, or the key held at the radio). A
+  trip latches hfnode's transmit inhibit.
 - While a run lasts, `STATUS` every 0.25 s keeps it alive; if hfnode dies, the link
   timeout ends the run. A run still going 1 s past its Morse length is stopped.
 - After each run, the sidetone heard on the radio's audio must follow the box's
   timeline and then stop; see [keyer.md](keyer.md), "What stops a stuck key".
 - To force receive: `STOP`, then `STATUS` and the audio must show the key open.
+- While not keying, hfnode looks at the audio every 0.25 s for a key held at the
+  radio.

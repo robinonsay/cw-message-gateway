@@ -14,9 +14,10 @@
 //!   Either the sidetone carried on, without a break, after the box opened its key
 //!   (a shorted optocoupler or cable), or a steady tone at the pitch has gone on for
 //!   [`STEADY_TONE`], far longer than anyone tunes up on the frequency.
-//! - [`Monitor::band`]: whether audio is arriving, and the band noise is loud
+//! - [`Monitor::band`]: whether audio is arriving, whether the band noise is loud
 //!   enough (`[keyer] min_level_dbfs`) that the node would hear its own sidetone and
-//!   the field station.
+//!   the field station, and whether a steady tone sits at the pitch right now (a
+//!   carrier, or the radio's key closed): the node does not key then.
 //!
 //! Times here are radio time, in seconds since the monitor started: wall-clock
 //! time multiplied by the time scale, which is 1 except in the self-tests, whose
@@ -34,8 +35,15 @@ const KEEP_S: f64 = 120.0;
 /// Capture stamps used to place the audio in time: the last 30 s.
 const STAMPS_S: f64 = 30.0;
 /// A block this much later than the audio before it predicts means audio was
-/// lost (the capture stalled or restarted): the timing starts again from it.
+/// lost (the capture stalled or restarted): the timing starts again from it. In
+/// real time, as are the two below: how late audio arrives is up to the computer,
+/// whatever the scale.
 const STAMP_JUMP_S: f64 = 1.0;
+/// Every block for [`LOSS_CONFIRM_S`] this much later than the timing so far
+/// means a little audio was lost (a sound card dropout, an overrun): the timing is
+/// moved on by that much, from the first late block.
+const LOSS_S: f64 = 0.05;
+const LOSS_CONFIRM_S: f64 = 0.3;
 /// The longest the audio may lag the box's keying: the radio's own keying delay,
 /// the sound card's buffers and the capture pipe.
 pub const MAX_LAG: Duration = Duration::from_millis(500);
@@ -72,11 +80,19 @@ const STEADY_TONE_S: f64 = 30.0;
 const STEADY_SHARE: f32 = 0.95;
 /// A steady tone: at least this share of a slice's power at the pitch.
 const MIN_PURITY: f32 = 0.6;
+/// A steady tone: each slice within this of the one before. A carrier's level (and
+/// a sidetone's) holds; band noise, even through a narrow filter, jumps about.
+const STEADY_STEP_DB: f32 = 1.5;
+/// A carrier now: the last this much audio a steady tone at the pitch ...
+const CARRIER_S: f64 = 1.0;
+/// ... in at least this share of it.
+const CARRIER_SHARE: f32 = 0.9;
 /// A tone this far under the sidetone heard in the last good run is not it.
 const BELOW_SIDETONE_DB: f32 = 10.0;
 /// Before any run was heard, a steady tone must be this far over `min_level_dbfs`.
 const OVER_MIN_LEVEL_DB: f32 = 10.0;
-/// Over the receive audio before a run: the sidetone, if the run gave no level.
+/// Over the band's level when the run started: the sidetone, if the run gave no
+/// level.
 const OVER_RECEIVE_DB: f32 = 10.0;
 /// Audio is arriving if a block came within this (wall-clock) time.
 pub const AUDIO_FRESH: Duration = Duration::from_secs(1);
@@ -132,6 +148,8 @@ struct Run {
     /// After it, the tone broke off: no longer a candidate for a key held down.
     released: bool,
     judge: Option<Judge>,
+    /// The band's level when the box took it (`Monitor::band`), dBFS.
+    band_db: Option<f32>,
 }
 
 impl Run {
@@ -152,9 +170,13 @@ pub struct Judge {
     pub gap_db: f32,
     /// Median level at the pitch just before the run.
     pub before_db: Option<f32>,
-    /// Share of key-down slices over the midway level, and of key-up ones under.
+    /// Share of key-down slices over the midway level, and of key-up ones (in the
+    /// run's gaps and after it) under.
     pub share_down: f32,
     pub share_up: f32,
+    /// Share of the slices just before the run at least [`MIN_CONTRAST_DB`] under
+    /// the sidetone (1 if there were none).
+    pub share_before: f32,
     pub slices_down: usize,
     pub slices_up: usize,
 }
@@ -172,6 +194,12 @@ impl Judge {
         Some(
             if self.slices_down < MIN_SLICES || self.slices_up < MIN_SLICES {
                 "too little audio to judge".to_string()
+            } else if self.share_before < MIN_SHARE {
+                format!(
+                    "the sidetone pitch was already loud before the box keyed ({:.0} dBFS): a \
+                     carrier on the frequency, or the key closed at the radio",
+                    self.before_db.unwrap_or(f32::NAN)
+                )
             } else if self.contrast_db() < MIN_CONTRAST_DB {
                 format!(
                     "the elements were only {:.0} dB over the gaps (need {MIN_CONTRAST_DB:.0}): \
@@ -211,8 +239,13 @@ pub struct Band {
     /// A block came within [`AUDIO_FRESH`].
     pub audio: bool,
     /// The level of the receive audio in dBFS (median over a second): measured now,
-    /// or within [`LEVEL_KEEPS`] if the node has been keying since.
+    /// or within [`LEVEL_KEEPS`] if the node has been keying since. A carrier is not
+    /// the band: while one is heard the level from before it stands.
     pub level_db: Option<f32>,
+    /// A steady tone at the pitch over the last second, and its level: a station's
+    /// carrier on the frequency, or the radio's key closed at the radio. The node
+    /// does not key over it.
+    pub carrier_db: Option<f32>,
 }
 
 /// What the audio says about the radio's key.
@@ -237,9 +270,9 @@ pub struct Monitor {
     pending: Vec<f32>,
     /// Samples cut into slices so far.
     n: u64,
-    /// (radio time of a block's capture, the radio time its first sample would
-    /// have if it had been captured with no delay at all).
-    stamps: VecDeque<(f64, f64)>,
+    /// Each block's capture: (its radio time, the radio time its first sample would
+    /// have if it had been captured with no delay at all, that sample's index).
+    stamps: VecDeque<(f64, f64, u64)>,
     base: f64,
     slices: VecDeque<Slice>,
     last_block: Option<Instant>,
@@ -290,6 +323,11 @@ impl Monitor {
         at.saturating_duration_since(self.t0).as_secs_f64() * f64::from(self.s.scale)
     }
 
+    /// `s` seconds of real time, in radio seconds.
+    fn real(&self, s: f64) -> f64 {
+        s * f64::from(self.s.scale)
+    }
+
     /// Radio time of the newest audio.
     fn latest(&self) -> Option<f64> {
         self.slices.back().map(|s| s.t + SLICE_S / 2.0)
@@ -306,25 +344,28 @@ impl Monitor {
         // timing, kept over the last 30 s so that the sound card's clock drifting
         // against the computer's does not add up.
         let first = at_r - end as f64 / sr;
-        if self.stamps.is_empty() || first > self.base + STAMP_JUMP_S {
+        if self.stamps.is_empty() || first > self.base + self.real(STAMP_JUMP_S) {
             if !self.stamps.is_empty() {
                 log::warn!("sidetone monitor: audio was lost; timing it again");
             }
             self.stamps.clear();
         }
-        self.stamps.push_back((at_r, first));
+        self.stamps
+            .push_back((at_r, first, end - samples.len() as u64));
         while self
             .stamps
             .front()
-            .is_some_and(|&(t, _)| t < at_r - STAMPS_S)
+            .is_some_and(|&(t, _, _)| t < at_r - STAMPS_S)
         {
             self.stamps.pop_front();
         }
-        self.base = self
+        let base = self
             .stamps
             .iter()
-            .map(|&(_, f)| f)
+            .map(|&(_, f, _)| f)
             .fold(f64::INFINITY, f64::min);
+        self.base = base;
+        self.check_loss(at_r);
 
         if let Some((_, raw)) = self.raw.as_mut() {
             let room = (KEEP_S * sr) as usize;
@@ -346,6 +387,52 @@ impl Monitor {
         while self.slices.front().is_some_and(|s| s.t < at_r - KEEP_S) {
             self.slices.pop_front();
         }
+    }
+
+    /// A little audio lost shows as every block since arriving that much later than
+    /// the samples count for, while the earliest-ever timing in `base` stays put: then
+    /// the timing moves on by that much from the first late block, and the slices
+    /// cut since then move with it. Without this they would sit up to a second too
+    /// early, and the runs keyed over them would not be heard, for 30 s.
+    fn check_loss(&mut self, at_r: f64) {
+        let confirm = self.real(LOSS_CONFIRM_S);
+        let recent: Vec<(f64, f64, u64)> = self
+            .stamps
+            .iter()
+            .rev()
+            .take_while(|&&(t, _, _)| t >= at_r - confirm)
+            .copied()
+            .collect();
+        let Some(&(_, _, from_n)) = recent.last() else {
+            return;
+        };
+        if recent.len() < 2 || recent.len() == self.stamps.len() {
+            // Too few blocks to tell, or nothing older to compare with.
+            return;
+        }
+        let late = recent
+            .iter()
+            .map(|&(_, f, _)| f)
+            .fold(f64::INFINITY, f64::min);
+        let shift = late - self.base;
+        if shift <= self.real(LOSS_S) {
+            return;
+        }
+        log::warn!(
+            "sidetone monitor: {:.0} ms of audio was lost; timing it from there",
+            shift * 1000.0
+        );
+        let sr = f64::from(self.s.sample_rate.max(1));
+        let from_t = self.base + from_n as f64 / sr;
+        for s in self.slices.iter_mut().rev() {
+            if s.t < from_t {
+                break;
+            }
+            s.t += shift;
+        }
+        let keep = self.stamps.len() - recent.len();
+        self.stamps.drain(..keep);
+        self.base = late;
     }
 
     /// The box took a `CW` run at `start` (no later than then): `segs` keyed at a
@@ -372,6 +459,7 @@ impl Monitor {
             opened: None,
             released: false,
             judge: None,
+            band_db: self.level.map(|(_, db)| db),
         });
         while self.runs.len() > 4 {
             self.runs.pop_front();
@@ -410,8 +498,8 @@ impl Monitor {
     }
 
     /// What the audio says about the radio's key, while the box's is open.
-    pub fn key_state(&mut self, now: Instant) -> KeyState {
-        match self.after_run(now) {
+    pub fn key_state(&mut self) -> KeyState {
+        match self.after_run() {
             KeyState::Open => self.steady_tone().map_or(KeyState::Open, KeyState::Held),
             other => other,
         }
@@ -419,7 +507,7 @@ impl Monitor {
 
     /// After the last run: the sidetone went on, unbroken, after the box opened its
     /// key; or the audio does not yet reach far enough past it to tell.
-    fn after_run(&mut self, now: Instant) -> KeyState {
+    fn after_run(&mut self) -> KeyState {
         let Some(idx) = self.runs.len().checked_sub(1) else {
             return KeyState::Open;
         };
@@ -429,18 +517,17 @@ impl Monitor {
         }
         let open = run.start + run.open_at();
         // Before the run was judged, or if it was not heard, the delay is not
-        // known: the longest there may be.
+        // known: the longest there may be; and the key counts as open only once the
+        // tone at the pitch drops near the band's level from before the run. Not
+        // the audio just before the run: if the key was already closed at the
+        // radio, that is the sidetone itself.
         let (lag, threshold) = match &run.judge {
-            Some(j) if j.contrast_db() >= MIN_CONTRAST_DB => {
-                (j.lag.as_secs_f64(), (j.tone_db + j.gap_db) / 2.0)
-            }
-            Some(j) => (
+            Some(j) if j.heard => (j.lag.as_secs_f64(), (j.tone_db + j.gap_db) / 2.0),
+            _ => (
                 MAX_LAG_S,
-                j.before_db.unwrap_or(self.s.min_level_dbfs) + OVER_RECEIVE_DB,
-            ),
-            None => (
-                MAX_LAG_S,
-                median_before(&self.slices, run.start).unwrap_or(self.s.min_level_dbfs)
+                run.band_db
+                    .or_else(|| median_before(&self.slices, run.start))
+                    .unwrap_or(self.s.min_level_dbfs)
                     + OVER_RECEIVE_DB,
             ),
         };
@@ -463,16 +550,9 @@ impl Monitor {
         }
         let heard_for = self.latest().map_or(0.0, |l| l - from);
         if heard_for < STUCK_AFTER_RUN_S {
-            // Without audio arriving there is nothing to wait for: the box's word
-            // that its key is open is all there is.
-            let audio = self
-                .last_block
-                .is_some_and(|b| now.saturating_duration_since(b) <= AUDIO_FRESH);
-            return if audio {
-                KeyState::Unsure
-            } else {
-                KeyState::Open
-            };
+            // Not yet; and with the audio gone (the sound card dropped out) the box's
+            // word alone does not show the radio's key open.
+            return KeyState::Unsure;
         }
         if toned as f32 >= HELD_SHARE * n as f32 {
             KeyState::Held(format!(
@@ -497,14 +577,7 @@ impl Monitor {
             Some(db) => db - BELOW_SIDETONE_DB,
             None => self.s.min_level_dbfs + OVER_MIN_LEVEL_DB,
         };
-        let window = self.slices.iter().filter(|s| s.t >= from);
-        let (mut n, mut toned) = (0usize, 0usize);
-        for s in window {
-            n += 1;
-            if s.purity >= MIN_PURITY && s.tone_db >= floor {
-                toned += 1;
-            }
-        }
+        let (n, toned) = self.steady_count(from, floor);
         (n > 0 && toned as f32 >= STEADY_SHARE * n as f32).then(|| {
             format!(
                 "a steady tone at the sidetone pitch for {} s: the key is closed at the radio, \
@@ -514,23 +587,69 @@ impl Monitor {
         })
     }
 
-    /// Audio arriving, and the band's level.
+    /// Slices since `from` that are a steady tone at the pitch, at `floor` or over:
+    /// (slices, steady ones).
+    fn steady_count(&self, from: f64, floor: f32) -> (usize, usize) {
+        let (mut n, mut steady) = (0usize, 0usize);
+        let mut prev: Option<f32> = None;
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            n += 1;
+            let holds = prev.is_none_or(|p| (s.tone_db - p).abs() <= STEADY_STEP_DB);
+            if holds && s.purity >= MIN_PURITY && s.tone_db >= floor {
+                steady += 1;
+            }
+            prev = Some(s.tone_db);
+        }
+        (n, steady)
+    }
+
+    /// A steady tone at the pitch over the last [`CARRIER_S`] of audio: its level;
+    /// `None` if there is not that much audio yet to tell.
+    fn carrier(&self) -> Option<Option<f32>> {
+        let latest = self.latest()?;
+        let from = latest - CARRIER_S;
+        if self.slices.front()?.t > from + SLICE_S {
+            return None;
+        }
+        let (n, steady) = self.steady_count(from, self.s.min_level_dbfs + OVER_MIN_LEVEL_DB);
+        if n == 0 || (steady as f32) < CARRIER_SHARE * n as f32 {
+            return Some(None);
+        }
+        let mut v: Vec<f32> = self
+            .slices
+            .iter()
+            .filter(|s| s.t >= from)
+            .map(|s| s.tone_db)
+            .collect();
+        Some(median(&mut v))
+    }
+
+    /// Audio arriving, the band's level, and a carrier at the pitch.
     pub fn band(&mut self, now: Instant) -> Band {
         let audio = self
             .last_block
             .is_some_and(|b| now.saturating_duration_since(b) <= AUDIO_FRESH);
-        // Only audio still arriving says how the band sounds now.
-        if let Some(db) = self.receive_level().filter(|_| audio) {
+        // Only audio still arriving says how the band sounds now, and only once
+        // there is enough of it to tell the band from a carrier.
+        let carrier = self.carrier().filter(|_| audio);
+        if let Some(db) = self.receive_level().filter(|_| carrier == Some(None)) {
             self.level = Some((now, db));
         }
+        let carrier_db = carrier.flatten();
         let level_db = self
             .level
             .filter(|&(at, _)| now.saturating_duration_since(at) <= LEVEL_KEEPS)
             .map(|(_, db)| db);
-        Band { audio, level_db }
+        Band {
+            audio,
+            level_db,
+            carrier_db,
+        }
     }
 
-    /// Median level over the last second of audio, if it is all receive audio.
+    /// Median level over the last second of audio, if it is all receive audio. A
+    /// steady tone at the pitch is not the band, so its slices are left out: a
+    /// carrier, a key closed at the radio, or the field station's elements.
     fn receive_level(&self) -> Option<f32> {
         let latest = self.latest()?;
         let rx_from = self.runs.back().map_or(f64::NEG_INFINITY, |r| {
@@ -540,12 +659,18 @@ impl Monitor {
         if latest - from < LEVEL_MIN_S {
             return None;
         }
-        let mut v: Vec<f32> = self
-            .slices
-            .iter()
-            .filter(|s| s.t >= from)
-            .map(|s| s.total_db)
-            .collect();
+        let mut v = Vec::new();
+        let mut prev: Option<f32> = None;
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            let holds = prev.is_some_and(|p| (s.tone_db - p).abs() <= STEADY_STEP_DB);
+            if !(holds && s.purity >= MIN_PURITY) {
+                v.push(s.total_db);
+            }
+            prev = Some(s.tone_db);
+        }
+        if (v.len() as f64) * SLICE_S < LEVEL_MIN_S {
+            return None;
+        }
         median(&mut v)
     }
 
@@ -720,15 +845,15 @@ fn judge_run(slices: &VecDeque<Slice>, run: &Run, post: f64) -> Judge {
     let steps = (MAX_LAG_S / LAG_STEP_S).round() as usize;
     for step in 0..=steps {
         let lag = step as f64 * LAG_STEP_S;
+        // The audio before the run is scored on its own: with semi break-in the
+        // receiver is muted in the run's gaps but not before it, so band noise there
+        // may sit over the midway level and still be no sidetone.
         let (mut down, mut up, mut before) = (Vec::new(), Vec::new(), Vec::new());
         for s in &near {
             match part(run, open, post, s.t - run.start - lag) {
                 Part::Down => down.push(s.tone_db),
                 Part::Up => up.push(s.tone_db),
-                Part::Before => {
-                    up.push(s.tone_db);
-                    before.push(s.tone_db);
-                }
+                Part::Before => before.push(s.tone_db),
                 Part::Neither => {}
             }
         }
@@ -739,22 +864,33 @@ fn judge_run(slices: &VecDeque<Slice>, run: &Run, post: f64) -> Judge {
         let mid = (tone + gap) / 2.0;
         let share_down = down.iter().filter(|&&v| v >= mid).count() as f32 / nd as f32;
         let share_up = up.iter().filter(|&&v| v < mid).count() as f32 / nu as f32;
+        let share_before = if before.is_empty() {
+            1.0
+        } else {
+            before
+                .iter()
+                .filter(|&&v| v < tone - MIN_CONTRAST_DB)
+                .count() as f32
+                / before.len() as f32
+        };
         let j = Judge {
             heard: nd >= MIN_SLICES
                 && nu >= MIN_SLICES
                 && tone - gap >= MIN_CONTRAST_DB
                 && share_down >= MIN_SHARE
-                && share_up >= MIN_SHARE,
+                && share_up >= MIN_SHARE
+                && share_before >= MIN_SHARE,
             lag: Duration::from_secs_f64(lag),
             tone_db: tone,
             gap_db: gap,
             before_db: median(&mut before),
             share_down,
             share_up,
+            share_before,
             slices_down: nd,
             slices_up: nu,
         };
-        let fit = share_down.min(share_up);
+        let fit = share_down.min(share_up).min(share_before);
         let better = match &best {
             None => true,
             Some((f, c, b)) => {
@@ -775,6 +911,7 @@ fn judge_run(slices: &VecDeque<Slice>, run: &Run, post: f64) -> Judge {
         before_db: None,
         share_down: 0.0,
         share_up: 0.0,
+        share_before: 0.0,
         slices_down: 0,
         slices_up: 0,
     })

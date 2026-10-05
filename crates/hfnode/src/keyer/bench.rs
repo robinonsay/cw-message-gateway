@@ -72,12 +72,12 @@ pub fn open_rig(cfg: &Config, monitor: Arc<Mutex<Monitor>>) -> Result<KeyerRig> 
 }
 
 /// Wait up to `timeout` for the monitor to have heard enough band to know its
-/// level.
+/// level, or a carrier at the pitch.
 pub fn wait_for_band(monitor: &Mutex<Monitor>, timeout: Duration) -> Band {
     let end = Instant::now() + timeout;
     loop {
         let b = lock(monitor).band(Instant::now());
-        if b.level_db.is_some() || Instant::now() >= end {
+        if b.level_db.is_some() || b.carrier_db.is_some() || Instant::now() >= end {
             return b;
         }
         thread::sleep(Duration::from_millis(100));
@@ -161,11 +161,24 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
             let _ = writeln!(out, "audio: no level yet");
         }
     }
-    if let KeyState::Held(why) = lock(&monitor).key_state(Instant::now()) {
+    if let Some(db) = band.carrier_db {
+        ok = false;
+        let _ = writeln!(out, "audio: {}", carrier_note(db));
+    }
+    if let KeyState::Held(why) = lock(&monitor).key_state() {
         ok = false;
         let _ = writeln!(out, "audio: {why}");
     }
     (out, ok)
+}
+
+/// What a steady tone at the pitch may be.
+pub fn carrier_note(db: f32) -> String {
+    format!(
+        "a steady tone at the sidetone pitch ({db:.0} dBFS): the radio's key may be closed at \
+         the radio (a shorted optocoupler or key cable), or a station's carrier is on the \
+         frequency; the node does not key over it"
+    )
 }
 
 /// The last run's judgement, once the audio covers it.
@@ -369,10 +382,19 @@ pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Tes
     r.test(&Command::TestStuck)?;
     let mut notes = vec![format!("identified first: {id}")];
     let end = Instant::now() + Duration::from_secs(10).div_f32(scale);
+    // Not `is_transmitting`, which reads a tripped box as an error, for the
+    // station to inhibit on: here the trip is what the test is for.
     loop {
-        match r.is_transmitting() {
-            Ok(false) => break,
-            Ok(true) => {}
+        match r.status() {
+            Ok(st) if !st.busy() => match lock(&m).key_state() {
+                KeyState::Open => break,
+                KeyState::Held(why) => {
+                    notes.push(format!("node: {why}"));
+                    break;
+                }
+                KeyState::Unsure => {}
+            },
+            Ok(_) => {}
             Err(e) => notes.push(format!("node: {e}")),
         }
         if Instant::now() >= end {

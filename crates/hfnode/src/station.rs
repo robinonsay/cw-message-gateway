@@ -69,7 +69,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -225,11 +225,14 @@ const SLOWEST_DOT: Duration = Duration::from_millis(200);
 /// With semi break-in the radio "returns to receive after a preset time after you
 /// stop keying" (p. 4-15), and the receive command may not cut that short, so the
 /// attempts go on for the longest break-in delay at the keyer's speed before giving
-/// up. That time counts from when the first stop and receive commands have gone
-/// out: after a CI-V timeout the driver first waits for the link to go quiet (up to
-/// four reply timeouts), and the radio cannot start its delay before then.
+/// up, or for as long as the rig says it needs to see receive
+/// ([`Rig::receive_settle`]) if that is longer. That time counts from when the
+/// first stop and receive commands have gone out: after a CI-V timeout the driver
+/// first waits for the link to go quiet (up to four reply timeouts), and the radio
+/// cannot start its delay before then.
 pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
     let dot = r.dot_duration().unwrap_or(SLOWEST_DOT);
+    let settle = r.receive_settle();
     let mut deadline = None;
     let mut last = RigError::Timeout;
     for attempt in 0.. {
@@ -245,7 +248,7 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
         if let Err(e) = r.set_transmit(false) {
             log::warn!("forcing receive: set receive: {e}");
         }
-        deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS));
+        deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS).max(settle));
         match r.is_transmitting() {
             Ok(false) => return Ok(()),
             Ok(true) => {
@@ -520,6 +523,19 @@ impl<R: Rig + 'static> Station<R> {
                     // Keep trying on later ticks until receive is confirmed.
                     if force_receive_or_inhibit(&rig, &inhibit).is_ok() {
                         *since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
+                } else if started.is_none() && !inhibit.is_set() {
+                    // Not keying: a radio that looks keyed all the same (a key held
+                    // closed at the radio) is found now, not at the next check.
+                    // Without waiting for the rig while another thread uses it.
+                    let held = match rig.try_lock() {
+                        Ok(mut r) => r.held_key(),
+                        Err(TryLockError::Poisoned(e)) => e.into_inner().held_key(),
+                        Err(TryLockError::WouldBlock) => None,
+                    };
+                    if let Some(why) = held {
+                        log::error!("watchdog: the radio looks keyed while idle: {why}");
+                        let _ = force_receive_or_inhibit(&rig, &inhibit);
                     }
                 }
             }

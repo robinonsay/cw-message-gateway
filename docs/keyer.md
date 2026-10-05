@@ -136,7 +136,8 @@ can, and with the radio's power switch in reach.
 1. `hfnode devices`: the box is listed and marked.
 2. `hfnode keyer --config C check`: the box answers with its limits (run 60 s,
    key-down 1000 ms, link timeout 2000 ms), its key is up, the audio is arriving and
-   the band level is above `min_level_dbfs`, and no tone is held at the radio.
+   the band level is above `min_level_dbfs`, and there is no steady tone at the
+   sidetone pitch (a carrier, or the key held at the radio).
 3. `hfnode listen --config C`: the node decodes CW on the band through the sound
    card. Tune to a busy CW frequency if yours is quiet, then back.
 
@@ -162,7 +163,8 @@ Then set `commissioned = "keying"`.
 
 Then set `commissioned = "done"`, and `hfnode run` will start.
 
-`hfnode keyer --config C rx` stops the box and checks the key is open at any time.
+`hfnode keyer --config C rx` stops the box and checks the key is open at any time,
+and that no steady tone is heard.
 
 ## What stops a stuck key
 
@@ -170,7 +172,8 @@ Fastest first:
 
 1. **The box's key-down limit.** No element is longer than a dash at 5 wpm
    (720 ms). A key-down past 1 s opens the key and trips the box: it refuses to key
-   until it is unplugged and plugged in again.
+   until it is unplugged and plugged in again, and the node latches its transmit
+   inhibit.
 2. **The box's hardware watchdog.** If its 1 ms control loop stalls for 0.5 s, the
    chip resets and its key pin goes back to open.
 3. **The box's link timeout.** A run stops when no line has come from the node for
@@ -178,16 +181,22 @@ Fastest first:
    the computer crashed. It stops at once when USB goes away: the cable pulled, the
    computer's USB reset or suspended.
 4. **The box's run limit.** No run longer than 60 s.
-5. **The node's sidetone check after every piece.** It must hear the sidetone
+5. **No keying over a tone.** Before every piece, a steady tone at the sidetone
+   pitch over the last second (a station's carrier, or the key already closed at
+   the radio) stops the node keying.
+6. **The node's sidetone check after every piece.** It must hear the sidetone
    follow the box's elements (or it stops and keys nothing more until its next
    retune: the cable is out, the radio is off or not in straight key, the sidetone
    is off). Then it must hear the sidetone stop: a tone that goes on after the box
    opened its key means the key is closed at the radio (a shorted optocoupler or
-   cable). The node then latches the transmit inhibit and emails `alert_to`, as for
-   the IC-7300.
-6. **A steady tone for 30 s** at the sidetone pitch, whenever the node checks the
-   radio (before every transmission and while idle), latches the inhibit too.
-7. **The station's watchdog** (`max_key_seconds`) and the inhibit file in
+   cable). It judges "stopped" against the band's level from before the run, not
+   the audio just before it, which may already be that tone. The node then latches
+   the transmit inhibit and emails `alert_to`, as for the IC-7300. If the audio
+   stops before it can tell, it takes the key as held, and does the same.
+7. **A steady tone for 30 s** at the sidetone pitch latches the inhibit too. The
+   node looks for one before every transmission and every quarter second while
+   idle.
+8. **The station's watchdog** (`max_key_seconds`) and the inhibit file in
    `state_dir`, as for the IC-7300.
 
 What the node cannot see: the radio transmitting without keying (in CW that puts
@@ -203,7 +212,8 @@ which is the safe way to be wrong:
 - A station answering on your exact pitch the instant the node unkeys, and carrying
   on for half a second, looks like the sidetone going on. The operating guide's
   wait before answering avoids it.
-- A carrier on your frequency at the sidetone pitch for 30 s.
+- A carrier on your frequency at the sidetone pitch for 30 s. A shorter one only
+  holds the node's reply back: it does not key over it.
 
 ## Running it outside
 

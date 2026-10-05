@@ -17,23 +17,26 @@ pub fn radio_secs(s: f64) -> Duration {
     Duration::from_secs_f64(s / f64::from(SCALE))
 }
 
-pub fn cfg() -> StationConfig {
+/// The station's settings, with radio time running `scale` times faster than
+/// real time.
+pub fn cfg_at(scale: f32) -> StationConfig {
+    let secs = |s: f64| Duration::from_secs_f64(s / f64::from(scale));
     StationConfig {
         frequency_hz: 7_030_000,
         power_watts: 5,
         key_speed_wpm: 20,
-        max_key: radio_secs(60.0),
+        max_key: secs(60.0),
         swr_limit: 2.0,
-        segment_pause: radio_secs(0.5),
-        swr_delay: radio_secs(0.05),
-        swr_window: radio_secs(1.0),
+        segment_pause: secs(0.5),
+        swr_delay: secs(0.05),
+        swr_window: secs(1.0),
         swr_min_po: 2.0,
         break_in_delay_dots: 10.0,
-        stuck_margin: radio_secs(3.0),
-        tune_timeout: radio_secs(20.0),
-        poll: radio_secs(0.1),
+        stuck_margin: secs(3.0),
+        tune_timeout: secs(20.0),
+        poll: secs(0.1),
         station_id: "DE N0DE".into(),
-        id_interval: ID_INTERVAL.div_f32(SCALE),
+        id_interval: ID_INTERVAL.div_f32(scale),
     }
 }
 
@@ -74,14 +77,20 @@ impl Bench {
 /// The mock box and radio set up as `tweak` says, a station on them, and a few
 /// seconds of band heard.
 pub fn bench(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
-    let clock = Clock::new(SCALE);
+    bench_at(SCALE, tweak)
+}
+
+/// [`bench`] with radio time running `scale` times faster than real time: 1 for
+/// what depends on real-time waits.
+pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+    let clock = Clock::new(scale);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
         monitor::Settings {
             sample_rate: 8000,
             pitch_hz: 600.0,
             min_level_dbfs: -65.0,
-            scale: SCALE,
+            scale,
         },
         clock.epoch,
     )));
@@ -94,14 +103,14 @@ pub fn bench(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
         Settings {
             frequency_hz: 7_030_000,
             min_level_dbfs: -65.0,
-            scale: SCALE,
+            scale,
         },
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let station = Station::new(rig, cfg(), Some(dir.path().join("health.csv")));
+    let station = Station::new(rig, cfg_at(scale), Some(dir.path().join("health.csv")));
     station.configure().unwrap();
-    thread::sleep(radio_secs(2.5));
+    thread::sleep(Duration::from_secs_f64(2.5 / f64::from(scale)));
     Bench {
         station,
         keyer_box,

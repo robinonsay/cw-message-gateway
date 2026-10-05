@@ -9,7 +9,7 @@
 //! if either says so, or if the audio cannot yet show its key open after a run.
 
 use super::link::{refused, Link, Transport};
-use super::monitor::{KeyState, Monitor, MAX_LAG};
+use super::monitor::{KeyState, Monitor, MAX_LAG, STUCK_AFTER_RUN};
 use super::proto::{Command, Hello, Reply, Status};
 use super::{check_hello, REPLY_TIMEOUT};
 use anyhow::{anyhow, bail};
@@ -33,6 +33,10 @@ const LINK_MARGIN: Duration = Duration::from_millis(500);
 /// How long, past the run and the longest audio delay, to wait for the audio that
 /// shows whether a run was heard.
 const JUDGE_WAIT: Duration = Duration::from_millis(1500);
+/// After the box opens its key, the audio shows the radio's key open (or held)
+/// once it covers the longest audio delay and the stuck margin after it; this
+/// leaves room for the capture's blocks to arrive.
+const SETTLE_MARGIN: Duration = Duration::from_millis(500);
 
 /// What the rig needs from the configuration.
 #[derive(Debug, Clone, Copy)]
@@ -219,8 +223,8 @@ impl KeyerRig {
     }
 
     /// The radio's key as the audio shows it, logging a held key once.
-    fn key_state(&mut self, now: Instant) -> KeyState {
-        let k = lock(&self.monitor).key_state(now);
+    fn key_state(&mut self) -> KeyState {
+        let k = lock(&self.monitor).key_state();
         let held = matches!(k, KeyState::Held(_));
         if let KeyState::Held(why) = &k {
             if !self.held {
@@ -361,6 +365,13 @@ impl Rig for KeyerRig {
                 "no audio from the radio: without its sidetone the node does not key".into(),
             ));
         }
+        // First: a carrier is also why the band's level may not be known.
+        if let Some(db) = band.carrier_db {
+            return Err(RigError::Protocol(format!(
+                "a steady tone at the sidetone pitch ({db:.0} dBFS): a station's carrier on \
+                 the frequency, or the radio's key closed at the radio; not keying over it"
+            )));
+        }
         match band.level_db {
             None => {
                 return Err(RigError::Protocol(
@@ -376,7 +387,7 @@ impl Rig for KeyerRig {
             }
             Some(_) => {}
         }
-        match self.key_state(now) {
+        match self.key_state() {
             KeyState::Open => {}
             KeyState::Unsure => {
                 return Err(RigError::Protocol(
@@ -461,6 +472,16 @@ impl Rig for KeyerRig {
     fn is_transmitting(&mut self) -> Result<bool> {
         let unreachable = match self.status() {
             Ok(st) if st.busy() => return Ok(true),
+            // Its key is open, but it will key nothing more until it is power-cycled,
+            // and it tripped because a key-down went on past its limit: an error each
+            // time, so that the station inhibits transmitting and tells the owner.
+            Ok(st) if st.trip != Trip::None => {
+                return Err(RigError::Protocol(
+                    "the keyer box has tripped (a key-down went on past its limit): check \
+                     it, then unplug it and plug it in again"
+                        .into(),
+                ))
+            }
             Ok(_) => false,
             Err(e) => {
                 // The box opens its key by itself a link timeout after the last line
@@ -493,7 +514,7 @@ impl Rig for KeyerRig {
             return Err(RigError::Protocol(f));
         }
         let now = Instant::now();
-        match self.key_state(now) {
+        match self.key_state() {
             KeyState::Held(_) | KeyState::Unsure => Ok(true),
             KeyState::Open => {
                 if unreachable && !lock(&self.monitor).band(now).audio {
@@ -519,8 +540,19 @@ impl Rig for KeyerRig {
         false
     }
 
+    fn receive_settle(&self) -> Duration {
+        (MAX_LAG + STUCK_AFTER_RUN + SETTLE_MARGIN).div_f32(self.s.scale)
+    }
+
+    fn held_key(&mut self) -> Option<String> {
+        match self.key_state() {
+            KeyState::Held(why) => Some(why),
+            _ => None,
+        }
+    }
+
     fn transmit_detail(&mut self) -> Option<String> {
-        match self.key_state(Instant::now()) {
+        match self.key_state() {
             KeyState::Held(why) => Some(why),
             KeyState::Unsure => {
                 Some("the audio does not yet show the radio's key open after the box's".into())

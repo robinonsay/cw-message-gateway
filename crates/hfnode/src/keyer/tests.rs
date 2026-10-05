@@ -3,7 +3,9 @@ use keyer_core::keyer::Boot;
 
 /// The example config with the keyer box switched on as its comments describe.
 fn example_keyer() -> Config {
+    // A Windows checkout has CRLF line ends.
     let text = include_str!("../../../../hfnode.example.toml")
+        .replace("\r\n", "\n")
         .replace("# rig = \"keyer\"", "rig = \"keyer\"")
         .replace("# [keyer]\n", "[keyer]\n")
         .replace("# commissioned = \"none\"", "commissioned = \"none\"")

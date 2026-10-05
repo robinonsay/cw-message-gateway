@@ -180,18 +180,22 @@ impl Case {
 
     /// The key's state just after the last audio arrived.
     fn state(&mut self) -> KeyState {
-        let now = self.t0 + Duration::from_secs_f64(self.fed + 0.2);
-        self.m.key_state(now)
+        self.m.key_state()
     }
 }
 
 /// A monitor that has heard `pre` s of band, then the box key `text` at 20 wpm,
 /// then audio until `after` s past the run's end.
 fn case(text: &str, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
+    case_at(text, 20, tweak, after)
+}
+
+/// [`case`] at `wpm`.
+fn case_at(text: &str, wpm: u32, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
     let t0 = Instant::now();
     let mut m = Monitor::starting_at(settings(), t0);
     let start = 3.0;
-    let (segs, dot, downs) = keyed(text, 20, start);
+    let (segs, dot, downs) = keyed(text, wpm, start);
     let end = downs.last().unwrap().1;
     let mut radio = Radio {
         box_downs: downs,
@@ -199,6 +203,8 @@ fn case(text: &str, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
     };
     tweak(&mut radio);
     feed(&mut m, t0, &radio, 0.0, start, 0.08, 0.04);
+    // As the rig does before keying.
+    m.band(t0 + Duration::from_secs_f64(start + 0.1));
     let id = m.run_started(t0 + Duration::from_secs_f64(start), dot, segs.as_slice());
     feed(&mut m, t0, &radio, start, end + after, 0.08, 0.04);
     Case {
@@ -299,8 +305,7 @@ fn a_key_stuck_during_the_run_is_caught_after_it() {
     };
     assert!(why.contains("after the box opened its key"), "{why}");
     // However late the audio stops.
-    let late = c.t0 + Duration::from_secs(100);
-    assert!(matches!(c.m.key_state(late), KeyState::Held(_)));
+    assert!(matches!(c.m.key_state(), KeyState::Held(_)));
 }
 
 #[test]
@@ -354,9 +359,9 @@ fn a_steady_carrier_counts_only_after_thirty_seconds() {
         ..Radio::default()
     };
     feed(&mut m, t0, &radio, 0.0, 25.0, 0.08, 0.04);
-    assert_eq!(m.key_state(t0 + Duration::from_secs(40)), KeyState::Open);
+    assert_eq!(m.key_state(), KeyState::Open);
     feed(&mut m, t0, &radio, 25.0, 36.0, 0.08, 0.04);
-    let KeyState::Held(why) = m.key_state(t0 + Duration::from_secs(36)) else {
+    let KeyState::Held(why) = m.key_state() else {
         panic!("not held")
     };
     assert!(why.contains("steady tone"), "{why}");
@@ -372,7 +377,7 @@ fn a_weak_carrier_is_not_a_stuck_key() {
         ..Radio::default()
     };
     feed(&mut m, t0, &radio, 0.0, 40.0, 0.08, 0.04);
-    assert_eq!(m.key_state(t0 + Duration::from_secs(40)), KeyState::Open);
+    assert_eq!(m.key_state(), KeyState::Open);
 }
 
 #[test]
@@ -440,7 +445,7 @@ fn a_run_stopped_early_is_judged_up_to_the_stop() {
     feed(&mut m, t0, &radio, start, stop + 1.5, 0.08, 0.04);
     let j = m.judge(id).expect("covered up to the stop");
     assert!(j.heard, "{j}");
-    assert_eq!(m.key_state(t0 + Duration::from_secs(40)), KeyState::Open);
+    assert_eq!(m.key_state(), KeyState::Open);
 }
 
 #[test]
@@ -468,6 +473,213 @@ fn lost_audio_restarts_the_timing() {
     }
     let id = m.run_started(t0 + Duration::from_secs_f64(start), dot, segs.as_slice());
     assert!(m.judge(id).unwrap().heard);
+}
+
+#[test]
+fn a_key_closed_at_the_radio_just_before_a_run_is_held_after_it() {
+    // Closed half a second before the box keys: not yet a carrier, so the run is
+    // keyed; the key counts as open only once the tone drops near the band's level
+    // from before, not near the tone just before the run.
+    let t0 = Instant::now();
+    let at = |t: f64| t0 + Duration::from_secs_f64(t);
+    let mut m = Monitor::starting_at(settings(), t0);
+    let start = 4.0;
+    let (segs, dot, downs) = keyed("DE N0CALL K", 20, start);
+    let end = downs.last().unwrap().1;
+    let radio = Radio {
+        box_downs: downs,
+        stuck_from: Some(start - 0.5),
+        ..Radio::default()
+    };
+    feed(&mut m, t0, &radio, 0.0, 3.0, 0.08, 0.04);
+    m.band(at(3.0));
+    feed(&mut m, t0, &radio, 3.0, start, 0.08, 0.04);
+    let b = m.band(at(start));
+    assert_eq!(b.carrier_db, None);
+    let lv = b.level_db.expect("the band, from before the key closed");
+    assert!((lv + 34.0).abs() < 2.0, "{lv}");
+    let id = m.run_started(at(start), dot, segs.as_slice());
+    feed(&mut m, t0, &radio, start, end + 1.5, 0.08, 0.04);
+    assert!(!m.judge(id).unwrap().heard);
+    let KeyState::Held(why) = m.key_state() else {
+        panic!("not held")
+    };
+    assert!(why.contains("after the box opened its key"), "{why}");
+}
+
+#[test]
+fn a_steady_tone_now_is_a_carrier_and_not_the_band() {
+    type Tone = (&'static str, fn(&mut Radio));
+    let tones: [Tone; 2] = [
+        ("a carrier on the frequency", |r| {
+            r.carrier = Some((2.0, 100.0, 0.3))
+        }),
+        ("the key closed at the radio", |r| r.stuck_from = Some(2.0)),
+    ];
+    for (name, f) in tones {
+        let t0 = Instant::now();
+        let at = |t: f64| t0 + Duration::from_secs_f64(t);
+        let mut m = Monitor::starting_at(settings(), t0);
+        let mut radio = Radio::default();
+        f(&mut radio);
+        feed(&mut m, t0, &radio, 0.0, 1.8, 0.08, 0.04);
+        let b = m.band(at(1.8));
+        assert_eq!(b.carrier_db, None, "{name}");
+        let lv = b.level_db.unwrap();
+        feed(&mut m, t0, &radio, 1.8, 4.0, 0.08, 0.04);
+        let b = m.band(at(4.0));
+        let db = b.carrier_db.unwrap_or_else(|| panic!("{name}: no carrier"));
+        assert!((db + 13.5).abs() < 2.0, "{name}: {db}");
+        // The band's level from before it stands.
+        assert_eq!(b.level_db, Some(lv), "{name}");
+    }
+    // Held from the start: the tone is never taken for the band.
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(settings(), t0);
+    let radio = Radio {
+        stuck_from: Some(0.0),
+        ..Radio::default()
+    };
+    feed(&mut m, t0, &radio, 0.0, 3.0, 0.08, 0.04);
+    let b = m.band(t0 + Duration::from_secs(3));
+    assert!(b.carrier_db.is_some());
+    assert_eq!(b.level_db, None);
+}
+
+/// Band noise through a narrow CW filter at the pitch: mostly at the pitch, but
+/// its level jumps about.
+fn narrow_noise(m: &mut Monitor, t0: Instant, secs: f64, std: f32) {
+    let mut rng = cw::synth::Noise::new(11);
+    let sr = f64::from(SR);
+    // A two-pole resonator at the pitch, about 50 Hz wide.
+    let r = (-std::f64::consts::PI * 50.0 / sr).exp();
+    let w = 2.0 * std::f64::consts::PI * f64::from(PITCH) / sr;
+    let (a1, a2) = (2.0 * r * w.cos(), -r * r);
+    let gain = (1.0 - r * r).sqrt() * 2.0;
+    let (mut y1, mut y2) = (0.0f64, 0.0f64);
+    let block = SR as usize / 20;
+    let mut t = 0.0;
+    while t < secs {
+        let mut x = vec![0.0f32; block];
+        rng.add(&mut x, std);
+        let samples: Vec<f32> = x
+            .iter()
+            .map(|&v| {
+                let y = gain * f64::from(v) + a1 * y1 + a2 * y2;
+                (y2, y1) = (y1, y);
+                y as f32
+            })
+            .collect();
+        t += block as f64 / sr;
+        m.push(t0 + Duration::from_secs_f64(t + 0.08), &samples);
+    }
+}
+
+#[test]
+fn band_noise_through_a_narrow_filter_is_not_a_carrier() {
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(settings(), t0);
+    narrow_noise(&mut m, t0, 40.0, 0.02);
+    let b = m.band(t0 + Duration::from_secs(40));
+    assert_eq!(b.carrier_db, None);
+    let lv = b.level_db.unwrap();
+    assert!(lv > -50.0, "{lv}");
+    assert_eq!(m.key_state(), KeyState::Open);
+}
+
+#[test]
+fn semi_break_in_is_heard_over_a_loud_band() {
+    // The receiver is muted in the run's gaps and for the hang after it, so the
+    // band before the run is louder than the gaps: it is scored on its own.
+    for (text, wpm) in [("TU K", 20), ("R 42 K", 30), ("E", 20)] {
+        let mut c = case_at(text, wpm, |r| r.noise = 0.028, 1.0);
+        let j = c.m.judge(c.id).unwrap();
+        assert!(j.heard, "{text} at {wpm} wpm: {j}");
+        assert_eq!(c.state(), KeyState::Open, "{text}");
+    }
+}
+
+#[test]
+fn a_little_lost_audio_keeps_the_timing() {
+    for lost in [0.1, 0.3, 0.6, 0.9] {
+        let t0 = Instant::now();
+        let mut m = Monitor::starting_at(settings(), t0);
+        let start = 4.0;
+        let (segs, dot, downs) = keyed("DE N0CALL K", 20, start);
+        let end = downs.last().unwrap().1;
+        let radio = Radio {
+            box_downs: downs,
+            ..Radio::default()
+        };
+        feed(&mut m, t0, &radio, 0.0, 2.0, 0.08, 0.04);
+        // `lost` s of audio never arrive.
+        feed(&mut m, t0, &radio, 2.0 + lost, start, 0.08, 0.04);
+        m.band(t0 + Duration::from_secs_f64(start));
+        let id = m.run_started(t0 + Duration::from_secs_f64(start), dot, segs.as_slice());
+        feed(&mut m, t0, &radio, start, end + 1.5, 0.08, 0.04);
+        let j = m.judge(id).unwrap();
+        assert!(j.heard, "{lost} s lost: {j}");
+        let lag = j.lag.as_millis() as i64;
+        assert!((lag - 85).abs() <= 15, "{lost} s lost: {j}");
+        assert_eq!(m.key_state(), KeyState::Open, "{lost} s lost");
+    }
+}
+
+#[test]
+fn audio_held_up_by_a_busy_computer_is_not_lost_audio() {
+    // At 20x real time, the few milliseconds a busy computer holds up the audio
+    // are a tenth of a second of radio time: not audio lost, so the timing stays.
+    let scale = 20.0;
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(
+        Settings {
+            scale: scale as f32,
+            ..settings()
+        },
+        t0,
+    );
+    let at = |t: f64, late: f64| t0 + Duration::from_secs_f64(t / scale + late);
+    let start = 4.0;
+    let (segs, dot, downs) = keyed("DE N0CALL K", 20, start);
+    let end = downs.last().unwrap().1;
+    let radio = Radio {
+        box_downs: downs,
+        ..Radio::default()
+    };
+    let mut rng = cw::synth::Noise::new(7);
+    let block = SR as usize / 20;
+    let (mut t, mut id) = (0.0, None);
+    while t < end + 1.5 {
+        if id.is_none() && t >= start {
+            m.band(at(start, 0.004));
+            id = Some(m.run_started(at(start, 0.0), dot, segs.as_slice()));
+        }
+        let samples: Vec<f32> = (0..block)
+            .map(|i| radio.sample(t + i as f64 / f64::from(SR), &mut rng))
+            .collect();
+        t += block as f64 / f64::from(SR);
+        // 4 ms on the way; 5 ms more from a second before the run to its end.
+        let late = if (start - 1.0..end).contains(&t) {
+            0.009
+        } else {
+            0.004
+        };
+        m.push(at(t, late), &samples);
+    }
+    let j = m.judge(id.unwrap()).unwrap();
+    assert!(j.heard, "{j}");
+    let lag = j.lag.as_millis() as i64;
+    assert!((lag - 85).abs() <= 15, "{j}");
+    assert_eq!(m.key_state(), KeyState::Open);
+}
+
+#[test]
+fn without_audio_after_a_run_the_key_is_not_shown_open() {
+    // The sound card drops out as the run ends: the box's word that its key is open
+    // does not show the radio's.
+    let mut c = case("DE N0CALL K", |_| {}, 0.3);
+    assert_eq!(c.state(), KeyState::Unsure);
+    assert_eq!(c.m.key_state(), KeyState::Unsure);
 }
 
 #[test]

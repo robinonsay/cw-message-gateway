@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::keyer::mock::RadioSettings;
-use crate::keyer::testbench::{bench, radio_secs, tx};
+use crate::keyer::testbench::{bench, bench_at, radio_secs, tx};
 use crate::station::TxError;
 
 #[test]
@@ -27,9 +27,10 @@ fn a_run_longer_than_the_link_timeout_is_kept_alive() {
         .unwrap();
     let st = b.keyer_box.now();
     assert_eq!(st.ended(), Ended::Done);
-    // A STATUS every 0.25 s, from the keep-alive alone.
+    // A STATUS every 0.25 s from the keep-alive: at 20x a busy test machine
+    // sleeps longer than asked, so look for at least two per link timeout.
     let polls = st.lines.iter().filter(|l| l.contains(" STATUS*")).count();
-    assert!(polls > 30, "{polls} STATUS lines");
+    assert!(polls >= 14, "{polls} STATUS lines");
 }
 
 #[test]
@@ -146,6 +147,22 @@ fn a_box_unplugged_mid_run_fails_the_transmission_without_inhibiting() {
 }
 
 #[test]
+fn audio_lost_mid_run_takes_the_key_as_held() {
+    // The sound card's cable is pulled while the radio keys: the node cannot hear
+    // its key open after the box's, so it takes it as held.
+    let mut b = bench(|_| {});
+    let settings = b.radio.settings.clone();
+    let pull = thread::spawn(move || {
+        thread::sleep(radio_secs(2.0));
+        lock(&settings).unplugged = true;
+    });
+    let r = b.station.transmit(&tx(&["PARIS PARIS PARIS PARIS PARIS"]));
+    pull.join().unwrap();
+    assert_eq!(r, Err(TxError::Inhibited));
+    assert!(b.station.tx_inhibited());
+}
+
+#[test]
 fn a_box_whose_control_loop_hangs_is_reset_by_its_watchdog() {
     let b = bench(|_| {});
     let rig = b.station.rig();
@@ -220,4 +237,72 @@ fn a_run_the_node_stops_is_not_taken_for_a_stuck_key() {
         assert!(Instant::now() < deadline, "still transmitting");
         thread::sleep(radio_secs(0.1));
     }
+}
+
+#[test]
+fn a_key_closed_at_the_radio_just_before_a_piece_inhibits() {
+    let mut b = bench(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.stuck_from = Some(at));
+    assert_eq!(
+        b.station.transmit(&tx(&["DE N0DE K"])),
+        Err(TxError::Inhibited)
+    );
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("after the box opened its key"), "{why}");
+}
+
+#[test]
+fn a_key_closed_at_the_radio_is_not_keyed_over_and_inhibits_while_idle() {
+    let mut b = bench(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.stuck_from = Some(at));
+    thread::sleep(radio_secs(3.0));
+    let e = b.station.transmit(&tx(&["DE N0DE K"])).unwrap_err();
+    assert!(e.to_string().contains("steady tone"), "{e}");
+    assert_eq!(b.cw_lines(), 0);
+    // Not keyed over, and not taken for a fault of the node's keying...
+    assert!(b.station.can_transmit());
+    // ... but once the tone has gone on for 30 s the station inhibits by itself,
+    // with nothing keyed and no check due.
+    let deadline = Instant::now() + radio_secs(40.0);
+    while !b.station.tx_inhibited() {
+        assert!(Instant::now() < deadline, "not inhibited");
+        thread::sleep(radio_secs(0.5));
+    }
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("steady tone"), "{why}");
+}
+
+#[test]
+fn a_box_that_trips_inhibits_transmitting() {
+    let mut b = bench(|_| {});
+    {
+        let rig = b.station.rig();
+        let mut r = lock(&rig);
+        r.send_cw("PARIS PARIS").unwrap();
+        thread::sleep(radio_secs(0.2));
+        r.test(&Command::TestStuck).unwrap();
+    }
+    thread::sleep(radio_secs(2.5));
+    assert_eq!(
+        b.station.transmit(&tx(&["DE N0DE K"])),
+        Err(TxError::Inhibited)
+    );
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("tripped"), "{why}");
+}
+
+#[test]
+fn a_run_stopped_at_full_speed_is_confirmed_on_receive_in_real_time() {
+    // At real time: the station's waits between its attempts are wall-clock, and
+    // the audio must catch up with the stop before the key shows open.
+    let b = bench_at(1.0, |_| {});
+    let rig = b.station.rig();
+    let mut r = lock(&rig);
+    r.set_key_speed(48).unwrap();
+    r.send_cw("PARIS PARIS PARIS").unwrap();
+    thread::sleep(Duration::from_millis(400));
+    crate::station::force_receive(&mut *r).unwrap();
+    assert!(!r.is_transmitting().unwrap());
 }

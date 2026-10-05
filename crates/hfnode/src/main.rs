@@ -1140,6 +1140,9 @@ fn open_keyer(
         Some(db) => log::info!("keyer: the band is at {db:.0} dBFS"),
         None => log::warn!("keyer: no band level yet: nothing is keyed until there is one"),
     }
+    if let Some(db) = band.carrier_db {
+        log::warn!("keyer: {}", keyer::bench::carrier_note(db));
+    }
     Ok((rig, Some(cap)))
 }
 
@@ -1163,6 +1166,17 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             if matches!(action, KeyerCmd::Rx) {
                 hfnode::station::force_receive(&mut rig)
                     .context("the radio's key is not confirmed open")?;
+                // The box's key is open; the radio's, as far as its audio shows.
+                let band = bench::wait_for_band(&rig.monitor(), Duration::from_secs(5));
+                if !band.audio {
+                    bail!("no audio from the radio: the radio's key is not confirmed open");
+                }
+                if let Some(db) = band.carrier_db {
+                    bail!(
+                        "the radio's key is not confirmed open: {}",
+                        bench::carrier_note(db)
+                    );
+                }
                 println!("key open: the box is idle and no sidetone is heard");
                 return Ok(());
             }
