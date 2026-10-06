@@ -50,6 +50,12 @@
 //!   start of the transmission.
 //! - **A health log** of every tune and SWR reading, so a slow upward trend (a
 //!   corroding connector, a loosened coil) shows up before it becomes a fault.
+//! - **Rigs without a tuner or meters** (an FM handheld, [`crate::handheld`]): a
+//!   window start sets the radio up and checks it but tunes nothing, and SWR is not
+//!   checked; such a rig enforces its own limits (a PTT time limit, a duty cycle,
+//!   a clear channel), which it reports through [`Rig::rest_needed`] and which are
+//!   waited out here, on receive, before each keying run. An ID that such a rest
+//!   would make late is keyed before it.
 //! - **Storm stand-down.** With a [`StormHold`] attached, nothing is tuned or keyed
 //!   while it is on, and a transmission under way is stopped and the radio forced to
 //!   receive ([`crate::storm`]).
@@ -669,8 +675,8 @@ impl<R: Rig + 'static> Station<R> {
             .unwrap_or_else(|e| e.into_inner())
             .has_tuner()
         {
-            // Nothing to tune (any radio on the keyer box): set up and checked is all
-            // a window start needs, and nothing is transmitted.
+            // Nothing to tune (a handheld, or any radio on the keyer box): set up and
+            // checked is all a window start needs, and nothing is transmitted.
             return Ok(());
         }
         if let Err(e) = self.tune(t0) {
@@ -734,7 +740,8 @@ impl<R: Rig + 'static> Station<R> {
     /// matched (no lockout, no inhibit), `DE <call>` to identify its carrier, keyed
     /// as a transmission of its own with every check of [`Station::transmit`],
     /// the SWR check included. The bench's `radio tune` uses `start_window` alone.
-    /// A rig without a tuner keyed nothing, so it sends no ID either.
+    /// A rig without a tuner (a handheld, the keyer box) keyed nothing, so it
+    /// sends no ID either.
     pub fn open_window(&mut self) -> Result<(), String> {
         self.start_window()
             .map_err(|e| format!("tune failed at window start: {e}"))?;
@@ -821,7 +828,7 @@ impl<R: Rig + 'static> Station<R> {
                     } else {
                         (&pieces[pi..=pi], ends_with_id && pi + 1 == pieces.len())
                     };
-                    if self.id_due(since_id, ahead, ends, &id)? {
+                    if self.id_due_after_rest(since_id, piece, ahead, ends, &id)? {
                         if pi > 0 {
                             thread::sleep(self.cfg.segment_pause);
                         }
@@ -832,6 +839,7 @@ impl<R: Rig + 'static> Station<R> {
                         }
                         self.last_id = Some(since_id);
                         thread::sleep(self.cfg.segment_pause);
+                        self.rest_for_piece_and_id(piece, &id)?;
                     }
                 }
                 let at = Instant::now();
@@ -842,6 +850,79 @@ impl<R: Rig + 'static> Station<R> {
             }
         }
         Ok(())
+    }
+
+    /// Wait, on receive, for as long as the rig says it must rest before keying a
+    /// run of `keying` ([`Rig::rest_needed`]: a handheld's duty cycle, or a busy
+    /// channel), asking again after each wait. Not counted as keying by the
+    /// watchdog, which only starts timing once the piece is sent.
+    fn rest_before_keying(&self, keying: Duration) -> Result<(), TxError> {
+        loop {
+            // A storm may have come on during the rest.
+            self.check_storm()?;
+            let rest = self.with_rig(|r| r.rest_needed(keying))?;
+            if rest.is_zero() {
+                return Ok(());
+            }
+            log::info!(
+                "waiting {:.1} s on receive before keying",
+                rest.as_secs_f32()
+            );
+            self.sleep_until(Instant::now() + rest)?;
+        }
+    }
+
+    /// Whether to key the ID `id` before `piece` ([`Station::id_due`] over `ahead`),
+    /// for a rig that must rest on receive before keying ([`Rig::rest_needed`]: a
+    /// handheld's duty cycle, a busy channel). It rests for the ID alone (normally
+    /// nothing: [`Station::rest_for_piece_and_id`] before the last piece left room
+    /// for it), then counts the rest that `piece` and an ID after it would need, so
+    /// that a due ID goes first rather than wait out a rest only the piece needs.
+    /// If the ID is not due it takes that rest, and weighs the ID again in case the
+    /// rest ran long. With no rest needed this is `id_due`.
+    fn id_due_after_rest(
+        &self,
+        since: Instant,
+        piece: &str,
+        ahead: &[String],
+        ends_with_id: bool,
+        id: &[String],
+    ) -> Result<bool, TxError> {
+        let (id_keying, both) = self.piece_and_id_keying(piece, id)?;
+        self.rest_before_keying(id_keying)?;
+        let rest = self.with_rig(|r| r.rest_needed(both))?;
+        if rest.is_zero() {
+            return self.id_due(since, Duration::ZERO, ahead, ends_with_id, id);
+        }
+        if self.id_due(since, rest, ahead, ends_with_id, id)? {
+            return Ok(true);
+        }
+        self.rest_before_keying(both)?;
+        self.id_due(since, Duration::ZERO, ahead, ends_with_id, id)
+    }
+
+    /// Rest as [`Station::rest_before_keying`] does, for keying `piece` and then the
+    /// ID `id`, so that the next ID does not have to wait for a rest of its own.
+    fn rest_for_piece_and_id(&self, piece: &str, id: &[String]) -> Result<(), TxError> {
+        let (_, both) = self.piece_and_id_keying(piece, id)?;
+        self.rest_before_keying(both)
+    }
+
+    /// How long the ID `id` keys, and how long to rest for to key `piece` and then
+    /// the ID: the piece counted at the longest this module lets it keep the radio
+    /// on transmit ([`Station::keying_bound`]), since a rig measures what it really
+    /// keyed (a handheld's switch-over to transmit, its break-in tail), and a piece
+    /// that ran over its Morse length would otherwise leave the ID a rest of its own.
+    fn piece_and_id_keying(
+        &self,
+        piece: &str,
+        id: &[String],
+    ) -> Result<(Duration, Duration), TxError> {
+        let dot = self.with_rig(|r| r.dot_duration())?;
+        let id_keying = dot * id.iter().map(|p| cw::units(p)).sum::<u32>();
+        let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        let piece = dot * cw::units(piece) + hang + self.cfg.stuck_margin;
+        Ok((id_keying, id_keying + piece))
     }
 
     /// How long the node's last ID still counts for its next transmission: the 10
@@ -875,17 +956,19 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     /// Whether to key the ID (`id`, in keyer pieces) before `ahead`: once `ahead`
-    /// has gone out there must still be time for a pause and an ID within
-    /// `id_interval` of `since`, unless `ahead` ends with the ID itself.
+    /// has gone out, after a `rest` on receive first, there must still be time for a
+    /// pause and an ID within `id_interval` of `since`, unless `ahead` ends with the
+    /// ID itself.
     fn id_due(
         &self,
         since: Instant,
+        rest: Duration,
         ahead: &[String],
         ends_with_id: bool,
         id: &[String],
     ) -> Result<bool, TxError> {
         let dot = self.with_rig(|r| r.dot_duration())?;
-        let mut need = self.keying_bound(ahead, dot);
+        let mut need = rest + self.keying_bound(ahead, dot);
         if !ends_with_id {
             need += self.cfg.segment_pause + self.keying_bound(id, dot);
         }
@@ -900,10 +983,12 @@ impl<R: Rig + 'static> Station<R> {
         let dot = self.with_rig(|r| r.dot_duration())?;
         let keying = dot * cw::units(piece);
         let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
-        // A rig without meters (any radio on the keyer box) cannot measure SWR or
-        // output: it has its own limits instead, and may confirm the keying itself.
-        // One that only hears its radio shows it back on receive once the audio has
-        // caught up, which takes real time whatever the time scale.
+        self.rest_before_keying(keying)?;
+        // A rig without meters (a handheld, or any radio on the keyer box) cannot
+        // measure SWR or output: it has its own limits instead (a handheld's waited
+        // out just above), and may confirm the keying itself. One that only hears its
+        // radio shows it back on receive once the audio has caught up, which takes
+        // real time whatever the time scale.
         let (meters, settle) = {
             let r = self.rig.lock().unwrap_or_else(|e| e.into_inner());
             (r.has_meters(), r.receive_settle())
@@ -1629,6 +1714,19 @@ mod tests {
         tuner_stuck: bool,
         /// When each keyer piece was accepted.
         sent_at: Vec<(Instant, String)>,
+        /// Rests on receive it asks for, as a handheld's duty cycle does.
+        rests: Option<Rests>,
+    }
+
+    /// After `every` keyer pieces other than the ID, anything longer than the ID
+    /// (`id`, keying time) waits `rest` on receive, counted from when it is first
+    /// asked for; the ID alone never waits.
+    struct Rests {
+        every: u32,
+        id: Duration,
+        rest: Duration,
+        pieces: u32,
+        until: Option<Instant>,
     }
 
     impl Radio {
@@ -1644,6 +1742,7 @@ mod tests {
                 stops: 0,
                 tuner_stuck: false,
                 sent_at: Vec::new(),
+                rests: None,
             }
         }
 
@@ -1718,7 +1817,25 @@ mod tests {
             self.hang_until = None;
             self.sim.send_cw(text)?;
             self.sent_at.push((Instant::now(), text.to_string()));
+            if let Some(r) = self.rests.as_mut().filter(|_| text != "DE N0DE") {
+                r.pieces += 1;
+            }
             Ok(())
+        }
+        fn rest_needed(&mut self, keying: Duration) -> civ::Result<Duration> {
+            let Some(r) = self.rests.as_mut() else {
+                return Ok(Duration::ZERO);
+            };
+            if keying <= r.id || r.pieces < r.every {
+                return Ok(Duration::ZERO);
+            }
+            let now = Instant::now();
+            let until = *r.until.get_or_insert(now + r.rest);
+            if now >= until {
+                (r.pieces, r.until) = (0, None);
+                return Ok(Duration::ZERO);
+            }
+            Ok(until - now)
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
             self.stops += 1;
@@ -2181,6 +2298,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_rest_on_receive_does_not_hold_back_a_due_id() {
+        let mut c = cfg();
+        c.id_interval = Duration::from_millis(3500);
+        let mut rig = Radio::new(fast_rig());
+        let dot = rig.dot_duration().unwrap();
+        // Each chunk keys for about 0.65 s and the ID for 0.37 s. Every third chunk
+        // the radio wants 1.6 s on receive first: an ID weighed only after that rest
+        // would end about 4 s after the start.
+        rig.rests = Some(Rests {
+            every: 3,
+            id: dot * cw::units("DE N0DE"),
+            rest: Duration::from_millis(1600),
+            pieces: 0,
+            until: None,
+        });
+        let mut st = Station::new(rig, c.clone(), None);
+        st.configure().unwrap();
+        let mut segments: Vec<String> = (0..8)
+            .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
+            .collect();
+        segments.last_mut().unwrap().push_str(" DE N0DE K");
+        let t = Transmission {
+            segments: segments.clone(),
+            read_ids: Vec::new(),
+        };
+        let start = Instant::now();
+        st.transmit(&t).unwrap();
+        let keyed = st.rig().lock().unwrap().sent_at.clone();
+        assert!(
+            check_ids(&keyed, start, false, &segments, c.id_interval, dot) >= 2,
+            "{keyed:?}"
+        );
     }
 
     #[test]

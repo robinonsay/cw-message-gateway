@@ -25,7 +25,7 @@ ureq = { version = "3", features = ["json"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "hostname"] }
 imap = { version = "3.0.0-alpha.15", default-features = false, features = ["rustls-tls"] }
 mail-parser = "0.11"
-# The serial link to the keyer box.
+# The serial link to the keyer box, and to a handheld running the CW firmware.
 serialport = { version = "4", default-features = false }
 # Port 993 IMAP over sockets with timeouts (already in the tree through imap).
 rustls-connector = "0.19"

@@ -130,7 +130,7 @@ pub const KEY_SECONDS_SPARE: Duration = Duration::from_secs(2);
 pub fn validate(cfg: &Config) -> Result<()> {
     let s = &cfg.station;
     let k = match (s.rig, &cfg.keyer) {
-        (RigKind::Ic7300, _) => return Ok(()),
+        (RigKind::Ic7300 | RigKind::Handheld, _) => return Ok(()),
         (RigKind::Keyer, None) => {
             bail!("station.rig is \"keyer\" but there is no [keyer] section")
         }

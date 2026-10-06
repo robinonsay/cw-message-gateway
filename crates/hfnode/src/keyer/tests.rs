@@ -8,7 +8,11 @@ fn example_keyer() -> Config {
         .replace("\r\n", "\n")
         .replace("# rig = \"keyer\"", "rig = \"keyer\"")
         .replace("# [keyer]\n", "[keyer]\n")
-        .replace("# commissioned = \"none\"", "commissioned = \"none\"")
+        // Only the [keyer] line: the [handheld] one is left commented out.
+        .replace(
+            "# commissioned = \"none\"           # last bring-up",
+            "commissioned = \"none\"           # last bring-up",
+        )
         .replace("# sidetone_hz = 600", "sidetone_hz = 600")
         .replace("# min_level_dbfs = -65", "min_level_dbfs = -65")
         .replace("max_key_seconds = 45", "max_key_seconds = 46");
