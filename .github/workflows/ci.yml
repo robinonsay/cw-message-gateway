@@ -11,6 +11,9 @@ jobs:
   test:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
+    # The mock IC-7300 tests at 20x real time, as on the other systems below.
+    env:
+      HFNODE_E2E_SCALE: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -39,13 +42,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GitHub's macOS runners wake sleeping threads late by a few ms, which at
-          # 100x real time is a few hundred ms of radio time; run the mock radio
-          # 20x real time there, as on any slow or busy machine.
+          # GitHub's runners can hold a test's threads up for a few hundred ms.
+          # At 100x real time that is more than the station's keying watchdog
+          # (45 s, 0.45 s of real time) or its stuck margin (3 s, 30 ms) allows,
+          # and the station forces receive with nothing wrong; run the mock radio
+          # 20x real time on CI, as on any slow or busy machine.
           - os: macos-latest
             scale: 20
           - os: windows-latest
-            scale: 100
+            scale: 20
     runs-on: ${{ matrix.os }}
     env:
       HFNODE_E2E_SCALE: ${{ matrix.scale }}
