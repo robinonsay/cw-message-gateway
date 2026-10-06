@@ -29,11 +29,17 @@ pub struct Config {
     pub storm: Option<Storm>,
     #[serde(default)]
     pub filter: Filter,
+    /// The handheld, with `station.rig = "handheld"` (docs/handheld.md).
+    pub handheld: Option<Handheld>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Station {
+    /// The radio: the IC-7300 over CI-V (the default), or a handheld running the
+    /// CW firmware, set up in `[handheld]`.
+    #[serde(default)]
+    pub rig: RigKind,
     /// The node's own callsign, sent as `DE <call>` on every transmission.
     pub node_call: String,
     /// Field callsigns allowed to open transactions.
@@ -47,8 +53,9 @@ pub struct Station {
     /// The radio's CI-V address.
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
-    /// The last bring-up stage passed on this radio (docs/hardware-test-plan.md,
-    /// "Bring-up stages"). Commands that need a later stage are refused.
+    /// The last bring-up stage passed on the IC-7300 (docs/hardware-test-plan.md,
+    /// "Bring-up stages"). Commands that need a later stage are refused. A
+    /// handheld's is `handheld.commissioned`.
     #[serde(default)]
     pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.
@@ -70,6 +77,51 @@ pub struct Station {
     /// Pause between chunks, in milliseconds.
     #[serde(default = "default_chunk_pause_ms")]
     pub chunk_pause_ms: u64,
+}
+
+/// Which radio the node drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RigKind {
+    #[default]
+    Ic7300,
+    Handheld,
+}
+
+/// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in
+/// firmware/uv-k1, which keys a carrier on commands over its USB-C port,
+/// `station.serial_port`: see docs/handheld.md, the command set in
+/// docs/handheld-protocol.md, and [`crate::handheld`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Handheld {
+    /// The serial speed. The radio's USB-C port is a virtual serial port, which
+    /// ignores it.
+    #[serde(default = "default_handheld_baud")]
+    pub baud: u32,
+    /// The transmit power the radio must be set to: "low" (the default, any of its
+    /// LOW1-LOW5), "mid" or "high". The node checks it and does not set it.
+    /// `station.power_watts` is not used with a handheld.
+    #[serde(default)]
+    pub power: crate::handheld::proto::Power,
+    /// At most this share of any `duty_window_secs` on the air, so the handheld's
+    /// transmitter does not overheat; longer replies wait on receive between
+    /// keying runs.
+    #[serde(default = "default_duty")]
+    pub max_duty_percent: u32,
+    #[serde(default = "default_duty_window")]
+    pub duty_window_secs: u64,
+    /// The frequency must have been quiet (squelch closed) this long before the
+    /// node keys; 0 turns the check off.
+    #[serde(default = "default_busy_quiet")]
+    pub busy_quiet_ms: u64,
+    /// Give up on a transmission after waiting this long for the frequency.
+    #[serde(default = "default_busy_wait")]
+    pub busy_max_wait_secs: u64,
+    /// The last bring-up stage passed with this handheld (docs/handheld.md,
+    /// "Bring-up"). Commands that need a later stage are refused.
+    #[serde(default)]
+    pub commissioned: crate::handheld::Stage,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -677,6 +729,21 @@ fn default_end_of_message_ms() -> u64 {
 fn default_bandwidth() -> f32 {
     150.0
 }
+fn default_handheld_baud() -> u32 {
+    38_400
+}
+fn default_duty() -> u32 {
+    50
+}
+fn default_duty_window() -> u64 {
+    300
+}
+fn default_busy_quiet() -> u64 {
+    1000
+}
+fn default_busy_wait() -> u64 {
+    30
+}
 fn default_every() -> u32 {
     60
 }
@@ -818,9 +885,10 @@ impl Config {
         if !(6..=48).contains(&s.key_speed_wpm) {
             bail!("station.key_speed_wpm must be 6-48");
         }
-        if !TX_COVERAGE_HZ
-            .iter()
-            .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
+        if s.rig == RigKind::Ic7300
+            && !TX_COVERAGE_HZ
+                .iter()
+                .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
         {
             bail!(
                 "station.frequency_hz {} is outside the IC-7300's amateur transmit coverage",
@@ -1031,6 +1099,7 @@ impl Config {
         self.decoder_config()
             .validate()
             .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
+        crate::handheld::validate(self)?;
         Ok(())
     }
 
@@ -1188,6 +1257,59 @@ mod tests {
 
     fn example() -> Config {
         toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap()
+    }
+
+    /// The example with its handheld lines uncommented, on 2 m.
+    fn handheld_example() -> Config {
+        let text = include_str!("../../../hfnode.example.toml")
+            .replace("# rig = \"handheld\"", "rig = \"handheld\"")
+            .replace("frequency_hz = 7_030_000", "frequency_hz = 144_060_000")
+            .replace("# [handheld]", "[handheld]")
+            .replace("# power = \"low\"", "power = \"low\"");
+        toml::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn a_handheld_config_parses_and_is_checked() {
+        let cfg = handheld_example();
+        assert_eq!(cfg.station.rig, RigKind::Handheld);
+        cfg.validate().unwrap();
+        let h = cfg.handheld.clone().unwrap();
+        // Not in the example: ignored on the USB-C port, so left at its default.
+        assert_eq!(h.baud, 38_400);
+        assert_eq!(h.max_duty_percent, 50);
+        assert_eq!(h.commissioned, crate::handheld::Stage::None);
+        // Outside the handheld's amateur bands; HF is the IC-7300's.
+        for hz in [7_030_000, 162_550_000, 148_100_000] {
+            let mut c = cfg.clone();
+            c.station.frequency_hz = hz;
+            assert!(c.validate().is_err(), "{hz}");
+        }
+        let mut c = cfg.clone();
+        c.handheld = None;
+        assert!(c.validate().is_err(), "no [handheld]");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().max_duty_percent = 10;
+        c.handheld.as_mut().unwrap().duty_window_secs = 60;
+        assert!(c.validate().is_err(), "6 s budget < max_key_seconds");
+        // Within the firmware's own limits: a minute's run, half the time keyed,
+        // 150 s at once.
+        let mut c = cfg.clone();
+        c.station.max_key_seconds = 61;
+        assert!(c.validate().is_err(), "max_key_seconds over 60");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().max_duty_percent = 60;
+        assert!(c.validate().is_err(), "over 50 %");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().duty_window_secs = 600;
+        assert!(c.validate().is_err(), "300 s at once");
+        let mut c = cfg.clone();
+        c.handheld.as_mut().unwrap().baud = 4800;
+        assert!(c.validate().is_err());
+        // And 2 m is not the IC-7300's.
+        let mut c = cfg;
+        c.station.rig = RigKind::Ic7300;
+        assert!(c.validate().is_err());
     }
 
     #[test]

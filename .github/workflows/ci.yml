@@ -115,3 +115,57 @@ jobs:
 
       - name: cargo check (aarch64-unknown-linux-gnu)
         run: cargo check --target aarch64-unknown-linux-gnu --all-targets
+
+  # hfnode's part of the handheld firmware (firmware/uv-k1/app), compiled for the
+  # computer against stand-ins for the radio, with its commands and limits tested.
+  # The firmware itself is built by firmware-build below.
+  firmware-host-test:
+    name: handheld firmware host test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware/uv-k1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build and run the host test
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+             -I test/stubs -I . test/test_hfnode.c app/hfnode_line.c -o test_hfnode
+          ./test_hfnode
+
+  # The handheld firmware itself (firmware/uv-k1/build.sh): the NR7Y CW firmware
+  # fetched at the upstream commit the patch was made for, the patch applied and
+  # hfnode's files added, built with Ubuntu 24.04's Arm toolchain (GCC 13.2). The
+  # .bin to flash with UVTools2 and its SHA-256 are kept as this run's
+  # "uv-k1-firmware" download. Building is all this job does: nothing is flashed.
+  firmware-build:
+    name: handheld firmware build
+    runs-on: ubuntu-24.04
+    # It runs the upstream firmware's own build (CMake files, a Python script):
+    # give it no more than read access to this repository.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the Arm toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+          arm-none-eabi-gcc --version
+          cmake --version
+
+      - name: build
+        run: firmware/uv-k1/build.sh "$RUNNER_TEMP/uv-k1"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uv-k1-firmware
+          path: |
+            ${{ runner.temp }}/uv-k1/nr7y.cw.hfnode.bin
+            ${{ runner.temp }}/uv-k1/nr7y.cw.hfnode.bin.sha256
+          if-no-files-found: error

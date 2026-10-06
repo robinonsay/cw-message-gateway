@@ -738,6 +738,7 @@ dependencies = [
  "rustls-connector",
  "serde",
  "serde_json",
+ "serialport",
  "tempfile",
  "toml",
  "ureq",

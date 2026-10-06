@@ -12,6 +12,8 @@ state_dir = "/var/lib/hfnode"     # Mac: "~/Library/Application Support/hfnode/s
 pending_timeout_secs = 600
 
 [station]
+# rig = "handheld"               # a Quansheng running the CW firmware instead of the
+#                                  # IC-7300: see [handheld] at the end, docs/handheld.md
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
@@ -162,3 +164,23 @@ api_key_env = "ANTHROPIC_API_KEY" # Claude only
 # think = false                   # Ollama only: skip the model's reasoning (faster; some models ignore it); recheck with `hfnode filter test`
 # timeout_secs = 600              # default 120 for Claude, 600 for Ollama
 extra_policy = ""
+
+# A Quansheng UV-K1 or UV-K5 v3 running the CW firmware in firmware/uv-k1
+# (docs/handheld.md), for testing locally on 2 m, with station.rig = "handheld". The
+# [station] settings still apply: frequency_hz (simplex, e.g. 144_060_000),
+# serial_port (the handheld's USB-C port), key_speed_wpm and max_key_seconds (60 or
+# less: the firmware's own limit); the CI-V ones (baud, civ_address, commissioned,
+# power_watts) do not. The node sets nothing on the handheld: set the frequency, CW,
+# the power and break-in at the radio, and `hfnode handheld check` compares them
+# with this file. Set [audio] device to the cable's sound input from the handheld
+# (the default is the IC-7300's codec), and pitch_hz to the radio's CWfreq. Use a
+# config file, state_dir and key of the handheld's own (docs/handheld.md).
+# [handheld]
+# power = "low"                   # low (any of LOW1-LOW5), mid or high: as set at the radio
+# max_duty_percent = 50           # at most this share of any duty_window_secs on the air
+#                                 # (50 or less, and 150 s or less at once: the firmware's own limit)
+# duty_window_secs = 300
+# busy_quiet_ms = 1000            # key only after the squelch has been closed this long
+# busy_max_wait_secs = 30         # then give up on the transmission
+# commissioned = "none"           # the handheld's bring-up stage, not [station]'s: none,
+#                                 # listen, keying or done (docs/handheld.md, "Bring-up")

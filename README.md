@@ -359,6 +359,11 @@ the air.
 | `hfnode radio --config C setup` | no | Set frequency, CW mode, power, keyer speed, semi break-in. |
 | `hfnode radio --config C tune` | **yes** | Set up, then run the internal antenna tuner. Not identified: `run` identifies its tunes, here you do. |
 | `hfnode radio --config C cw TEXT` | **yes** | Set up, then key TEXT and log the SWR reading. |
+| `hfnode handheld --config C check` | no | A handheld running the CW firmware in `firmware/uv-k1` ([docs/handheld.md](docs/handheld.md)): its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
+| `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
+| `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it, as given: include your call. |
+| `hfnode handheld --config C linktest` | **yes** | Bring-up: check that the firmware stops on its own when the node goes silent. |
+| `hfnode handheld --config C hangtest` | **yes** | Bring-up: check that the firmware's watchdog ends a transmission when the firmware hangs. |
 | `hfnode storm --config C` | no | Ask the NWS once whether the storm stand-down would hold now. The stand-down applies to `run` only; the bench commands below do not check it. |
 | `hfnode run --config C` | **yes** | Run the node (and email `[email] alert_to` if transmitting is inhibited). |
 
@@ -396,4 +401,5 @@ files listed in [docs/texting.md](docs/texting.md#files-in-state_dir).
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/texting.md](docs/texting.md): reaching contacts by text (Google Voice) and iMessage, and checking it.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
+- [docs/handheld.md](docs/handheld.md): testing locally on 2 m with a Quansheng handheld instead of the IC-7300; [docs/handheld-protocol.md](docs/handheld-protocol.md): the commands `hfnode` keys it with; [firmware/uv-k1](firmware/uv-k1/README.md): the handheld's firmware with those commands, and how to build and flash it.
 - [hfnode.example.toml](hfnode.example.toml): every config key, with comments.

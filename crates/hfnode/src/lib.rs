@@ -5,6 +5,7 @@ pub mod audio;
 pub mod commissioning;
 pub mod config;
 pub mod gateway;
+pub mod handheld;
 pub mod inbox;
 pub mod messages;
 pub mod node;
