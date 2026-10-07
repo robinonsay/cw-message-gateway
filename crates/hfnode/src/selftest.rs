@@ -380,6 +380,9 @@ pub struct Outcome {
     pub transcript: Vec<String>,
     /// What happened, beyond the checks.
     pub facts: Facts,
+    /// Earlier runs of the scenario that were not judged, and why: the machine
+    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]).
+    pub not_judged: Vec<String>,
 }
 
 /// What a run did, as the sweep classifies it.
@@ -419,11 +422,19 @@ impl Outcome {
             .filter(|c| !c.pass)
             .map(|c| format!("{}: {}", c.name, c.detail))
             .collect();
-        if failed.is_empty() {
-            "ok".into()
+        let mut s = if failed.is_empty() {
+            "ok".to_string()
         } else {
             failed.join("; ")
+        };
+        if !self.not_judged.is_empty() {
+            let _ = write!(
+                s,
+                " (after {} run(s) not judged: the machine paused)",
+                self.not_judged.len()
+            );
         }
+        s
     }
 
     /// Every check and the transcript.
@@ -435,6 +446,9 @@ impl Outcome {
             self.wall.as_secs_f32(),
             self.radio_time.as_secs_f32()
         );
+        for n in &self.not_judged {
+            let _ = writeln!(s, "  [not judged] an earlier run: {n}");
+        }
         for c in &self.checks {
             let _ = writeln!(
                 s,
@@ -1481,8 +1495,51 @@ fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
 /// What the node thread hands back when `node::run` returns.
 type Finished<R> = (anyhow::Result<()>, Station<R>, Session, FakeServices);
 
-/// Run one scenario at `scale` times real time.
+/// Times a scenario runs again after a run its `machine` check failed (the machine
+/// paused the test for longer than the scenario's timing allows). A failure of
+/// that check on the last of them stands: the machine could not run the scenario.
+const NOT_JUDGED_RERUNS: usize = 2;
+
+/// Run one scenario at `scale` times real time. A run the machine paused in for
+/// longer than the scenario's timing allows is not judged, pass or fail: it runs
+/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it.
 pub fn run(s: &Scenario, scale: f32) -> Outcome {
+    judged(|| run_once(s, scale))
+}
+
+/// The first run from `once` the machine kept time for, with the ones before it
+/// listed as not judged; or the last allowed, whatever it says.
+fn judged(mut once: impl FnMut() -> Outcome) -> Outcome {
+    let mut not_judged = Vec::new();
+    loop {
+        let mut out = once();
+        let paused = out.checks.iter().find(|c| c.name == "machine" && !c.pass);
+        match paused {
+            Some(c) if not_judged.len() < NOT_JUDGED_RERUNS => {
+                let failed: Vec<&str> = out
+                    .checks
+                    .iter()
+                    .filter(|c| !c.pass && c.name != "machine")
+                    .map(|c| c.name)
+                    .collect();
+                not_judged.push(format!(
+                    "{}; it {}",
+                    c.detail,
+                    match failed.is_empty() {
+                        true => "passed every other check".to_string(),
+                        false => format!("failed {}", failed.join(", ")),
+                    }
+                ));
+            }
+            _ => {
+                out.not_judged = not_judged;
+                return out;
+            }
+        }
+    }
+}
+
+fn run_once(s: &Scenario, scale: f32) -> Outcome {
     let t0 = Instant::now();
     let mut out = Outcome {
         scenario: s.name.clone(),
@@ -1491,6 +1548,7 @@ pub fn run(s: &Scenario, scale: f32) -> Outcome {
         radio_time: Duration::ZERO,
         transcript: Vec::new(),
         facts: Facts::default(),
+        not_judged: Vec::new(),
     };
     if let Err(e) = run_inner(s, scale, &mut out) {
         out.checks.push(check("setup", false, format!("{e:#}")));
@@ -4629,7 +4687,88 @@ mod tests {
                 exchanges_done: 1,
                 ..Facts::default()
             },
+            not_judged: Vec::new(),
         }
+    }
+
+    /// A run's outcome with these checks, each (name, passed).
+    fn outcome_with(checks: &[(&'static str, bool)]) -> Outcome {
+        let mut o = sweep_outcome(&[]);
+        o.checks = checks.iter().map(|&(n, p)| check(n, p, "")).collect();
+        o
+    }
+
+    #[test]
+    fn a_run_the_machine_paused_in_is_run_again_and_listed() {
+        let mut runs = [
+            outcome_with(&[("keyed", false), ("machine", false)]),
+            outcome_with(&[("keyed", true), ("machine", true)]),
+        ]
+        .into_iter();
+        let out = judged(|| runs.next().expect("run once more than expected"));
+        assert!(out.passed());
+        assert_eq!(out.not_judged.len(), 1);
+        assert!(
+            out.not_judged[0].contains("failed keyed"),
+            "{:?}",
+            out.not_judged
+        );
+        assert!(out.summary().contains("after 1 run(s) not judged"));
+        assert!(out.render().contains("[not judged] an earlier run"));
+    }
+
+    #[test]
+    fn a_run_the_machine_paused_in_is_not_judged_even_if_it_passed() {
+        let mut runs = [
+            outcome_with(&[("keyed", true), ("machine", false)]),
+            outcome_with(&[("keyed", false), ("machine", true)]),
+        ]
+        .into_iter();
+        let out = judged(|| runs.next().expect("run once more than expected"));
+        assert!(!out.passed());
+        assert!(out.not_judged[0].contains("passed every other check"));
+    }
+
+    #[test]
+    fn a_failure_without_a_pause_stands() {
+        for checks in [
+            &[("keyed", false), ("machine", true)][..],
+            // An IC-7300 scenario, which has no pause meter.
+            &[("keyed", false)][..],
+        ] {
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                outcome_with(checks)
+            });
+            assert_eq!(runs, 1);
+            assert!(!out.passed());
+            assert!(out.not_judged.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_machine_that_keeps_pausing_fails_the_scenario() {
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            outcome_with(&[("keyed", true), ("machine", false)])
+        });
+        assert_eq!(runs, NOT_JUDGED_RERUNS + 1);
+        assert!(!out.passed());
+        assert_eq!(out.not_judged.len(), NOT_JUDGED_RERUNS);
+    }
+
+    #[test]
+    fn a_keyer_scenario_is_judged_through_a_pause_under_a_second_of_radio_time() {
+        let ms = Duration::from_millis;
+        assert!(any_radio::machine_check(ms(199), 10.0, 5.0).pass);
+        assert!(!any_radio::machine_check(ms(201), 10.0, 5.0).pass);
+        // What broke the scenarios on CI, frozen locally with SIGSTOP: 0.35 s just
+        // before the operator's AGN, 0.5 s during a keying run.
+        assert!(!any_radio::machine_check(ms(350), 10.0, 5.0).pass);
+        assert!(any_radio::machine_check(ms(999), 10.0, 1.0).pass);
+        assert!(!any_radio::machine_check(ms(1001), 10.0, 1.0).pass);
     }
 
     const CELL: Cell = Cell {
