@@ -9,7 +9,7 @@ use super::rig::{self, KeyerRig};
 use crate::audio::Capture;
 use crate::config::Config;
 use crate::session::Transmission;
-use crate::station::Station;
+use crate::station::{force_receive_or_latch, InhibitLatch, Station};
 use anyhow::{bail, Context, Result};
 use civ::Rig;
 use keyer_core::keyer::{Boot, Trip};
@@ -236,6 +236,29 @@ pub fn carrier_note(db: f32) -> String {
          the radio (a shorted optocoupler or key cable), or a station's carrier is on the \
          frequency; the node does not key over it"
     )
+}
+
+/// `hfnode keyer rx`: the box's key open, then the radio's, as far as its audio
+/// shows within `wait`. A key this cannot confirm open (the box's, or the radio's:
+/// no audio to show it, or a steady tone at the pitch, which is how a key closed at
+/// the radio sounds) latches the transmit inhibit in `state_dir`, so that the node
+/// keys nothing more until someone has looked at the radio (the safety audit's
+/// KB-2).
+pub fn rx(rig: &mut KeyerRig, state_dir: &Path, wait: Duration) -> Result<()> {
+    let inhibit = InhibitLatch::in_dir(state_dir);
+    force_receive_or_latch(rig, &inhibit).context("the radio's key is not confirmed open")?;
+    let band = wait_for_band(&rig.monitor(), wait);
+    let why = if !band.audio {
+        Some("no audio from the radio".to_string())
+    } else {
+        band.carrier_db.map(carrier_note)
+    };
+    if let Some(why) = why {
+        let why = format!("the radio's key is not confirmed open: {why}");
+        inhibit.latch(&why);
+        bail!("{why}");
+    }
+    Ok(())
 }
 
 /// The last run's judgement, once the audio covers it.

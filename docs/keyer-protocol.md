@@ -84,12 +84,12 @@ Errors are `ERR <command> <code>`:
 
 | Limit | Value | What happens |
 |---|---|---|
-| Key-down | 1000 ms | Past it the key opens and the box trips: every `CW` is refused until it is power-cycled. No element is longer than a dash at 5 wpm (720 ms). |
+| Key-down | 1000 ms | Past it (by at most one pass of the loop, under 11 ms) the key opens and the box trips: every `CW` is refused until it is power-cycled. No element is longer than a dash at 5 wpm (720 ms). |
 | Run | 60 s | `CW` text longer than this is refused; a run is ended at it. |
 | Link timeout | 2000 ms | A run ends when no valid line has arrived for this long, and at once when USB goes away: the cable comes out, or the computer resets or suspends the box's USB. |
 | Watchdog | 500 ms | The RP2350's hardware watchdog, fed once at the end of each pass of the control loop (a pass takes microseconds; nothing in it waits). If the loop stalls, the chip resets and the key opens. |
 | Rest | 1000 ms | `CW` is refused until the key has been up this long after the last run, so that runs sent back to back cannot hold the key down past its limit. |
-| Duty budget | 60 s of key-down, refilled over 10 min | `CW` whose key-down time is more than the budget left is refused: at most half the time keying over any 10 minutes. A box that did not start from power-up begins with the budget empty. |
+| Duty budget | 60 s of key-down, refilled over 10 min | `CW` whose key-down time is more than the budget left is refused: the key is down at most half of any stretch of time plus 30 s, so at most 55% of any 10 minutes, and half in the long run. A box that did not start from power-up begins with the budget empty. |
 | Key pin | 1000 ms | The loop times the key pin by its own clock readings, apart from the Morse timeline: high for the key-down limit (bridging gaps under 24 ms, a dot at 50 wpm) trips the box, as does a pass more than 10 ms after the last with the key down. |
 
 The key is open at power-up, at every reset and while USB connects, and whenever

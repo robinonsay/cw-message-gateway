@@ -102,14 +102,17 @@ from GP16's pad to ground must conduct one way and not the other.
 
 ## Flashing the firmware
 
-The firmware is in `firmware/pico2-keyer`. GitHub builds it on every push to the
-repository; download the `pico2-keyer-firmware` artifact from the latest run of the
-CI workflow and unzip it to get `pico2-keyer.uf2` and `pico2-keyer.uf2.sha256`.
+The firmware is in `firmware/pico2-keyer`. GitHub builds it on every push, branches
+included, so take it from the right run: the CI run for the commit on `main` that
+the safety audit names, not simply the latest one. Download that run's
+`pico2-keyer-firmware` artifact and unzip it to get `pico2-keyer.uf2`.
 
 1. Unplug the box from the radio.
 2. Check the file you are about to copy: `sha256sum pico2-keyer.uf2` on Linux,
-   `shasum -a 256 pico2-keyer.uf2` on a Mac, against the checksum in
-   `pico2-keyer.uf2.sha256` and in that CI run's summary.
+   `shasum -a 256 pico2-keyer.uf2` on a Mac, against the SHA-256 the safety audit
+   published for that commit (the project's `audit/report.md`). The
+   `pico2-keyer.uf2.sha256` in the same zip, and the checksum in the run's log and
+   summary, only show that the download is intact: they come from the same run.
 3. Hold the Pico 2's BOOTSEL button while plugging it into the computer. It appears
    as a drive called `RP2350`.
 4. Copy `pico2-keyer.uf2` onto that drive. The Pico 2 restarts as the keyer box.
@@ -122,10 +125,16 @@ and the node opens no port that does not carry that name.
 
 CI's build is pinned to one compiler (`firmware/pico2-keyer/rust-toolchain.toml`)
 and stamps the commit into the firmware, which the box reports in `HELLO`. Set
-`[keyer] firmware_build` to that build id (the CI summary prints it) and the node
-refuses to talk to a box running anything else. A firmware you build yourself
-reports `-`, and its UF2 will not have CI's checksum: build locally for development,
-flash CI's file for operating.
+`[keyer] firmware_build` to that build id (the first eight characters of the
+commit; the CI log and summary print it) and the node refuses to talk to a box
+running anything else.
+
+The build is reproducible: built from the same commit with the same build id, as in
+[firmware/pico2-keyer/README.md](../firmware/pico2-keyer/README.md), "Building it
+yourself", a UF2 comes out byte for byte the same as CI's, with the same SHA-256.
+So you can check CI's file independently, or flash your own. A build without the
+build id reports `-` and has another checksum: fine for development, not for
+operating.
 
 ## Setting up the radio
 
@@ -271,7 +280,10 @@ the key down on purpose). Into the dummy load, at minimum power:
 Then set `commissioned = "done"`, and `hfnode run` will start.
 
 `hfnode keyer --config C rx` stops the box and checks the key is open at any time,
-and that no steady tone is heard.
+and that no steady tone is heard. If it cannot confirm the key open (the key seen
+held at the radio, no audio from the radio, or a steady tone at the pitch), it
+latches the transmit inhibit, as the node does: look at the radio before clearing
+it.
 
 ## What stops a stuck key
 
@@ -285,10 +297,10 @@ Fastest first:
    that limit, and a pass of the loop that comes more than 10 ms late with the key
    down trips the box too.
 2. **The box's rest and duty budget.** It refuses a new run until the key has been
-   up for a second, and refuses one whose key-down time is more than its budget: at
-   most half the time keying over any 10 minutes. The node waits these out before
-   each run, and keeps its own window (`[keyer] max_duty_percent`,
-   `duty_window_secs`).
+   up for a second, and refuses one whose key-down time is more than its budget: the
+   key down at most 55% of any 10 minutes, and half the time in the long run. The
+   node waits these out before each run, and keeps its own window (`[keyer]
+   max_duty_percent`, `duty_window_secs`).
 3. **The box's hardware watchdog.** Its control loop feeds the watchdog once per
    pass and nothing in a pass waits. If the loop stalls for 0.5 s the chip resets and
    its key pin goes back to open. After a `TEST HANG` the loop stops feeding it on

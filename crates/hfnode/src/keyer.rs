@@ -209,13 +209,22 @@ pub fn validate(cfg: &Config) -> Result<()> {
     let allows = k.duty_window_secs * u64::from(k.max_duty_percent) / 100;
     if allows < MAX_RUN_LIMIT.as_secs() {
         bail!(
-            "keyer.max_duty_percent of keyer.duty_window_secs allows {allows} s keyed: it              must allow at least the box's run limit, {} s",
+            "keyer.max_duty_percent of keyer.duty_window_secs allows {allows} s keyed: it \
+             must allow at least the box's run limit, {} s",
             MAX_RUN_LIMIT.as_secs()
         );
     }
     if let Some(b) = &k.firmware_build {
         if b.is_empty() || b.len() > 12 || b.contains(char::is_whitespace) {
             bail!("keyer.firmware_build must be the build `hfnode keyer check` reports");
+        }
+        // What every firmware built without a build id reports: it would match any.
+        if b == "-" {
+            bail!(
+                "keyer.firmware_build = \"-\" matches any firmware built from a working tree: \
+                 set it to the build id of the UF2 you checked (its commit's first eight \
+                 characters)"
+            );
         }
     }
     Ok(())
@@ -240,7 +249,8 @@ pub fn check_hello(h: &Hello) -> Result<()> {
     }
     if h.version != keyer_core::VERSION {
         bail!(
-            "the box speaks version {} of the keyer protocol; hfnode speaks {}: flash it              with this hfnode's firmware",
+            "the box speaks version {} of the keyer protocol; hfnode speaks {}: flash it \
+             with this hfnode's firmware",
             h.version,
             keyer_core::VERSION
         );
@@ -288,7 +298,8 @@ pub fn check_hello(h: &Hello) -> Result<()> {
 pub fn check_build(h: &Hello, want: Option<&str>) -> Result<()> {
     match want {
         Some(b) if h.build != b => bail!(
-            "the box runs firmware build {:?}, not keyer.firmware_build {b:?}: flash the              checked UF2, or set keyer.firmware_build to the build you checked",
+            "the box runs firmware build {:?}, not keyer.firmware_build {b:?}: flash the \
+             checked UF2, or set keyer.firmware_build to the build you checked",
             h.build
         ),
         _ => Ok(()),

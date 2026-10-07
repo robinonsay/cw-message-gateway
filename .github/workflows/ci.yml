@@ -136,7 +136,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No `toolchain:` here: rust-toolchain.toml in firmware/pico2-keyer pins it.
+      # The version firmware/pico2-keyer/rust-toolchain.toml pins, which is what
+      # cargo uses there: keep the two the same.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
@@ -165,6 +166,8 @@ jobs:
         run: |
           python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
           sha256sum pico2-keyer.uf2 >pico2-keyer.uf2.sha256
+          # In the log too, so that a link to this job shows it.
+          echo "build id $KEYER_BUILD_ID, $(wc -c <pico2-keyer.uf2) bytes, UF2 SHA-256 $(cut -d ' ' -f 1 pico2-keyer.uf2.sha256)"
           {
             echo "### Keyer box firmware"
             echo

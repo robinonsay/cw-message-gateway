@@ -79,23 +79,39 @@ fn a_run_still_keying_past_its_end_is_stopped_once() {
     let mut b = bench(|_| {});
     b.keyer_box.now().slow_wpm = Some(10);
     let e = b.station.transmit(&tx(&["PARIS PARIS"])).unwrap_err();
-    assert_ne!(e, TxError::Inhibited, "{e}");
-    // The keep-alive's STOP went out while the box was still keying, and the box
-    // read the run as stopped: without it, STATUS would have kept the run alive
-    // until the station's own stuck-key handling, long past its end.
-    let st = b.keyer_box.now();
-    let after_cw: Vec<&String> = st
-        .lines
-        .iter()
-        .skip_while(|l| !l.contains(" CW "))
-        .collect();
-    let first_stop = after_cw
-        .iter()
-        .position(|l| l.contains(" STOP"))
-        .unwrap_or_else(|| panic!("no STOP: {after_cw:?}"));
-    // Before the station's own forced receive, which sends its own STOPs.
-    assert!(first_stop < after_cw.len() - 1, "{after_cw:?}");
-    assert_eq!(st.ended(), Ended::Stop);
+    // The keep-alive's own failure, not the station's stuck-key handling (`Stuck`),
+    // which is what a box kept alive past its run's end comes to without it: the
+    // station's forced receive sends STOPs of its own, so a STOP in the box's lines
+    // shows nothing by itself (the audit's review of PR #13).
+    match &e {
+        TxError::Rig(m) if m.contains("still keying") && m.contains("past the end of its run") => {}
+        e => panic!("not stopped by the keep-alive: {e:?}"),
+    }
+    assert_eq!(b.keyer_box.now().ended(), Ended::Stop);
+}
+
+#[test]
+fn the_duty_window_waits_until_the_run_fits() {
+    // `[keyer] max_duty_percent` of `duty_window_secs`, on top of the box's own
+    // budget (the safety audit's KB-4, in its review of PR #13). Wall clock here: a
+    // window of 2 s allowing 1 s of key-down.
+    let b = bench(|_| {});
+    let rig = b.station.rig();
+    let mut r = lock(&rig);
+    r.s.duty = 0.5;
+    r.s.duty_window = Duration::from_secs(2).mul_f32(r.s.scale);
+    let ms = Duration::from_millis;
+    let now = Instant::now();
+    lock(&r.shared).on_air = VecDeque::from([(now - ms(1000), now - ms(200))]);
+    // 0.8 s keyed: a run of 0.2 s fits now.
+    assert_eq!(r.duty_rest(ms(200)).unwrap(), Duration::ZERO);
+    // One of 0.5 s fits once 0.3 s of that has left the window: in 1.3 s.
+    let wait = r.duty_rest(ms(500)).unwrap();
+    let late = Instant::now() - now;
+    assert!(wait + late >= ms(1280) && wait <= ms(1320), "{wait:?}");
+    // More than the window allows at all is refused.
+    let e = r.duty_rest(ms(1100)).unwrap_err().to_string();
+    assert!(e.contains("max_duty_percent"), "{e}");
 }
 
 #[test]
@@ -148,6 +164,30 @@ fn a_key_stuck_at_the_radio_inhibits_transmitting() {
     assert!(b.station.tx_inhibited());
     let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
     assert!(why.contains("not confirmed on receive"), "{why}");
+}
+
+#[test]
+fn a_key_stuck_with_the_band_just_under_the_sidetone_inhibits_transmitting() {
+    // The safety audit's KB-2(ii): the sidetone heard on an earlier run, then the
+    // band only 8 dB under it when the key sticks at the radio. The band's level
+    // plus 10 dB is over the sidetone, so this must still end in the inhibit, not
+    // in "not heard" with the key closed.
+    let mut b = bench(|_| {});
+    b.station.transmit(&tx(&["DE N0DE"])).unwrap();
+    let m = lock(&b.station.rig()).monitor();
+    assert!(lock(&m).sidetone_db().is_some());
+    // A sine of amplitude a has the power of noise of standard deviation a/sqrt 2.
+    b.radio
+        .set(|r| r.noise = r.sidetone / 2.0f32.sqrt() / 10.0f32.powf(8.0 / 20.0));
+    // The band's level, measured again once the run is well over.
+    thread::sleep(radio_secs(5.0));
+    let at = b.now() + 1.0;
+    b.radio.set(|r| r.stuck_from = Some(at));
+    assert_eq!(
+        b.station.transmit(&tx(&["DE N0DE N0DE K"])),
+        Err(TxError::Inhibited)
+    );
+    assert!(b.station.tx_inhibited());
 }
 
 #[test]

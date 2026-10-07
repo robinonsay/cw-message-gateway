@@ -86,13 +86,16 @@ pub fn check_identity(path: &str, ports: &[civ::ports::PortInfo]) -> anyhow::Res
         .find(|p| same(path, &p.path) || p.stable_path.as_deref().is_some_and(|s| same(path, s)));
     let Some(port) = port else {
         anyhow::bail!(
-            "station.serial_port {path} is not among this computer's serial ports: is the              keyer box plugged in? (`hfnode devices` lists them)"
+            "station.serial_port {path} is not among this computer's serial ports: is the \
+             keyer box plugged in? (`hfnode devices` lists them)"
         );
     };
     match port.usb.as_ref().and_then(|u| u.product.as_deref()) {
         Some(p) if super::is_keyer_box(p) => Ok(()),
         other => anyhow::bail!(
-            "station.serial_port {path} is not the keyer box: its USB product is {}, not {};              not opening it, in case it is a radio's own port (`hfnode devices` shows which              port is the box)",
+            "station.serial_port {path} is not the keyer box: its USB product is {}, not {}; \
+             not opening it, in case it is a radio's own port (`hfnode devices` shows which \
+             port is the box)",
             other.map_or("unknown".to_string(), |p| format!("{p:?}")),
             keyer_core::NAME
         ),
@@ -102,7 +105,17 @@ pub fn check_identity(path: &str, ports: &[civ::ports::PortInfo]) -> anyhow::Res
 fn open_port(path: &str) -> anyhow::Result<Box<dyn serialport::SerialPort>> {
     use anyhow::Context;
     let ports = civ::ports::list().context("listing serial ports to find the keyer box")?;
-    check_identity(path, &ports)?;
+    open_port_among(path, &ports)
+}
+
+/// Open `path`, once `ports` (the system's list) shows it is the keyer box: opening
+/// a port pulses DTR on Linux, which keys some radios.
+fn open_port_among(
+    path: &str,
+    ports: &[civ::ports::PortInfo],
+) -> anyhow::Result<Box<dyn serialport::SerialPort>> {
+    use anyhow::Context;
+    check_identity(path, ports)?;
     let builder = serialport::new(path, 115_200)
         .flow_control(serialport::FlowControl::None)
         .dtr_on_open(false)
@@ -435,6 +448,31 @@ mod tests {
             Err(RigError::Timeout)
         ));
         assert_eq!(s.sent.lock().unwrap().len(), 4, "TEST sent once only");
+    }
+
+    #[test]
+    fn a_port_that_is_not_the_box_is_never_opened() {
+        // A radio's own port, listed with its USB product: refused before it is
+        // opened, not after (the safety audit's KB-8, in its review of PR #13). The
+        // path does not exist, so opening it would fail with another error.
+        use civ::ports::{PortInfo, UsbInfo};
+        let path = "/dev/hfnode-test-radio";
+        let ports = [PortInfo {
+            path: path.into(),
+            stable_path: None,
+            usb: Some(UsbInfo {
+                vid: 0x10c4,
+                pid: 0xea60,
+                serial_number: None,
+                manufacturer: Some("Silicon Labs".into()),
+                product: Some("CP2102 USB to UART Bridge Controller".into()),
+            }),
+        }];
+        let e = match open_port_among(path, &ports) {
+            Ok(_) => panic!("opened"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("is not the keyer box"), "{e}");
     }
 
     #[test]

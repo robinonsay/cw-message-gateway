@@ -25,6 +25,9 @@ struct Radio {
     /// The radio's own keyer is set to iambic: a closed contact sends dots.
     paddle: bool,
     sidetone: f32,
+    /// The sidetone's level swinging this many dB either way, this many times a
+    /// second: (Hz, dB).
+    wobble: Option<(f64, f32)>,
     /// Semi break-in hang after key-up; 0 is full break-in.
     hang: f64,
     /// Radio keying delay.
@@ -49,6 +52,7 @@ impl Default for Radio {
             cable_out: false,
             paddle: false,
             sidetone: 0.3,
+            wobble: None,
             hang: 0.6,
             delay: 0.005,
             noise: 0.02,
@@ -103,7 +107,11 @@ impl Radio {
         }
         let mut v = 0.0f32;
         if self.keyed(t) {
-            v += self.sidetone * w.sin() as f32;
+            let swing = self.wobble.map_or(1.0, |(hz, db)| {
+                let s = (2.0 * std::f64::consts::PI * hz * t).sin() as f32;
+                10.0f32.powf(db * s / 20.0)
+            });
+            v += self.sidetone * swing * w.sin() as f32;
         }
         if self.muted(t) {
             rng.add(&mut one, self.floor);
@@ -195,8 +203,22 @@ fn case(text: &str, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
 
 /// [`case`] at `wpm`.
 fn case_at(text: &str, wpm: u32, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
+    case_known(text, wpm, None, tweak, after)
+}
+
+/// [`case_at`], with `known` as the sidetone level `hfnode keyer sidetone` kept.
+fn case_known(
+    text: &str,
+    wpm: u32,
+    known: Option<f32>,
+    tweak: impl FnOnce(&mut Radio),
+    after: f64,
+) -> Case {
     let t0 = Instant::now();
     let mut m = Monitor::starting_at(settings(), t0);
+    if let Some(db) = known {
+        m.set_known_sidetone(db);
+    }
     let start = 3.0;
     let (segs, dot, downs) = keyed(text, wpm, start);
     let end = downs.last().unwrap().1;
@@ -329,6 +351,88 @@ fn a_dropout_in_the_audio_does_not_clear_a_stuck_key() {
         panic!("not held: {:?}", c.state())
     };
     assert!(why.contains("after the box opened its key"), "{why}");
+}
+
+/// The default radio's sidetone, as `hfnode keyer sidetone` measures and keeps it.
+fn bench_sidetone_db() -> f32 {
+    let mut c = case("DE N0CALL K", |_| {}, 1.0);
+    let j = c.m.judge(c.id).unwrap();
+    assert!(j.heard, "{j}");
+    j.tone_db
+}
+
+#[test]
+fn a_key_held_with_the_band_just_under_the_sidetone_is_held() {
+    // The safety audit's KB-2(ii) at run time: the sidetone measured and kept at the
+    // bench, then the band only 7 or 9 dB under it while the box keys, and the key
+    // held at the radio from the ninth element on. The band's level plus 10 dB is
+    // over the sidetone, so only the sidetone's own level shows the key still closed.
+    let known = bench_sidetone_db();
+    for margin in [7.0f32, 9.0] {
+        let mut c = case_known(
+            "DE N0CALL K",
+            20,
+            Some(known),
+            |r| {
+                // A sine of amplitude a has the power of noise of standard deviation
+                // a/sqrt 2.
+                r.noise = r.sidetone / 2.0f32.sqrt() / 10.0f32.powf(margin / 20.0);
+                r.stuck_from = Some(r.box_downs[8].0);
+            },
+            1.5,
+        );
+        assert!(!c.m.judge(c.id).unwrap().heard, "{margin} dB");
+        let KeyState::Held(why) = c.state() else {
+            panic!("{margin} dB: not held: {:?}", c.state())
+        };
+        assert!(why.contains("after the box opened its key"), "{why}");
+    }
+}
+
+#[test]
+fn a_look_before_the_run_is_judged_settles_nothing() {
+    // The sidetone kept at the bench, then turned down: until the run is judged,
+    // the level under which the key counts as open is a guess, here over (or at)
+    // this quieter sidetone, so a key held at the radio from the last element on
+    // looks open. Once the run is judged (heard, at its own level) the key is held:
+    // a look before must not have settled the run as over, whichever way it read
+    // it as open (a break in the tone, or too little of it).
+    type Turned = (&'static str, f64, fn(&mut Radio));
+    let known = bench_sidetone_db();
+    let cases: [Turned; 2] = [
+        // 14 dB down: a break under the guess.
+        ("a break", 0.7, |r| r.sidetone *= 0.2),
+        // 9 dB down, a little over the guess (10 dB under the kept level, with the
+        // band too loud to set it), swinging 3 dB either way: never 50 ms under it,
+        // but under it too often to be held.
+        ("too little tone", 1.1, |r| {
+            r.sidetone *= 10.0f32.powf(-9.0 / 20.0);
+            r.wobble = Some((20.0, 3.0));
+            r.noise = 0.025;
+        }),
+    ];
+    for (name, look, turn) in cases {
+        let mut c = case_known(
+            "DE N0CALL N0CALL K",
+            20,
+            Some(known),
+            |r| {
+                turn(r);
+                r.stuck_from = Some(r.box_downs.last().unwrap().0);
+            },
+            look,
+        );
+        assert_eq!(c.state(), KeyState::Open, "{name}: the guess");
+        let j = c.m.judge(c.id).unwrap();
+        assert!(j.heard, "{name}: {j}");
+        // Too soon for the carrier check's second of tone (or, swinging, never
+        // steady enough for it): only the judged run's level can show the key held.
+        c.feed_to(c.end + look + 0.2);
+        let KeyState::Held(why) = c.state() else {
+            panic!("{name}: not held: {:?}", c.state())
+        };
+        assert!(why.contains("went on for"), "{name}: {why}");
+    }
 }
 
 #[test]

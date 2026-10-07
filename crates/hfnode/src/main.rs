@@ -433,10 +433,11 @@ type Radio = Arc<Mutex<DynRig>>;
 /// inhibit a failed stop latches.
 static RADIO: Mutex<Option<(Radio, InhibitLatch)>> = Mutex::new(None);
 
-/// From here on a stop signal puts `radio` back on receive before the program exits,
-/// and latches `inhibit` if it cannot.
-fn guard_radio(radio: Radio, inhibit: InhibitLatch) {
-    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some((radio, inhibit));
+/// From here on a stop signal puts `st`'s radio back on receive before the program
+/// exits, and latches `st`'s own transmit inhibit if it cannot: the one in the state
+/// directory, which the next start reads.
+fn guard_station<R: civ::Rig + 'static>(st: &Station<R>) {
+    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some((st.rig(), st.inhibit_latch()));
 }
 
 /// Ctrl-C, or a stop from systemd or launchd (SIGINT, SIGTERM, SIGHUP, or on Windows
@@ -447,12 +448,18 @@ fn guard_radio(radio: Radio, inhibit: InhibitLatch) {
 /// receive is not confirmed, and 130 if no radio was in use (interrupted, as without
 /// this handler).
 fn on_stop_signal() {
+    stop_guarded(|code| std::process::exit(code));
+}
+
+/// What a stop signal does: put the guarded radio back on receive, then `exit` with
+/// the exit code while still holding it.
+fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     let guarded = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some((radio, inhibit)) = guarded else {
-        std::process::exit(130);
+        return exit(130);
     };
     let (_held, code) = stop_radio(&radio, &inhibit);
-    std::process::exit(code);
+    exit(code)
 }
 
 /// Take the radio, stop the keyer and confirm receive. The radio may first finish
@@ -847,6 +854,14 @@ fn devices() -> Result<()> {
     Ok(())
 }
 
+/// `hfnode radio rx`: the radio on receive, confirmed. A radio this cannot bring back
+/// to receive latches the transmit inhibit in `state_dir`, so that the node keys
+/// nothing more until someone has looked at it (the audit's K5).
+fn radio_rx<R: civ::Rig + ?Sized>(rig: &mut R, state_dir: &Path) -> Result<()> {
+    let inhibit = InhibitLatch::in_dir(state_dir);
+    hfnode::station::force_receive_or_latch(rig, &inhibit).context("radio not confirmed on receive")
+}
+
 fn open_radio(cfg: &Config) -> Result<civ::ic7300::Ic7300> {
     if cfg!(target_os = "macos") && civ::ports::is_macos_dialin(&cfg.station.serial_port) {
         log::warn!(
@@ -941,12 +956,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             println!("preflight passed; nothing was written to the radio");
         }
         RadioCmd::Rx => {
-            let mut rig = open_radio(cfg)?;
-            // A radio this command cannot bring back to receive must stop the node
-            // too, until someone has looked at it (the audit's K5).
-            let inhibit = InhibitLatch::in_dir(&cfg.state_dir);
-            hfnode::station::force_receive_or_latch(&mut rig, &inhibit)
-                .context("radio not confirmed on receive")?;
+            radio_rx(&mut open_radio(cfg)?, &cfg.state_dir)?;
             println!("receive (confirmed)");
         }
         RadioCmd::Setup | RadioCmd::Tune | RadioCmd::Cw { .. } => {
@@ -964,7 +974,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 StationConfig::from_config(&cfg.station),
                 Some(cfg.state_dir.join("health.csv")),
             );
-            guard_radio(st.rig(), st.inhibit_latch());
+            guard_station(&st);
             st.configure()?;
             verify_setup(cfg, &st)?;
             println!(
@@ -1181,7 +1191,7 @@ fn serve<R: civ::Rig + 'static>(
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
-    guard_radio(station.rig(), station.inhibit_latch());
+    guard_station(&station);
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -1229,6 +1239,21 @@ fn open_keyer(
     Ok((rig, Some(cap)))
 }
 
+/// Until both box tests have passed, `keyer key` sends one piece at a time, checked
+/// before the box's port is opened: a long text is many minutes of keying on an
+/// untested box (the safety audit's KB-4).
+fn check_key_length(text: &str, stage: keyer::Stage) -> Result<()> {
+    let n = text.chars().count();
+    if stage < keyer::Stage::Done && n > keyer_core::MAX_TEXT {
+        bail!(
+            "{n} characters: until keyer.commissioned is `done`, `keyer key` sends one piece \
+             of at most {} characters at a time",
+            keyer_core::MAX_TEXT
+        );
+    }
+    Ok(())
+}
+
 fn keyer_section(cfg: &Config) -> Result<&hfnode::config::Keyer> {
     if cfg.station.rig != RigKind::Keyer {
         bail!(
@@ -1247,22 +1272,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             let (_cap, monitor) = bench::start_listening(cfg)?;
             let mut rig = bench::open_rig(cfg, monitor)?;
             if matches!(action, KeyerCmd::Rx) {
-                // A key this command cannot confirm open stops the node too, until
-                // someone has looked at the radio (the audit's KB-2(iii)).
-                let inhibit = InhibitLatch::in_dir(&cfg.state_dir);
-                hfnode::station::force_receive_or_latch(&mut rig, &inhibit)
-                    .context("the radio's key is not confirmed open")?;
-                // The box's key is open; the radio's, as far as its audio shows.
-                let band = bench::wait_for_band(&rig.monitor(), Duration::from_secs(5));
-                if !band.audio {
-                    bail!("no audio from the radio: the radio's key is not confirmed open");
-                }
-                if let Some(db) = band.carrier_db {
-                    bail!(
-                        "the radio's key is not confirmed open: {}",
-                        bench::carrier_note(db)
-                    );
-                }
+                bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
                 println!("key open: the box is idle and no sidetone is heard");
                 return Ok(());
             }
@@ -1287,6 +1297,9 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                 KeyerCmd::Key { .. } | KeyerCmd::Sidetone => keyer::Action::Key,
                 _ => keyer::Action::Test,
             };
+            if let KeyerCmd::Key { text } = &action {
+                check_key_length(&sanitize(text), k.commissioned)?;
+            }
             // The health log and any transmit inhibit are written there.
             std::fs::create_dir_all(&cfg.state_dir)
                 .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
@@ -1294,23 +1307,11 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             let sc = StationConfig::from_config(&cfg.station);
             let id = sc.station_id.clone();
             let mut st = Station::new(rig, sc, Some(cfg.state_dir.join("health.csv")));
-            guard_radio(st.rig(), st.inhibit_latch());
+            guard_station(&st);
             st.configure()?;
             match action {
                 KeyerCmd::Key { text } => {
                     let text = sanitize(&text);
-                    // Until both box tests have passed, one piece at a time: a long
-                    // text is many minutes of keying on an untested box (the safety
-                    // audit's KB-4).
-                    if k.commissioned < keyer::Stage::Done
-                        && text.chars().count() > keyer_core::MAX_TEXT
-                    {
-                        bail!(
-                            "{} characters: until keyer.commissioned is `done`, `keyer key` sends                              one piece of at most {} characters at a time",
-                            text.chars().count(),
-                            keyer_core::MAX_TEXT
-                        );
-                    }
                     match bench::key(&mut st, &text)? {
                         Some(j) => println!("sent: {j}"),
                         None => println!("sent"),
@@ -1328,7 +1329,8 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                     // this radio's sidetone and not the band.
                     bench::save_sidetone(&cfg.state_dir, rep.judge.tone_db)?;
                     println!(
-                        "sidetone level kept in state_dir/{}: a tone at the pitch within 10 dB of                          it counts as the key held at the radio",
+                        "sidetone level kept in state_dir/{}: a tone at the pitch within 10 dB of \
+                         it counts as the key held at the radio",
                         bench::SIDETONE_FILE
                     );
                     Ok(())
@@ -1340,7 +1342,8 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                         .unwrap_or_else(|e| e.into_inner())
                         .link_test("TTTT TTTT TTTT TTTT")?;
                     println!(
-                        "passed: the box opened its key by itself within {:.1} s of the node's                          last line, and reports the run ended by the link going quiet",
+                        "passed: the box opened its key by itself within {:.1} s of the node's \
+                         last line, and reports the run ended by the link going quiet",
                         waited.as_secs_f32()
                     );
                     // The test text carries no call.
@@ -1496,7 +1499,7 @@ fn handheld_station(cfg: &Config, rig: Handheld) -> Result<Station<Handheld>> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
-    guard_radio(st.rig(), st.inhibit_latch());
+    guard_station(&st);
     st.configure()
         .context("the handheld is not set up as configured (`hfnode handheld check`)")?;
     st.check()
@@ -1928,6 +1931,35 @@ key_file = '{}'
     }
 
     #[test]
+    fn keyer_key_sends_one_piece_at_a_time_until_bring_up_is_done() {
+        // Checked before the port is opened: the port does not exist, so a text the
+        // check lets through fails there instead (the safety audit's KB-4, in its
+        // review of PR #13).
+        let dir = tempfile::tempdir().unwrap();
+        let (piece, long) = (
+            "E".repeat(keyer_core::MAX_TEXT),
+            "E".repeat(keyer_core::MAX_TEXT + 1),
+        );
+        for (stage, text, capped) in [
+            ("listen", &long, true),
+            ("keying", &long, true),
+            ("listen", &piece, false),
+            ("done", &long, false),
+        ] {
+            let cfg = keyer_cfg(dir.path(), stage);
+            let e = keyer_cmd(&cfg, KeyerCmd::Key { text: text.clone() })
+                .expect_err("the port does not exist")
+                .to_string();
+            assert_eq!(
+                e.contains("sends one piece of at most 30 characters"),
+                capped,
+                "{stage}, {} characters: {e}",
+                text.len()
+            );
+        }
+    }
+
+    #[test]
     fn a_stop_signal_puts_the_radio_on_receive() {
         let dir = tempfile::tempdir().unwrap();
         let inhibit = InhibitLatch::in_dir(dir.path());
@@ -1958,6 +1990,45 @@ key_file = '{}'
         assert!(why.contains("not confirmed on receive"), "{why}");
         // A node starting in that state transmits nothing.
         assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    #[test]
+    fn radio_rx_latches_the_inhibit_when_receive_is_not_confirmed() {
+        // `hfnode radio rx` on a radio it cannot bring back to receive: the node keys
+        // nothing after it until someone has looked at the radio (the audit's K5).
+        let dir = tempfile::tempdir().unwrap();
+        radio_rx(&mut keying(), dir.path()).unwrap();
+        assert!(!InhibitLatch::in_dir(dir.path()).is_set());
+        let mut sim = keying();
+        sim.tx_jammed = true;
+        let e = radio_rx(&mut sim, dir.path()).unwrap_err();
+        assert!(e.to_string().contains("not confirmed on receive"), "{e:#}");
+        assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    #[test]
+    fn a_stop_signal_latches_the_inhibit_of_the_command_it_stops() {
+        // As every keying command guards its station: a stop signal that cannot
+        // confirm receive leaves the inhibit in the state directory, where the next
+        // start finds it, not only in the memory of a process about to exit.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = keyer_cfg(dir.path(), "done");
+        let state = cfg.state_dir.clone();
+        std::fs::create_dir_all(&state).unwrap();
+        let mut sim = keying();
+        sim.tx_jammed = true;
+        let st = Station::new(
+            sim,
+            StationConfig::from_config(&cfg.station),
+            Some(state.join("health.csv")),
+        );
+        guard_station(&st);
+        let code = stop_guarded(|code| code);
+        *RADIO.lock().unwrap() = None;
+        assert_eq!(code, 1);
+        assert!(InhibitLatch::in_dir(&state).is_set());
+        // With nothing guarded, the signal only interrupts.
+        assert_eq!(stop_guarded(|code| code), 130);
     }
 
     #[test]

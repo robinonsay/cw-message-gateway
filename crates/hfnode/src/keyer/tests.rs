@@ -163,6 +163,12 @@ fn the_keyer_duty_window_is_no_looser_than_half_of_ten_minutes() {
     cfg.validate().unwrap();
     cfg.keyer.as_mut().unwrap().firmware_build = Some("two words".into());
     assert!(cfg.validate().is_err());
+    // What any build from a working tree reports: no check at all.
+    cfg.keyer.as_mut().unwrap().firmware_build = Some("-".into());
+    let e = cfg.validate().unwrap_err().to_string();
+    assert!(e.contains("matches any firmware"), "{e}");
+    cfg.keyer.as_mut().unwrap().firmware_build = Some("2f06017c".into());
+    cfg.validate().unwrap();
 }
 
 #[test]

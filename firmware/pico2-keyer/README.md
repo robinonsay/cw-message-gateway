@@ -17,16 +17,23 @@ hfnode (`station.rig = "keyer"`). How to wire, flash and bring it up is in
 ## Getting it
 
 GitHub builds it on every push: the CI workflow's `pico2-keyer-firmware` artifact
-holds `pico2-keyer.uf2`.
+holds `pico2-keyer.uf2`. Which run to take it from, and what to check it against,
+is in [docs/keyer.md](../../docs/keyer.md), "Flashing the firmware".
 
 ## Building it yourself
 
+From a checkout of the commit you want, with `rustup` installed (it fetches the
+compiler `rust-toolchain.toml` pins):
+
 ```sh
-rustup target add thumbv8m.main-none-eabihf
 cd firmware/pico2-keyer
-cargo build --release
+KEYER_BUILD_ID="$(git rev-parse --short=8 HEAD)" cargo build --release --locked
 python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
 ```
+
+This is CI's build, and the UF2 comes out byte for byte the same as CI's for that
+commit, so its SHA-256 is the one CI and the safety audit publish. Without
+`KEYER_BUILD_ID` the box reports `-` as its build, and the file has another checksum.
 
 It builds only for the Pico 2, so it is its own Cargo workspace, outside the
 hfnode one (`.cargo/config.toml` sets the target).
