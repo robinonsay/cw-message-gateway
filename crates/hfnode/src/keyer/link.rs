@@ -75,8 +75,7 @@ fn open_port(path: &str) -> anyhow::Result<Box<dyn serialport::SerialPort>> {
     let mut port = builder
         .open()
         .with_context(|| format!("opening the keyer box's serial port {path}"))?;
-    port.write_data_terminal_ready(false)
-        .and_then(|()| port.write_request_to_send(false))
+    civ::serial::lower_control_lines(&mut port)
         .with_context(|| format!("dropping DTR and RTS on {path}"))?;
     Ok(port)
 }

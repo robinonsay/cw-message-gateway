@@ -37,23 +37,40 @@ computer changes.
 
 ### What the software enforces by itself
 
-These hold whatever the stage or config, and are covered by unit tests:
+These hold whatever the stage or config. Where a bullet names tests (in
+`cargo test --all`, or scenarios of `hfnode selftest`), those tests fail if that
+protection is taken out of the code; they run against the mock radio, so they show
+what the code does, not what the radio does.
 
 - **Serial control lines are dropped.** With USB SEND or USB Keying (CW) or (RTTY)
   set to DTR or RTS, a raised line transmits or holds the key down (p. 12-11, lines
   6895-6927). Linux and macOS raise both lines when a serial port is opened, and
   on Windows it is not documented whether the CP210x driver does for an instant;
-  the driver asks for them off when opening (Windows) and lowers them straight
-  after opening (every system), and will not use the port if it cannot. The
-  radio's Inhibit Timer at USB Connection only delays such a signal by
-  "a few seconds" (line 6945), so these items must also be OFF, and the preflight
-  checks that they are.
-- **Read-only preflight before any write.** `setup`, `tune`, `cw` and `run` first
-  read, and refuse unless: the radio answers `19 00` as an IC-7300 (94h); it is on
+  the driver asks for DTR off when opening and lowers DTR, then RTS, straight
+  after opening (every system), and will not use the port if either fails. The
+  keyer box's and the handheld's ports are opened the same way. The radio's
+  Inhibit Timer at USB Connection only delays such a signal by "a few seconds"
+  (line 6945), so these items must also be OFF, and the preflight checks that they
+  are. How long a line is up inside the system's open, before the driver can lower
+  it, has not been measured: see [DTR and RTS at port open](#dtr-and-rts-at-port-open-h1-optional-no-radio).
+  Tests: `civ::serial` (`dtr_then_rts_go_down`,
+  `a_line_that_will_not_go_down_is_an_error`) and `civ::ic7300`
+  (`open_lowers_dtr_then_rts_before_the_driver_is_returned`,
+  `open_fails_if_either_line_cannot_be_lowered`).
+- **Read-only preflight before any write.** `setup`, `tune`, `cw` and `run` check
+  the stage and power before they open the port, then first read, and refuse with
+  nothing written unless: the radio answers `19 00` as an IC-7300 (94h); it is on
   receive (`1C 00`); USB SEND, USB Keying (CW) and USB Keying (RTTY) are all OFF
   (`1A 05 00 78`, `00 79`, `00 80`); SPLIT is off (`0F`); ∂TX is off (`21 02`). `run`
   also requires the radio's Time-Out Timer (CI-V) to be set (`1A 05 00 29`).
-  `radio check` runs the same reads and prints them.
+  `radio check` runs the same reads and prints them. `radio rx` is the one command
+  that writes without a preflight: it sends only the stop and receive commands
+  (`17 FF`, `1C 00 00`), so that it can take off transmit a radio the preflight
+  would refuse. Tests: `commissioning` (`a_refused_stage_or_power_opens_nothing_and_sends_nothing`,
+  `nothing_is_written_after_a_failed_preflight`,
+  `run_needs_the_radios_time_out_timer_and_the_bench_commands_do_not`,
+  `the_first_write_after_the_preflight_puts_the_radio_on_receive`), and the
+  selftest scenarios `preflight-tot-off` and `preflight-usb-send-dtr`.
 - **Read-back after setup.** After setting the radio up, the node reads back the
   frequency (`03`, and the transmit frequency `1C 03`), mode (must be CW, not CW-R),
   break-in (must be semi), split, ∂TX, RF power (never above what was sent), key
@@ -81,10 +98,25 @@ These hold whatever the stage or config, and are covered by unit tests:
   identified by the reply. Listening all the time (the default), an idle node
   transmits nothing after its start-up tune and ID.
 - **Transmit checks.** A tuner that cannot match bypasses itself (p. 11-2, line
-  5917); the node then stays silent until its next tune. Any tuner error
-  forces receive. SWR is measured at the start of every transmission. Every SWR
-  sample also reads `1C 00`: output on the Po meter while the radio reads receive
-  means none of the node's receive confirmations can be trusted.
+  5917); the node then stays silent until its next tune. Any other tuner error (no
+  reply to the tune command, a tuner state that cannot be read, or still tuning
+  after 20 s) forces receive and keeps the node silent until it has tuned again,
+  which it does before its next reply; if the tuner still reads tuning (`1C 01`
+  reads `02`) after that, the node inhibits transmitting. Every piece the keyer
+  sends, the first of a transmission and every later one, is watched from just
+  after it starts until the radio is back on receive: each sample reads the Po
+  meter (`15 11`), the transmit status (`1C 00`) and SWR (`15 12`). SWR above
+  `swr_limit` stops the transmission at once; so does no output on the Po meter
+  for 16 samples in a row, and at least a second, while the keyer is sending (the
+  radio's protection reduces its output once its power amplifier is hot, p. 13-4,
+  lines 7316-7324). Output on the Po meter while the radio reads receive means none
+  of the node's receive confirmations can be trusted: transmitting is inhibited.
+  Tests: `station` (`swr_is_watched_on_every_piece_not_just_the_first`,
+  `swr_is_watched_for_the_whole_of_a_piece`,
+  `output_lost_after_the_first_piece_stops_keying`,
+  `a_tuner_still_tuning_after_its_time_limit_inhibits`,
+  `a_lost_tune_reply_locks_out_until_the_next_tune`), and the selftest scenarios
+  `fault-high-swr-mid-over`, `fault-tune-hang` and `fault-tune-lost-reply`.
 - **Station identification** (47 CFR 97.119(a)). In `run`, a tune that matched is
   followed by `DE <node_call>`, keyed with `17` and every transmit check above.
   Inside a transmission `DE <node_call>` is keyed on its own between chunks, or
@@ -133,7 +165,8 @@ Stop the test, force the radio to receive, and do not continue until you know wh
 - The node reports `radio not confirmed on receive`, `health.csv` gets a
   `tx-status` line, or `tx-inhibited` appears in the state directory.
 - The tuner does not finish (the node reports `no reply from radio` after 20 s of
-  tuning; the manual's longest tune is 15 s).
+  tuning; the manual's longest tune is 15 s), or `tx-inhibited` names `1C 01`: the
+  tuner still read tuning after the node forced receive.
 - In `run`, a tuning carrier with no `DE <node_call>` after it: the tune failed or
   the ID found a fault, and the node may stay silent this window. Find out which
   from the log before going on.
@@ -157,9 +190,9 @@ Stop the test, force the radio to receive, and do not continue until you know wh
    and exits only once the radio reads receive (`radio confirmed on receive;
    exiting`), or with an error if it does not. Until step 7 has shown that the stop
    command ends a message the keyer is already sending, assume the keyer may
-   finish the text it was given (up to 30 characters; at 6 wpm over a minute), so
-   prefer option 1 if the radio misbehaves. Run `hfnode radio --config $C rx`
-   afterwards if in doubt. A command holds the serial port exclusively while it
+   finish the text it was given (up to 30 characters: 30 zeros take 44 s at 18 wpm
+   and 131 s at 6 wpm), so prefer option 1 if the radio misbehaves. Run
+   `hfnode radio --config $C rx` afterwards if in doubt. A command holds the serial port exclusively while it
    runs, so `rx` from a second terminal cannot open it until the first command has
    exited.
 3. For the node started at boot or log-in: on Linux `sudo systemctl stop hfnode`;
@@ -212,7 +245,8 @@ In `~/bench.toml` set:
 **Radio settings.** Set the IC-7300 menu settings listed in
 [raspberry-pi-setup.md, section 6](raspberry-pi-setup.md#6-ic-7300-settings),
 including CI-V address 94h, CI-V USB baud 115200, USB SEND and both USB Keying items
-OFF, and Time-Out Timer (CI-V) 3 min. Photograph each screen. Also:
+OFF, Time-Out Timer (CI-V) 3 min, and the tuner's PTT Start OFF (the preflight does
+not read it yet). Photograph each screen. Also:
 
 - Record the firmware version (MENU > SET > Others > Information > Version, line
   7876). The CI-V `1A 05` item numbers the driver uses are those of manual revision
@@ -233,6 +267,28 @@ load. Keep a hand near the radio's POWER switch during every transmit step.
 **The radio's own meter.** During transmit steps, set the radio's meter to Po or
 SWR (METER key) so you can compare its readings with the node's.
 
+### DTR and RTS at port open (H1, optional, no radio)
+
+The driver lowers DTR and RTS straight after the system has opened the port, but
+the system may raise them for a moment inside the open itself (Linux and macOS do;
+on Windows it is not documented). That moment has never been measured. It is
+harmless only while USB SEND and both USB Keying items are OFF, so this is
+optional, but it is the only way to know how long the lines are up.
+
+On the exact computer the node will use, plug in a spare CP2102 breakout board, so
+that it binds to the same driver as the radio's port (on a Mac, Apple's
+`/dev/cu.usbserial-*` or Silicon Labs' `/dev/cu.SLAB_USBtoUART`). Put a scope or a
+logic analyser on its DTR and RTS pins: an LED or a meter can miss a pulse of a few
+milliseconds. Note each pin's level while nothing has the port open first (the
+lines are probably active-low on the pins). Point `station.serial_port` in
+`~/bench.toml` at the breakout and run `hfnode radio --config $C check` a few
+times; with no radio on the breakout it fails at the first read (`no reply from
+radio`), which is expected: it has still opened the port. Record any pulse on
+either line at the open, how long it lasts, and that both lines end at their idle
+level. With no radio the command holds the port open only until its first read
+times out, so a raise that some systems are said to make later, after the open, is
+not covered by this measurement.
+
 ## Step -1: pre-bench self-test against a mock radio (no radio)
 
 No radio, sound card, antenna or network needed: run it on the Pi (or a laptop)
@@ -246,10 +302,12 @@ hfnode selftest --scenario fault- -v   # one group (or one name), with transcrip
 hfnode selftest --sweep --csv ~/sweep.csv   # where decoding breaks: speed x SNR x keying
 ```
 
-Each scenario runs the whole node (`node::run`: decoder, parser, session, station
-safety layer and the real `Ic7300` CI-V driver) against `civ::mock`, a byte-level
-IC-7300 that answers every command the driver uses exactly as Section 19 of the
-manual says, and flags anything else as a protocol violation. A scripted field
+Each scenario opens the radio as `hfnode run` does (the read-only preflight first)
+and runs the whole node (`node::run`: decoder, parser, session, station safety
+layer and the real `Ic7300` CI-V driver) against `civ::mock`, a byte-level IC-7300
+that answers every command the node sends, the preflight's 21 reads among them,
+as Section 19 of the manual says, and flags anything else as a protocol violation
+(a write to one of the radio's menu settings, for one). A scripted field
 operator keys CW audio (with noise and hand-keying jitter) into the node's audio
 queue, listens to what the mock radio actually keyed and reacts: it opens, checks
 the read-back, then answers `OK`, `NO` or `AGN` (each on its own line), and repeats
@@ -284,11 +342,14 @@ re-tune before a reply once the last tune is old, a high-SWR lockout cleared by 
 split or ∂TX switched on at the radio, the dial and mode changed while the node is
 idle, band noise and other stations calling, and a call after a long quiet spell
 answered the first time), and radio faults: SWR rising
-after the tune, power fold-back, stuck transmit or key (also after the last over), a
-transmitter that will not unkey, one that only the watchdog gets off transmit,
-refused status commands, NG and lost or late CI-V replies, a readout the radio
-refuses (left unread), a tuner that never finishes, and a node that starts with
-transmitting already inhibited (no tune, nothing keyed).
+after the tune and part-way through an over, power fold-back, stuck transmit or key
+(also after the last over), a transmitter that will not unkey, one that only the
+watchdog gets off transmit, refused status commands, NG and lost or late CI-V
+replies, a readout the radio refuses (left unread), a tuner that never finishes
+(transmitting inhibited), a lost reply to the tune command (no reply until the
+node has tuned again), a node that starts with transmitting already inhibited (no
+tune, nothing keyed), and a radio the preflight refuses (Time-Out Timer OFF, USB
+SEND set to DTR: only reads sent, nothing written).
 
 It runs 100 times faster than real time by default (about 35 s for all of them on a
 laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
@@ -418,7 +479,7 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.15 | `1C 00` TX state, read | Reads `1C 00`; `00` = receive, `01` = transmit, anything else is an error | p. 19-7 (lines 9319-9323) | ☐ |
 | 0.16 | `1C 00` TX state, set | Only ever sends `1C 00 00` (receive). The driver refuses `1C 00 01` without sending anything (`set_transmit(true)` returns an error; test `never_forces_transmit_on`) | p. 19-7 | ☐ |
 | 0.17 | `1C 01` tuner, start | `1C 01 02` = tune | p. 19-7: 00 = tuner OFF, 01 = ON, 02 = "Send/read to tuning" (line 9327) | ☐ |
-| 0.18 | `1C 01` tuner, read | `02` = still tuning; `01` = tuner ON (matched); `00` = tuner OFF, which after a tune means it could not match and bypassed itself, so the window is locked out. Anything else is an error. Gives up after 20 s (the manual's longest tune is 15 s, p. 16-3, line 8119); any tuner error forces receive | p. 19-7 (line 9327); p. 11-2: "If the tuner cannot tune, "TUNE" disappears and the tuning circuit is automatically bypassed" (line 5917). The manual does not say how long `02` is reported; step 5 confirms it on the radio | ☐ |
+| 0.18 | `1C 01` tuner, read | `02` = still tuning; `01` = tuner ON (matched); `00` = tuner OFF, which after a tune means it could not match and bypassed itself, so the window is locked out. Anything else is an error. Gives up after 20 s (the manual's longest tune is 15 s, p. 16-3, line 8119); any tuner error forces receive and locks the node out until it has tuned again, and if `1C 01` still reads `02` after that, transmitting is inhibited | p. 19-7 (line 9327); p. 11-2: "If the tuner cannot tune, "TUNE" disappears and the tuning circuit is automatically bypassed" (line 5917). The manual does not say how long `02` is reported; step 5 confirms it on the radio | ☐ |
 
 **Reads only:**
 
@@ -438,7 +499,7 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.30 | `27 11` scope data output | Reads `27 11`; `00` = OFF, `01` = ON (warning: the radio streams `27 00` waveform frames to the port, which slow the stop commands after a timeout) | p. 19-14: "Send/read the Scope wave data output (00=OFF, 01=ON)" (lines 9353-9361) | ☐ |
 | 0.31 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
 | 0.32 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
-| 0.33 | Serial link | DTR and RTS low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
+| 0.33 | Serial link | DTR, then RTS, low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
 | 0.34 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` and `transmit_control_and_read_frames_on_the_wire` tests match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
@@ -473,8 +534,10 @@ nothing was written to the radio`. `status` prints `frequency N Hz` and
 
 **Pass:**
 
-1. No FAIL line, and `preflight passed` printed. A WARN is acceptable only if you
-   understand it (for example the Time-Out Timer, which only `run` requires).
+1. No FAIL line, and `preflight passed` printed. A WARN about the Time-Out Timer
+   is a stop: `radio tune` and `radio cw` only warn about it, but the bench steps
+   need it set. Set it to 3 min (raspberry-pi-setup.md, section 6) and run `check`
+   again. Any other WARN is acceptable only if you understand it.
 2. Every value matches the radio's own screen: frequency to the hertz, mode, RF
    power about 0%, break-in, tuner, Time-Out Timer, the USB items.
 3. **The item numbers match this firmware.** On the front panel change Time-Out
@@ -601,18 +664,22 @@ shows the tuner working, then `tuned`. A line `health: tune NNNms` in the log, a
 a `<time>,tune,NNNms` line in `<state_dir>/health.csv`. `status` reports
 `transmitting: false`. Note the Po reading while it tunes (whether the tuner uses
 the set power or its own) and how long TUNE blinks. Run it once with
-`RUST_LOG=info,civ=trace` and note what `1C 01` reads during and after the tune
-(`02` while tuning, then `01`, is what the node expects; a warning that the tuner
-never read `02` means it does not report tuning that way; `RUST_LOG=civ=trace`
-alone would hide that warning). `radio tune` does not identify its carrier; into a
+`RUST_LOG=info,civ=trace,hfnode::station=trace` and note what `1C 01` and `1C 00`
+read during and after the tune: the node logs a `tuning, N ms: 1C 01 ..., 1C 00 ...`
+line each time it asks (`02` while tuning, then `01`, is what the node expects from
+`1C 01`; a warning that the tuner never read `02` means it does not report tuning
+that way; `RUST_LOG=civ=trace` alone would hide that warning). The manual does not
+say whether `1C 00` reads transmit during a tune: the node does not rely on it, and
+this is where it is first seen. `radio tune` does not identify its carrier; into a
 dummy load none is needed, and on the air you do it yourself (step 12).
 
 **Pass:** the tune finishes in a few seconds, Po stays at or below about 10%, the
 radio is back on receive, and `health.csv` has the tune line. **Then** set
 `commissioned = "tune"`.
 
-**Fail:** `no reply from radio` after about 20 s (the node then forces receive; check
-step 0.18), `tuner could not match the load` (a 50-ohm dummy load should always
+**Fail:** `no reply from radio` after about 20 s (the node then forces receive, and
+inhibits transmitting if the tuner still reads tuning; check step 0.18), `tuner
+could not match the load` (a 50-ohm dummy load should always
 match: check the load and its cable), or the radio stays on transmit.
 
 ## Step 6: short CW and the SWR reading (transmits)
@@ -625,11 +692,14 @@ hfnode radio --config $C cw "VVV DE N0CALL"
 hfnode radio --config $C status
 ```
 
-The node reads SWR (`15 12`) repeatedly during the first second of the first piece
-it keys, counting only readings taken while the Po meter (`15 11`) shows output.
-Each reading also reads the transmit status (`1C 00`), which must say transmit
-while there is output. The manual does not say whether text keyed with `17` shows
-as transmit there; this step is where that is first seen.
+The node reads SWR (`15 12`) repeatedly all through every piece it keys, from just
+after the keyer starts until the radio is back on receive, counting only readings
+taken while the Po meter (`15 11`) shows output, and logs the highest once per
+transmission. Each reading also reads the transmit status (`1C 00`), which must say
+transmit while there is output. The manual does not say whether text keyed with
+`17` shows as transmit there; this step is where that is first seen. Run it once
+with `RUST_LOG=info,civ=trace` and check that the `15 11`, `1C 00` and `15 12` reads
+go on until the end of the text, not only at its start.
 
 **Look for:** the CW sent correctly at 18 wpm, `health: swr 1.0x` in the log, a
 `<time>,swr,1.0x` line in `health.csv`, `sent; see health.csv for the SWR reading`,
@@ -639,7 +709,10 @@ then `transmitting: false`.
 radio's own SWR meter; the radio returns to receive when the text ends.
 
 **Fail:** wrong characters sent, SWR reading far from the radio's meter (check step
-0.19), or the radio does not return to receive. If the node stops with
+0.19), or the radio does not return to receive. `no output while keying` into the
+dummy load means the Po meter read no output for longer than the node allows while
+the keyer sends (16 samples in a row, at least a second): stop and report it, with
+the trace. If the node stops with
 `radio not confirmed on receive: transmit inhibited ...` and `health.csv` has a
 `tx-status` line, the radio reported receive while its Po meter showed output:
 stop and report it, because the node's checks that the radio is back on receive
@@ -663,12 +736,14 @@ hfnode radio --config $C status
 ```
 
 **Look for:** about 5 seconds into the transmission, the log line
-`watchdog: keying exceeded 5s, forcing receive`; transmission stops; the command
+`watchdog: keying exceeded 5s, forcing receive`; the zeros stop; the command
 exits with `transmitter did not return to receive`; `status` shows
 `transmitting: false`.
 
-**Pass:** the radio stops transmitting within 6 seconds of starting, and stays on
-receive.
+**Pass:** the zeros stop about 5 seconds after they start, the radio is back on
+receive within about 7.3 seconds of starting (the watchdog's 5 s, the stop
+commands, and the break-in delay, which is 10 dots, 2 s at 6 wpm), and it stays on
+receive. Judge by the zeros stopping, not by the TX indicator alone.
 
 **Fail:** the radio keeps sending the zeros. Turn it off (or wait out the 44 seconds
 into the dummy load) and investigate `17 FF` and `1C 00 00` (steps 0.14 and 0.16).
@@ -747,7 +822,17 @@ Set `power_watts` back to 10 for the following steps.
 The design calls for a hardware timer that ends any transmission after about 60 s
 regardless of software, as the last line of defence against a stuck transmitter.
 
-**Read this first.** The node does not use a PTT or keying line: it keys CW with CI-V
+**Read this first.** A timer that cuts the radio's DC supply will leave
+`tx-inhibited` in the state directory when it acts during an `hfnode` command:
+the node cannot confirm receive from a radio with no power, so it latches the
+inhibit (and `hfnode run` emails the alert). That is expected here. Check the
+radio, run `hfnode radio --config $C status`, and only then remove the file before
+the next step. **Take the SD card out of the radio** before any test that cuts its
+DC: the manual warns that the card's data may be corrupted or deleted if the power
+fails or the power cable is disconnected while the card is being accessed
+(p. 8-2, lines 4862-4869).
+
+The node does not use a PTT or keying line: it keys CW with CI-V
 command `17`, through the radio's internal keyer. A timer wired in series with the
 KEY jack or a PTT line will therefore **not** stop a transmission started by the
 node. The timer has to detect transmit in a way that works for CI-V keying and act
@@ -803,8 +888,11 @@ keying; the node must not run unattended until it does.
 
 Then set the timer to its operating value (about 60 s) and restore
 `max_key_seconds = 45`, `key_speed_wpm = 18`. `max_key_seconds` must stay below the
-hardware timer. The node keys at most 30 characters per keyer command, which takes
-about 20 s at 18 wpm, so 45 s leaves margin.
+hardware timer. The node keys at most 30 characters per keyer command. Ordinary
+text takes about 20 s at 18 wpm, but 30 zeros, the slowest 30 characters, take
+44 s, which only just fits under 45 s; at 6 wpm they would take 131 s. A piece
+that outlasts `max_key_seconds` is cut off by the watchdog, which counts as a
+fault: it never makes a transmission longer.
 
 **Then**, with steps 9 and 10 passed, set `commissioned = "done"`. This allows
 `hfnode run`, and with it the service.
@@ -894,17 +982,26 @@ case). Set `check_minutes` back to 10 afterwards.
 
 Now with the real antenna. Power 10 W. Arrange a second station (ideally the field
 operator, at some distance) and a time. Check the frequency is clear before each
-transmission, and identify. The node's own transmissions all end `DE <node_call> K`,
-and in `run` it identifies its window tune itself, but `radio tune` does not: the
-`cw "VVV DE N0CALL"` right after it is that tune's identification, so run it
-straight away.
+transmission, and identify.
+
+Know the antenna's SWR before keying anything into it, the `QRL?` included. If you
+have an antenna analyser, measure the antenna at the node's frequency first
+(radio off, analyser on the coax): 2:1 or less, or within the tuner's 3:1 range.
+Then listen, tune, and send the `QRL?` straight after the tune: the node's own
+transmissions all end `DE <node_call> K`, and in `run` it identifies its window
+tune itself, but `radio tune` does not, so the `QRL? DE N0CALL` is that tune's
+identification.
 
 ```sh
 hfnode listen --config $C                    # first listen; Ctrl-C when sure it is clear
+hfnode radio --config $C tune                # a few seconds of carrier; stop if it cannot match
 hfnode radio --config $C cw "QRL? DE N0CALL" # then listen again; continue only if clear
-hfnode radio --config $C tune
 hfnode radio --config $C cw "VVV DE N0CALL"
 ```
+
+If `radio tune` reports `tuner could not match the load`, or the `cw` command stops
+with `SWR x.x above limit`, stop: check the antenna and feedline before anything
+else.
 
 Then ask the second station to send a few lines and run `hfnode listen --config $C`.
 
@@ -1003,6 +1100,7 @@ weeks: a slow rise in SWR readings means a connector or the antenna needs attent
 | Step | Date | Result | Readings / notes |
 |---|---|---|---|
 | -1 Self-test (mock radio) | | | version: / scale: / passed: |
+| H1 DTR/RTS at port open (optional) | | | breakout: / driver: / pulse on DTR: / on RTS: / idle after: |
 | 0 CI-V desk check | | | |
 | 1 Check and status (`link`) | | | firmware: / echo back raw with OFF: / TOT and echo followed: |
 | 2 Listen | | | |

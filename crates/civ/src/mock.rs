@@ -45,6 +45,11 @@
 //! - CI-V USB Echo Back (1A 05 00 75, "00=ON, 01=OFF", p. 19-5) repeats every frame
 //!   received. ICOM's default is OFF (p. 12-11); the mock defaults to ON so that the
 //!   driver's skipping of its own echoed frames is exercised.
+//! - The settings [`crate::preflight`] reads before the node writes anything: the
+//!   transceiver ID (19 00, p. 19-4) and the menu items in [`Menu`] (1A 05 ..., 27 11,
+//!   pp. 19-4 to 19-7, 19-14), each answered as set and never written. Defaults are
+//!   the settings the bring-up asks for (docs/hardware-test-plan.md), so a preflight
+//!   passes unless a test changes one.
 //! - CI-V Transceive is ON by default: "When you change a setting on the
 //!   transceiver, the same change is automatically set on other connected
 //!   transceivers", to "the default transceive address", 00h (p. 12-10). A change
@@ -104,6 +109,99 @@ pub struct MockConfig {
     /// give. The mock uses FIL2, so that a driver relying on FIL1 there reads back
     /// something else (command 01 would select FIL1).
     pub default_filter: u8,
+    /// What 19 00 "Read the transceiver ID" (p. 19-4) answers: "“94h” is the default
+    /// address of IC-7300" (p. 12-10; manual text line 6826).
+    pub transceiver_id: u8,
+    /// The menu items the preflight reads.
+    pub menu: Menu,
+}
+
+/// Menu settings the preflight reads, as their CI-V data bytes. The node never
+/// writes them; one sent with data is a [`Violation`]. Each default is what the
+/// bring-up asks for, which is the factory default except where noted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Menu {
+    /// 1A 05 00 29 Time-Out Timer (CI-V), "00=OFF, 01=3 min., 02=5 min., 03=10min.,
+    /// 04=20 min., 05=30 min." (p. 19-4; manual text line 8861). 01; the factory
+    /// default is OFF (line 6281).
+    pub time_out_timer: u8,
+    /// 1A 05 00 74 CI-V USB port, "00=Link to [REMOTE], 01=Unlink to [REMOTE]"
+    /// (p. 19-5; line 8975). 01, the factory default (line 6853).
+    pub civ_usb_port: u8,
+    /// 1A 05 00 78 USB SEND, 1A 05 00 79 USB Keying (CW) and 1A 05 00 80 USB Keying
+    /// (RTTY): "00=OFF, 01=DTR, 02=RTS" (p. 19-5; lines 8986-8998). OFF, the factory
+    /// default (lines 6895-6927). The effect of a raised line is not modelled.
+    pub usb_send: u8,
+    pub usb_keying_cw: u8,
+    pub usb_keying_rtty: u8,
+    /// 1A 05 00 84 meter peak hold, "00=OFF, 01=ON" (p. 19-5; line 9006). OFF; the
+    /// factory default is ON (line 6978).
+    pub meter_peak_hold: u8,
+    /// 1A 05 01 61 CW keyer dot/dash ratio, "28=1:1:2.8 to 45=1:1:4.5" (p. 19-6;
+    /// line 9185). 30, the factory default 1:1:3.0 (line 3021).
+    pub keyer_ratio: u8,
+    /// 1A 05 01 97 Inhibit Timer at USB connection, "00=OFF, 01=ON" (p. 19-7;
+    /// line 9269). ON, the factory default (line 6928).
+    pub usb_inhibit_timer: u8,
+    /// 27 11 Scope wave data output, "00=OFF, 01=ON" (p. 19-14; line 9360). OFF.
+    pub scope_data_output: u8,
+}
+
+impl Default for Menu {
+    fn default() -> Self {
+        Self {
+            time_out_timer: 0x01,
+            civ_usb_port: 0x01,
+            usb_send: 0x00,
+            usb_keying_cw: 0x00,
+            usb_keying_rtty: 0x00,
+            meter_peak_hold: 0x00,
+            keyer_ratio: 0x30,
+            usb_inhibit_timer: 0x01,
+            scope_data_output: 0x00,
+        }
+    }
+}
+
+impl Menu {
+    /// The value of the 1A 05 item `hi lo`, for those modelled here.
+    fn item(&self, hi: u8, lo: u8) -> Option<u8> {
+        Some(match (hi, lo) {
+            (0x00, 0x29) => self.time_out_timer,
+            (0x00, 0x74) => self.civ_usb_port,
+            (0x00, 0x78) => self.usb_send,
+            (0x00, 0x79) => self.usb_keying_cw,
+            (0x00, 0x80) => self.usb_keying_rtty,
+            (0x00, 0x84) => self.meter_peak_hold,
+            (0x01, 0x61) => self.keyer_ratio,
+            (0x01, 0x97) => self.usb_inhibit_timer,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether the command `body` (command, sub-command, data) only reads: one of the
+/// reads the mock answers, sent without data. Everything else the node sends sets
+/// something, keys, tunes or stops.
+pub fn is_read(body: &[u8]) -> bool {
+    matches!(
+        body,
+        [0x03 | 0x04 | 0x0F]
+            | [0x14, 0x0A | 0x0C | 0x0F]
+            | [0x15, 0x11 | 0x12]
+            | [0x16, 0x47]
+            | [0x19, 0x00]
+            | [
+                0x1A,
+                0x05,
+                0x00,
+                0x29 | 0x71 | 0x74 | 0x75 | 0x78 | 0x79 | 0x80 | 0x84
+            ]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x97]
+            | [0x1C, 0x00 | 0x01 | 0x03]
+            | [0x21, 0x02]
+            | [0x27, 0x11]
+    )
 }
 
 impl Default for MockConfig {
@@ -121,6 +219,8 @@ impl Default for MockConfig {
             read_timeout: Duration::from_millis(2),
             transceive: true,
             default_filter: 0x02,
+            transceiver_id: 0x94,
+            menu: Menu::default(),
         }
     }
 }
@@ -167,6 +267,10 @@ pub enum Fault {
     /// Tuner cycles never report done: 1C 01 reads "02" for ever. The carrier
     /// still ends after [`MockConfig::tune_time`].
     TuneNeverFinishes,
+    /// After `skip` more keyer messages, the next one finds the load (the antenna)
+    /// at SWR `swr` from its start: a coax or antenna failing part-way through an
+    /// over.
+    SwrAfter { skip: usize, swr: f32 },
 }
 
 /// A frame the mock could not accept as the manual describes it, or one the node
@@ -783,6 +887,26 @@ impl State {
                 self.cfg.echo = *v == 0x00;
                 Ok(vec![OK])
             }
+            // 19 00 "Read the transceiver ID" (p. 19-4).
+            [0x19, 0x00] => Ok(vec![0x19, 0x00, self.cfg.transceiver_id]),
+            // 1A 05 00 71 "Send/read the CI-V transceive setting (00=OFF, 01=ON)"
+            // (p. 19-5).
+            [0x1A, 0x05, 0x00, 0x71] => {
+                Ok(vec![0x1A, 0x05, 0x00, 0x71, u8::from(self.cfg.transceive)])
+            }
+            // The other menu items the preflight reads ([`Menu`]).
+            &[0x1A, 0x05, hi, lo] if self.cfg.menu.item(hi, lo).is_some() => {
+                let v = self.cfg.menu.item(hi, lo).unwrap_or_default();
+                Ok(vec![0x1A, 0x05, hi, lo, v])
+            }
+            // 27 11 "Send/read the Scope wave data output" (p. 19-14).
+            [0x27, 0x11] => Ok(vec![0x27, 0x11, self.cfg.menu.scope_data_output]),
+            [0x1A, 0x05, 0x00, 0x29 | 0x71 | 0x74 | 0x78 | 0x79 | 0x80 | 0x84, _, ..]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x97, _, ..]
+            | [0x27, 0x11, _, ..]
+            | [0x19, 0x00, _, ..] => Err(format!(
+                "{body:02X?}: the node never writes the radio's menu settings (E1)"
+            )),
             // 1C 00 transceiver's status, "00" RX, "01" TX (p. 19-7).
             [0x1C, 0x00] => Ok(vec![0x1C, 0x00, u8::from(self.at(false, now))]),
             [0x1C, 0x00, 0x00] => {
@@ -942,6 +1066,9 @@ impl State {
             self.violation(now, &raw, "17 sent while the tuner is tuning");
         }
         let stuck = if on_air { self.arm_stick() } else { None };
+        if on_air {
+            self.arm_swr();
+        }
         let (marks, chars) = schedule(&text, start, self.dot());
         self.pieces.push(Piece {
             text,
@@ -981,6 +1108,26 @@ impl State {
         };
         self.faults.remove(i);
         Some(stuck)
+    }
+
+    /// The SWR change for the message being accepted, if it is due.
+    fn arm_swr(&mut self) {
+        let Some(i) = self
+            .faults
+            .iter()
+            .position(|f| matches!(f, Fault::SwrAfter { .. }))
+        else {
+            return;
+        };
+        let Fault::SwrAfter { skip, swr } = &mut self.faults[i] else {
+            unreachable!()
+        };
+        if *skip > 0 {
+            *skip -= 1;
+            return;
+        }
+        self.cfg.swr = *swr;
+        self.faults.remove(i);
     }
 
     /// `17 FF` or `1C 00 00`: the keyer stops, and a recoverable stuck transmit ends.
@@ -1787,6 +1934,88 @@ mod tests {
             kind: ReplyFault::Ng,
         });
         assert!(matches!(r.set_break_in(true), Err(RigError::Rejected)));
+        assert!(m.report().violations.is_empty());
+    }
+
+    #[test]
+    fn the_preflight_passes_on_the_mock_and_only_reads() {
+        let (m, mut r) = radio(100.0);
+        let rep = crate::preflight::preflight(&mut r, true);
+        assert!(rep.passed(), "{rep}");
+        // Every item answered: no warning for an item it could not read.
+        assert!(
+            rep.checks
+                .iter()
+                .all(|c| c.level != crate::preflight::Level::Warn),
+            "{rep}"
+        );
+        let cmds = m.commands();
+        assert_eq!(cmds.len(), 21);
+        assert!(cmds.iter().all(|(_, b)| is_read(b)), "{cmds:02X?}");
+        assert!(m.report().violations.is_empty());
+    }
+
+    #[test]
+    fn menu_settings_read_as_set_and_are_never_written() {
+        type Change = fn(&mut Menu);
+        let cases: [(&str, Change); 3] = [
+            ("Time-Out Timer (CI-V)", |m| m.time_out_timer = 0x00),
+            ("USB SEND", |m| m.usb_send = 0x01),
+            ("USB Keying (CW)", |m| m.usb_keying_cw = 0x02),
+        ];
+        for (name, change) in cases {
+            let (m, mut r) = radio(100.0);
+            m.configure(|c| change(&mut c.menu));
+            let rep = crate::preflight::preflight(&mut r, true);
+            let check = rep.checks.iter().find(|c| c.name == name).unwrap();
+            assert_eq!(check.level, crate::preflight::Level::Fail, "{rep}");
+            assert!(m.commands().iter().all(|(_, b)| is_read(b)));
+        }
+        let (m, _) = radio(100.0);
+        m.configure(|c| c.transceiver_id = 0xB6);
+        assert_eq!(
+            raw(&m, &[0xFE, 0xFE, 0x94, 0xE0, 0x19, 0x00, 0xFD])[1].body,
+            [0x19, 0x00, 0xB6]
+        );
+        for write in [
+            &[0x1A, 0x05, 0x00, 0x29, 0x00][..],
+            &[0x1A, 0x05, 0x00, 0x78, 0x01],
+            &[0x1A, 0x05, 0x01, 0x97, 0x00],
+            &[0x27, 0x11, 0x01],
+        ] {
+            let (m, _) = radio(100.0);
+            let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], write, &[0xFD]].concat();
+            let replies = raw(&m, &frame);
+            assert_eq!(replies.last().unwrap().body, [NG], "{write:02X?}");
+            assert_eq!(m.report().violations.len(), 1, "{write:02X?}");
+            assert_eq!(m.settings(), radio(100.0).0.settings());
+            assert!(!is_read(write));
+        }
+        for set in [
+            &[0x1C, 0x00, 0x00][..],
+            &[0x17, 0x45],
+            &[0x14, 0x0A, 0x00, 0x26],
+            &[0x1C, 0x01, 0x02],
+        ] {
+            assert!(!is_read(set), "{set:02X?}");
+        }
+    }
+
+    #[test]
+    fn the_load_can_fail_part_way_through_an_over() {
+        let (m, mut r) = radio(100.0);
+        setup(&mut r);
+        m.inject(Fault::SwrAfter { skip: 1, swr: 3.5 });
+        let mut max_swr = || {
+            r.send_cw("TTTTT").unwrap();
+            let mut swr = 0.0f32;
+            while m.busy() {
+                swr = swr.max(r.read_swr().unwrap());
+            }
+            swr
+        };
+        assert!((max_swr() - 1.2).abs() < 0.05);
+        assert!((max_swr() - 3.5).abs() < 0.05);
         assert!(m.report().violations.is_empty());
     }
 

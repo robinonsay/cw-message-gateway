@@ -26,11 +26,14 @@ branch.
   over from WSJT-X or a logging program, the radio would have gone on transmit a
   few seconds after any `hfnode` command opened the port, and nothing in the
   software would have noticed. The driver now lowers both lines at once, and
-  nothing is written to the radio until it has read those settings back as OFF.
+  nothing is written to the radio until it has read those settings back as OFF,
+  except by `hfnode radio rx`, which only sends the stop and receive commands
+  (`17 FF`, `1C 00 00`) so that it can take off transmit a radio the check would
+  refuse.
 - **The software now enforces the bring-up order.** Each stage of
   [hardware-test-plan.md](hardware-test-plan.md) unlocks the next command, power
   stays at 10 W or less until keying has been proven, and every command that
-  writes first runs a read-only check of the radio.
+  writes, but for `radio rx`, first runs a read-only check of the radio.
 - **What cannot be settled on paper** is listed under
   [Where the manual is silent](#where-the-manual-is-silent): each item is a
   measurement in the bench plan.
@@ -40,7 +43,7 @@ branch.
 | Finding | Severity | Fix |
 |---|---|---|
 | Opening the port leaves DTR and RTS raised; USB SEND / USB Keying never checked | Critical | Both lines lowered straight after opening (port opened exclusively, DTR off on open); the preflight reads `1A 05 00 78`, `00 79`, `00 80` and refuses unless all are OFF |
-| Nothing in the code enforced the bench plan; setup, tune, cw and run worked at up to 100 W on an untested radio | High | `station.commissioned` stage gates; at most 10 W before stage `keying`; read-only preflight before every write; `hfnode radio check` |
+| Nothing in the code enforced the bench plan; setup, tune, cw and run worked at up to 100 W on an untested radio | High | `station.commissioned` stage gates; at most 10 W before stage `keying`; read-only preflight before every write but `radio rx`'s `17 FF` and `1C 00 00`; `hfnode radio check` |
 | Split, ∂TX or a memory channel could move the transmit frequency unseen | High | Preflight requires `0F` and `21 02` OFF; read-back requires `1C 03` (transmit frequency) to equal the set frequency |
 | Settings trusted on a bare OK, never read back | High | Read-back after every setup: `03`, `1C 03`, `04`, `0F`, `21 02`, `16 47`, `14 0A`, `14 0C`, `14 0F` |
 | The radio was set up once at start-up; each window's tune used whatever the front panel left | High | Every window re-reads `1C 00`, re-sends the settings and checks split, ∂TX and `1C 03` before tuning; if the radio is on transmit, a setting is refused or the transmit frequency is not the configured one, receive is forced and the window stays silent |
@@ -208,7 +211,8 @@ read-back changed. What did:
   `exclusive()`, which exists only on Unix; Windows opens a COM port for one handle
   by itself (share mode 0, read in serialport 4.10.1's source). As before, the
   driver then lowers DTR and RTS and fails if it cannot, and nothing is written
-  until the preflight has read USB SEND and both USB Keying items as OFF.
+  until the preflight has read USB SEND and both USB Keying items as OFF (but for
+  `radio rx`, as above).
 - **What each system does to DTR and RTS at open**, for the IC-7300's CP210x:
 
   | System | At open | Basis |
@@ -283,3 +287,29 @@ commands as a window start (`1C 00` read; `06`, `05`, `14 0A`, `14 0C`, `14 0F`,
   came with listening all the time.
 - **Unchanged:** the SWR and `1C 00` cross-check on every transmission, the
   watchdog, the persisted inhibit, the bring-up stages and the 10 W bench cap.
+
+## Addendum, 2026-10-07: fixes from the independent safety audit
+
+The independent hardware-safety audit (2026-10-07, at commit `2e39996`) found
+three things to fix before the IC-7300 is connected or keyed on the bench. No CI-V
+command was added; `1C 01` and `1C 00` are read at new moments, and the mock radio
+answers more reads. What changed:
+
+- **SWR on every piece (K1).** The SWR, Po and `1C 00` samples ran only for about
+  the first second of the first piece of a transmission. They now run all through
+  every piece, from just after the keyer starts until the radio is back on
+  receive. The radio's own protection reacts to its power amplifier's temperature,
+  not directly to SWR (p. 13-4, lines 7316-7324), so it is no prompt backstop.
+- **Failed tunes (K2).** A tune with no reply, an unreadable tuner state or one
+  still tuning after 20 s was followed by a forced receive and nothing else, and
+  counted as a fresh tune for an hour. Now it locks the node out until it has tuned
+  again (before its next reply), and if `1C 01` still reads `02` once receive is
+  forced, transmitting is inhibited. The tune loop also reads `1C 00`, logged at
+  trace level for bench step 5.
+- **Tests for the connect-time protections (K3).** Dropping DTR and RTS at open,
+  the stage check before the port opens, and the preflight before any write were
+  right but untested. They now have tests that fail if any is taken out (named in
+  [hardware-test-plan.md](hardware-test-plan.md#what-the-software-enforces-by-itself)),
+  the keyer box's and the handheld's ports drop their lines the same way, the mock
+  radio answers all 21 preflight reads, and `hfnode selftest` opens the mock as
+  `hfnode run` does, preflight first.

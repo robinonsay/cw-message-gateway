@@ -850,22 +850,15 @@ fn open_radio(cfg: &Config) -> Result<civ::ic7300::Ic7300> {
 }
 
 /// Open the radio for a command that writes to it: the bring-up stage must allow the
-/// command, and the read-only preflight must pass, before anything is written.
+/// command, and the read-only preflight must pass, before anything is written
+/// ([`commissioning::open_for`]).
 fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
-    commissioning::check(cfg.station.commissioned, action, cfg.station.power_watts)?;
-    let mut rig = open_radio(cfg)?;
-    let report = civ::preflight::preflight(&mut rig, action == Action::Run);
-    for line in report.to_string().lines() {
-        log::info!("preflight: {line}");
-    }
-    if !report.passed() {
-        let failed: Vec<&str> = report.failures().map(|c| c.name).collect();
-        bail!(
-            "radio preflight failed ({}); nothing was written to the radio",
-            failed.join(", ")
-        );
-    }
-    Ok(rig)
+    commissioning::open_for(
+        cfg.station.commissioned,
+        action,
+        cfg.station.power_watts,
+        || open_radio(cfg),
+    )
 }
 
 /// Read the settings back after `configure`, and refuse to go on unless they are

@@ -63,6 +63,7 @@
 //! requires before anything is written.
 
 use crate::frame::{bcd_be, bcd_le, from_bcd_be, from_bcd_le, take_frame, Frame, CONTROLLER};
+use crate::serial::{lower_control_lines, ControlLines};
 use crate::{Result, Rig, RigError, MAX_CW_CHARS};
 use std::io::{ErrorKind, Read, Write};
 use std::ops::RangeInclusive;
@@ -314,21 +315,37 @@ impl Ic7300 {
     /// then by a few seconds, and [`crate::preflight`] refuses the radio unless the
     /// settings themselves are OFF, which is what makes the lines harmless.
     pub fn open(path: &str, baud: u32, addr: u8) -> Result<Self> {
+        Self::open_with(
+            || {
+                let builder = serialport::new(path, baud)
+                    .data_bits(serialport::DataBits::Eight)
+                    .parity(serialport::Parity::None)
+                    .stop_bits(serialport::StopBits::One)
+                    .flow_control(serialport::FlowControl::None)
+                    .dtr_on_open(false)
+                    .timeout(Duration::from_millis(50));
+                // Windows opens a COM port for one handle only (share mode 0) by itself.
+                #[cfg(unix)]
+                let builder = builder.exclusive(true);
+                builder
+                    .open()
+                    .map_err(|e| RigError::Io(std::io::Error::other(e)))
+            },
+            baud,
+            addr,
+        )
+    }
+}
+
+impl<P: Port + ControlLines> Ic7300<P> {
+    /// [`Ic7300::open`] with the port that `open` opens: the link settings are
+    /// checked before `open` is called, and DTR and then RTS are lowered
+    /// ([`crate::serial::lower_control_lines`]) before the driver is returned; if
+    /// either cannot be lowered, the port is closed again and nothing is written.
+    pub fn open_with(open: impl FnOnce() -> Result<P>, baud: u32, addr: u8) -> Result<Self> {
         check_link_settings(baud, addr)?;
-        let io = |e: serialport::Error| RigError::Io(std::io::Error::other(e));
-        let builder = serialport::new(path, baud)
-            .data_bits(serialport::DataBits::Eight)
-            .parity(serialport::Parity::None)
-            .stop_bits(serialport::StopBits::One)
-            .flow_control(serialport::FlowControl::None)
-            .dtr_on_open(false)
-            .timeout(Duration::from_millis(50));
-        // Windows opens a COM port for one handle only (share mode 0) by itself.
-        #[cfg(unix)]
-        let builder = builder.exclusive(true);
-        let mut port = builder.open().map_err(io)?;
-        port.write_data_terminal_ready(false).map_err(io)?;
-        port.write_request_to_send(false).map_err(io)?;
+        let mut port = open()?;
+        lower_control_lines(&mut port)?;
         Ok(Self::with_port(port, addr))
     }
 }
@@ -1045,7 +1062,109 @@ mod tests {
         for addr in [0x00, 0x01, 0xE0, 0xFD, 0xFE] {
             assert!(check_link_settings(19_200, addr).is_err(), "{addr:02X}");
         }
-        assert!(Ic7300::open("/nonexistent", 19_200, 0xE0).is_err());
+        // Valid settings: the open itself is tried, and fails on a missing port.
+        assert!(matches!(
+            Ic7300::open("/nonexistent", 19_200, 0x94),
+            Err(RigError::Io(_))
+        ));
+    }
+
+    /// A port that logs, in order, its opening, what is done to its control lines
+    /// and every write, and fails to lower a line where told to.
+    struct Opened {
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        fail_dtr: bool,
+        fail_rts: bool,
+    }
+
+    impl Opened {
+        fn note(&self, what: impl Into<String>) {
+            self.log.lock().unwrap().push(what.into());
+        }
+    }
+
+    impl ControlLines for Opened {
+        fn set_dtr(&mut self, level: bool) -> std::io::Result<()> {
+            self.note(format!("DTR {}", if level { "up" } else { "down" }));
+            match self.fail_dtr {
+                true => Err(std::io::Error::other("DTR stuck")),
+                false => Ok(()),
+            }
+        }
+        fn set_rts(&mut self, level: bool) -> std::io::Result<()> {
+            self.note(format!("RTS {}", if level { "up" } else { "down" }));
+            match self.fail_rts {
+                true => Err(std::io::Error::other("RTS stuck")),
+                false => Ok(()),
+            }
+        }
+    }
+
+    impl Port for Opened {
+        fn discard_input(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for Opened {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    impl Write for Opened {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.note(format!("write {buf:02X?}"));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Open through [`Ic7300::open_with`]; what happened, in order, by the time it
+    /// returned.
+    fn open_logged(fail_dtr: bool, fail_rts: bool, addr: u8) -> (Result<()>, Vec<String>) {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let port_log = log.clone();
+        let r = Ic7300::open_with(
+            move || {
+                port_log.lock().unwrap().push("open".into());
+                Ok(Opened {
+                    log: port_log,
+                    fail_dtr,
+                    fail_rts,
+                })
+            },
+            115_200,
+            addr,
+        );
+        let snapshot = log.lock().unwrap().clone();
+        (r.map(drop), snapshot)
+    }
+
+    #[test]
+    fn open_lowers_dtr_then_rts_before_the_driver_is_returned() {
+        let (r, log) = open_logged(false, false, 0x94);
+        r.unwrap();
+        assert_eq!(log, ["open", "DTR down", "RTS down"]);
+    }
+
+    #[test]
+    fn open_fails_if_either_line_cannot_be_lowered() {
+        let (r, log) = open_logged(true, false, 0x94);
+        assert!(r.unwrap_err().to_string().contains("DTR"));
+        assert_eq!(log, ["open", "DTR down"], "nothing after DTR fails");
+        let (r, log) = open_logged(false, true, 0x94);
+        assert!(r.unwrap_err().to_string().contains("RTS"));
+        assert_eq!(log, ["open", "DTR down", "RTS down"]);
+    }
+
+    #[test]
+    fn open_refuses_bad_link_settings_before_opening() {
+        let (r, log) = open_logged(false, false, 0xE0);
+        assert!(r.is_err());
+        assert!(log.is_empty(), "{log:?}");
     }
 
     #[test]
