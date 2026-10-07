@@ -3524,6 +3524,51 @@ pub fn scenarios() -> Vec<Scenario> {
         s
     });
     v.push({
+        let mut s = base(
+            "fault-retune-lost-reply",
+            "listening all the time: the reply to the tune before a read-back is lost, so the \
+             node keys nothing on that try; it does not count that tune, and tunes again \
+             before answering the repeated open",
+        );
+        s.node.retune_minutes = 10;
+        s.radio.faults.push(Fault::Reply {
+            cmd: vec![0x1C, 0x01, 0x02],
+            skip: 1,
+            times: 1,
+            kind: ReplyFault::Drop,
+        });
+        let (rb42, sent43) = (rb_tx(42, "MOM", "HOME SUN"), de("SENT 43"));
+        let (rb44, sent45) = (rb_tx(44, "BOB", "CALL ME"), de("SENT 45"));
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+                read_back: rb42.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(sent43.clone()),
+            },
+            Step::Tunes(1),
+            Step::Wait(600.0),
+            // The first try's tune fails; the repeat gets the read-back.
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX BOB CALL ME K"),
+                read_back: rb44.clone(),
+            },
+            Step::Tunes(3),
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(sent45.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb42, &sent43, &rb44, &sent45]);
+        s.expect.sent = [sent("MOM", "HOME SUN"), sent("BOB", "CALL ME")].concat();
+        s.expect.last_seq = 45;
+        s.expect.tunes = 3;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
         let mut s = tx(
             "front-panel-split",
             "someone at the radio switches split on after the start-up tune: the node checks \

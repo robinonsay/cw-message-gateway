@@ -699,7 +699,9 @@ transmission. Each reading also reads the transmit status (`1C 00`), which must 
 transmit while there is output. The manual does not say whether text keyed with
 `17` shows as transmit there; this step is where that is first seen. Run it once
 with `RUST_LOG=info,civ=trace` and check that the `15 11`, `1C 00` and `15 12` reads
-go on until the end of the text, not only at its start.
+go on until the end of the text, not only at its start. Note how far apart one
+sample's first `15 11` read is from the next sample's: 40 times that is how long
+the node keys a radio that shows no output before it stops (expected 6 to 8 s).
 
 **Look for:** the CW sent correctly at 18 wpm, `health: swr 1.0x` in the log, a
 `<time>,swr,1.0x` line in `health.csv`, `sent; see health.csv for the SWR reading`,

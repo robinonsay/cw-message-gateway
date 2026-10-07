@@ -240,9 +240,10 @@ const SLOWEST_DOT: Duration = Duration::from_millis(200);
 /// [`StationConfig::swr_window`] has passed too. A sample lands on key-up a little
 /// over half the time in Morse text, and its two Po readings are often in the same
 /// gap, so a run of 40 is about 1 in 10^10 by chance, and longer than any gap in
-/// the keying (a word gap at 6 wpm is 1.4 s, about 7 samples); at the 100 ms poll
-/// they take 4 s or more. A radio protecting itself has already cut its output, so
-/// the wait costs little. To be checked against the radio's Po meter on the bench
+/// the keying (a word gap at 6 wpm is 1.4 s, about 7 samples). Each sample is the
+/// 100 ms poll plus four CI-V reads, so 40 take 4 s at the very least and more like
+/// 6 to 8 s. A radio protecting itself has already cut its output, so the wait
+/// costs little. To be checked against the radio's Po meter on the bench
 /// (docs/hardware-test-plan.md, step 6).
 pub const NO_OUTPUT_SAMPLES: u32 = 40;
 
@@ -670,8 +671,11 @@ impl<R: Rig + 'static> Station<R> {
     /// through [`Station::open_window`] when it starts listening (at start-up, or
     /// at the top of each listening window), and on its own before a reply when the
     /// last tune is too old to trust; `hfnode radio tune` calls it once. Clears any
-    /// SWR lockout from before, and locks out transmitting until the next call if
-    /// the radio could not be set up, the tune failed or the tuner could not match.
+    /// SWR lockout from before once the tune runs (on a rig without a tuner, once
+    /// the radio is set up and checked), and locks out transmitting until the next
+    /// call if the radio could not be set up, the tune failed or the tuner could not
+    /// match. A storm stand-down that stops it before the tune leaves the lockout
+    /// as it was.
     /// A tune that failed is followed by a forced receive and a check that the tuner
     /// has stopped ([`Station::confirm_tuner_stopped`]), which inhibits
     /// transmitting if it has not.
@@ -681,7 +685,6 @@ impl<R: Rig + 'static> Station<R> {
             // Tuning transmits.
             return Err(RigError::Protocol(TxError::Inhibited.to_string()));
         }
-        self.swr_lockout = false;
         // Set the radio up again: the front panel, another program or a power cycle
         // may have changed it since the last window, and the tune transmits.
         if let Err(e) = self.prepare() {
@@ -707,9 +710,12 @@ impl<R: Rig + 'static> Station<R> {
         {
             // Nothing to tune (a handheld, or any radio on the keyer box): set up and
             // checked is all a window start needs, and nothing is transmitted.
+            self.swr_lockout = false;
             self.tuned = true;
             return Ok(());
         }
+        // Cleared only now, as the tune runs: the tune decides it again below.
+        self.swr_lockout = false;
         // Whether the tuner matched, once it says it has finished.
         let matched = self
             .tune(t0)
@@ -1564,6 +1570,43 @@ mod tests {
     }
 
     #[test]
+    fn a_tuner_that_cannot_be_read_after_its_tune_timed_out_inhibits() {
+        // The tuner still reads tuning at its time limit; once receive is forced,
+        // 1C 01 gets no reply. Nothing says the tune ended: inhibited.
+        let mut rig = Radio::new(fast_rig());
+        rig.tuner_stuck = true;
+        rig.tuner_unreadable_after_stop = true;
+        let dir = tempfile::tempdir().unwrap();
+        let health = dir.path().join("health.csv");
+        let mut st = Station::new(rig, quick_tune(), Some(health.clone()));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        st.configure().unwrap();
+        let (mut st, r) = within(Duration::from_secs(10), move || {
+            let r = st.start_window();
+            (st, r)
+        });
+        assert!(r.is_err());
+        assert!(
+            st.rig().lock().unwrap().stopped_since_tune,
+            "receive forced"
+        );
+        assert!(st.tx_inhibited() && !st.can_transmit() && !st.tuned());
+        let n = notices.try_recv().unwrap();
+        assert!(
+            n.reason.contains("1C 01") && n.reason.contains("could not be read"),
+            "{n:?}"
+        );
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        let log = std::fs::read_to_string(&health).unwrap();
+        assert!(
+            log.contains(",tune,timeout") && log.contains(",tune,not-stopped"),
+            "{log}"
+        );
+        assert!(dir.path().join(INHIBIT_FILE).exists());
+    }
+
+    #[test]
     fn a_tuner_that_cannot_be_read_after_its_tune_locks_out() {
         let mut rig = Radio::new(fast_rig());
         rig.matched_unreadable = true;
@@ -1950,9 +1993,11 @@ mod tests {
         assert!(st.tx_inhibited());
     }
 
-    /// A [`SimRig`] with two things a real radio may do: fold its output back to a
-    /// fifth when the SWR is above 3:1 ("Power down transmission", p. 13-4), and
-    /// stay on transmit for the break-in delay after being told to stop.
+    /// A [`SimRig`] with things a real radio may do, among them: cut its output
+    /// back into a bad load, and stay on transmit for the break-in delay after being
+    /// told to stop. The radio's protection reacts to its power amplifier's
+    /// temperature ("Protection function", p. 13-4; manual text lines 7316-7324);
+    /// `foldback` stands in for that with a fifth of the output above 3:1.
     struct Radio {
         sim: SimRig,
         foldback: bool,
@@ -1963,6 +2008,9 @@ mod tests {
         stop_lag: Option<Duration>,
         /// The transmit status reads receive whatever the radio is doing.
         status_blind: bool,
+        /// Once this many pieces have been keyed, the transmit status reads receive
+        /// whatever the radio is doing.
+        blind_after: Option<usize>,
         /// The tuner starts, but the reply to the command is lost.
         tune_reply_lost: bool,
         /// Stop-CW commands received.
@@ -1971,6 +2019,12 @@ mod tests {
         tuner_stuck: bool,
         /// Whether the tuner matched cannot be read after a tune.
         matched_unreadable: bool,
+        /// The tuner's state (1C 01) cannot be read once a stop command has come
+        /// after a tune began.
+        tuner_unreadable_after_stop: bool,
+        /// A tune has begun, and a stop command has come since.
+        tune_started: bool,
+        stopped_since_tune: bool,
         /// Once this many pieces have been keyed, the next and later ones find the
         /// load at this SWR.
         swr_after: Option<(usize, f32)>,
@@ -2008,10 +2062,14 @@ mod tests {
                 hang_until: None,
                 stop_lag: None,
                 status_blind: false,
+                blind_after: None,
                 tune_reply_lost: false,
                 stops: 0,
                 tuner_stuck: false,
                 matched_unreadable: false,
+                tuner_unreadable_after_stop: false,
+                tune_started: false,
+                stopped_since_tune: false,
                 swr_after: None,
                 swr_at: None,
                 dead_after: None,
@@ -2060,12 +2118,16 @@ mod tests {
         }
         fn start_tune(&mut self) -> civ::Result<()> {
             self.sim.start_tune()?;
+            (self.tune_started, self.stopped_since_tune) = (true, false);
             if self.tune_reply_lost {
                 return Err(RigError::Timeout);
             }
             Ok(())
         }
         fn tuner_busy(&mut self) -> civ::Result<bool> {
+            if self.tuner_unreadable_after_stop && self.stopped_since_tune {
+                return Err(RigError::Timeout);
+            }
             Ok(self.tuner_stuck || self.sim.tuner_busy()?)
         }
         fn tuner_matched(&mut self) -> civ::Result<bool> {
@@ -2135,6 +2197,7 @@ mod tests {
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
             self.stops += 1;
+            self.stopped_since_tune |= self.tune_started;
             if let Some(lag) = self.stop_lag.take() {
                 thread::sleep(lag);
             }
@@ -2142,7 +2205,7 @@ mod tests {
             self.sim.stop_cw()
         }
         fn is_transmitting(&mut self) -> civ::Result<bool> {
-            if self.status_blind {
+            if self.status_blind || self.blind_after.is_some_and(|n| self.sim.sent.len() > n) {
                 return Ok(false);
             }
             let hanging = self.hang_until.is_some_and(|t| Instant::now() < t);
@@ -2239,6 +2302,39 @@ mod tests {
         assert!(!r.is_transmitting().unwrap());
         let log = std::fs::read_to_string(&health).unwrap();
         assert!(log.contains(",swr,no-output"), "{log}");
+    }
+
+    #[test]
+    fn output_while_the_status_reads_receive_inhibits_on_any_piece() {
+        // The transmit status goes blind after the first piece: the second, keyed
+        // with output, reads receive, and transmitting is inhibited.
+        let mut rig = Radio::new(fast_rig());
+        rig.blind_after = Some(1);
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::Inhibited));
+        assert!(st.tx_inhibited());
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::Inhibited));
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!(r.sim.sent.len(), 2, "stopped in the second piece");
+        assert!(!r.sim.keyer_busy());
+    }
+
+    #[test]
+    fn swr_just_above_the_limit_stops_and_at_it_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = dir.path().join("health.csv");
+        let mut st = Station::new(fast_rig(), cfg(), Some(health.clone()));
+        st.configure().unwrap();
+        assert_eq!(st.cfg.swr_limit, 2.0);
+        st.rig().lock().unwrap().swr = 2.0;
+        st.transmit(&tx(&["TEST"])).unwrap();
+        let log = std::fs::read_to_string(&health).unwrap();
+        assert!(log.contains(",swr,2.00"), "measured: {log}");
+        st.rig().lock().unwrap().swr = 2.1;
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(2.1)));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
     }
 
     #[test]
@@ -2882,6 +2978,31 @@ mod tests {
         let rig = st.rig();
         let r = rig.lock().unwrap();
         assert_eq!((r.tunes, r.sent.join(" ")), (1, "TEST".to_string()));
+    }
+
+    #[test]
+    fn a_window_start_cut_short_by_a_storm_keeps_the_lockout() {
+        // The tuner could not match: locked out. The next window start is stopped
+        // by a storm before it tunes, and the storm then passes: still locked out,
+        // since nothing has been tuned since the no-match.
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().tuner_bypassed = true;
+        assert!(st.start_window().is_err());
+        assert!(!st.can_transmit());
+        st.rig().lock().unwrap().tuner_bypassed = false;
+        let hold = StormHold::new(Duration::from_secs(60));
+        st.set_storm_hold(hold.clone());
+        let err = st.start_window().unwrap_err().to_string();
+        assert!(err.contains("storm stand-down"), "{err}");
+        hold.set(None);
+        assert!(!st.can_transmit());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        assert!(st.rig().lock().unwrap().sent.is_empty(), "nothing keyed");
+        // A tune that matches clears it.
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+        assert_eq!(st.rig().lock().unwrap().tunes, 2);
     }
 
     #[test]
