@@ -1932,31 +1932,29 @@ key_file = '{}'
 
     #[test]
     fn keyer_key_sends_one_piece_at_a_time_until_bring_up_is_done() {
-        // Checked before the port is opened: the port does not exist, so a text the
-        // check lets through fails there instead (the safety audit's KB-4, in its
-        // review of PR #13).
+        // Refused before the port is opened (or the sound card: no test here opens
+        // one), so a long text fails with the cap's error and not the port's (the
+        // safety audit's KB-4, in its review of PR #13).
         let dir = tempfile::tempdir().unwrap();
         let (piece, long) = (
             "E".repeat(keyer_core::MAX_TEXT),
             "E".repeat(keyer_core::MAX_TEXT + 1),
         );
-        for (stage, text, capped) in [
-            ("listen", &long, true),
-            ("keying", &long, true),
-            ("listen", &piece, false),
-            ("done", &long, false),
-        ] {
+        for stage in ["listen", "keying"] {
             let cfg = keyer_cfg(dir.path(), stage);
-            let e = keyer_cmd(&cfg, KeyerCmd::Key { text: text.clone() })
-                .expect_err("the port does not exist")
+            let e = keyer_cmd(&cfg, KeyerCmd::Key { text: long.clone() })
+                .expect_err("one piece at a time")
                 .to_string();
-            assert_eq!(
+            assert!(
                 e.contains("sends one piece of at most 30 characters"),
-                capped,
-                "{stage}, {} characters: {e}",
-                text.len()
+                "{stage}: {e}"
             );
         }
+        // One piece is let through, and once bring-up is done, any length.
+        use keyer::Stage;
+        check_key_length(&piece, Stage::Listen).unwrap();
+        check_key_length(&long, Stage::Done).unwrap();
+        assert!(check_key_length(&long, Stage::Keying).is_err());
     }
 
     #[test]
