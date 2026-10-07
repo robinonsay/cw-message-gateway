@@ -27,7 +27,7 @@ fn settings() -> Settings {
 /// Firmware with the shortest link timeout the node accepts, 1 s.
 fn firmware(scale: f32) -> MockFirmware {
     let fw = MockFirmware::new(scale);
-    fw.set_hello(1, Duration::from_secs(60), MIN_LINK_TIMEOUT);
+    fw.set_hello(proto::VERSION, Duration::from_secs(60), MIN_LINK_TIMEOUT);
     fw
 }
 
@@ -80,11 +80,12 @@ fn opening_stops_the_firmware_and_confirms_receive() {
 fn firmware_without_limits_of_its_own_is_refused() {
     // One thing wrong at a time.
     for (version, tx_limit, link, why) in [
-        (2, 60_000, 1000, "version 2"),
-        (1, 0, 1000, "transmit limit is 0 s"),
-        (1, 61_000, 1000, "transmit limit is 61 s"),
-        (1, 60_000, 500, "link timeout is 500 ms"),
-        (1, 60_000, 5000, "link timeout is 5000 ms"),
+        (1, 60_000, 1000, "version 1"),
+        (3, 60_000, 1000, "version 3"),
+        (2, 0, 1000, "transmit limit is 0 s"),
+        (2, 61_000, 1000, "transmit limit is 61 s"),
+        (2, 60_000, 500, "link timeout is 500 ms"),
+        (2, 60_000, 5000, "link timeout is 5000 ms"),
     ] {
         let fw = firmware(SCALE);
         fw.set_hello(
@@ -96,7 +97,7 @@ fn firmware_without_limits_of_its_own_is_refused() {
         assert!(e.contains(why), "{e}");
     }
     let fw = firmware(SCALE);
-    fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(1000));
+    fw.set_hello(proto::VERSION, Duration::from_secs(60), Duration::from_millis(1000));
     assert!(open(&fw, settings()).is_ok());
     let fw = firmware(SCALE);
     fw.set_silent(true);
@@ -157,7 +158,7 @@ fn a_run_cut_short_is_reported() {
     let mut set = settings();
     set.time_scale = 10.0;
     let (mut h, fw) = ready_with(set);
-    fw.set_hello(1, Duration::from_secs(1), MIN_LINK_TIMEOUT);
+    fw.set_hello(proto::VERSION, Duration::from_secs(1), MIN_LINK_TIMEOUT);
     h.send_cw(LONG).unwrap();
     let end = Instant::now() + Duration::from_secs(3);
     let e = loop {
@@ -485,11 +486,61 @@ fn the_link_test_passes_only_if_the_firmware_stops_by_itself() {
     // A transmit limit as short as the link timeout would pass it for the wrong
     // reason.
     let fw = firmware(5.0);
-    fw.set_hello(1, Duration::from_secs(2), MIN_LINK_TIMEOUT);
+    fw.set_hello(proto::VERSION, Duration::from_secs(2), MIN_LINK_TIMEOUT);
     let mut h = open(&fw, set).unwrap();
     let e = h.link_test(LONG).unwrap_err();
     assert!(e.to_string().contains("could not tell"), "{e}");
     assert!(fw.runs().is_empty(), "nothing keyed");
+}
+
+#[test]
+fn charging_refuses_cw_with_nothing_keyed() {
+    let (mut h, fw) = ready();
+    fw.set_charging(Charging::Yes);
+    let e = h.send_cw("TEST").unwrap_err().to_string();
+    assert!(e.contains("CHARGE (the radio is charging over USB-C"), "{e}");
+    assert!(fw.runs().is_empty());
+    // Sent once, and nothing to stop.
+    let bodies: Vec<String> = fw.received().into_iter().map(|r| r.1).collect();
+    assert_eq!(bodies.last().map(String::as_str), Some("CW 20 TEST"));
+    assert_eq!(bodies.iter().filter(|b| b.starts_with("CW ")).count(), 1);
+    {
+        let st = lock(&h.shared.state);
+        assert!(!st.keyed && st.fault.is_none() && st.on_air.is_empty());
+    }
+    assert_eq!(h.status().unwrap().charging, Charging::Yes);
+    fw.set_charging(Charging::No);
+    h.send_cw("TEST").unwrap();
+}
+
+#[test]
+fn a_run_that_starts_charging_is_stopped_and_reported() {
+    let mut set = settings();
+    set.time_scale = 10.0;
+    let (mut h, fw) = ready_with(set);
+    h.send_cw(LONG).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    fw.set_charging(Charging::Yes);
+    assert_eq!(off(&fw, 0).1, Off::Charging);
+    let e = h.is_transmitting().unwrap_err().to_string();
+    assert!(e.contains("cut short (it started charging over USB-C"), "{e}");
+    assert!(!h.is_transmitting().unwrap());
+    assert!(h.send_cw("TEST").unwrap_err().to_string().contains("CHARGE"));
+}
+
+#[test]
+fn a_station_refused_for_charging_stays_clear_to_transmit() {
+    let (mut st, fw) = station_with(settings());
+    fw.set_charging(Charging::Yes);
+    match st.transmit(&tx(&["TEST"])) {
+        Err(TxError::Rig(e)) => assert!(e.contains("charging over USB-C"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(fw.runs().is_empty());
+    assert!(!st.tx_inhibited() && st.can_transmit());
+    fw.set_charging(Charging::No);
+    st.transmit(&tx(&["TEST"])).unwrap();
+    assert_eq!(fw.runs().len(), 1);
 }
 
 /// The station's timing, sped up like the firmware's keyer.
@@ -584,7 +635,7 @@ fn firmware_that_will_not_stop_inhibits_transmitting() {
     set.run_slack = Duration::from_secs(3600);
     set.max_run = Duration::from_secs(3600);
     let (mut st, fw) = station_with(set);
-    fw.set_hello(1, Duration::from_secs(1), MIN_LINK_TIMEOUT);
+    fw.set_hello(proto::VERSION, Duration::from_secs(1), MIN_LINK_TIMEOUT);
     fw.set_endless(true);
     fw.set_ignore_stop(true);
     fw.set_no_link_watchdog(true);
@@ -776,6 +827,17 @@ fn stages_gate_keying_and_running() {
     assert!(check_stage(Stage::Keying, Action::Hang).is_ok());
     assert!(check_stage(Stage::Keying, Action::Run).is_err());
     assert!(check_stage(Stage::Done, Action::Run).is_ok());
+}
+
+#[test]
+fn nothing_keys_it_until_its_usb_c_cable_is_known_to_carry_no_power() {
+    let text = include_str!("../../../../hfnode.example.toml").replace("# [handheld]", "[handheld]");
+    let cfg: Config = toml::from_str(&text).unwrap();
+    let mut h = cfg.handheld.unwrap();
+    let e = check_usb_power(&h).unwrap_err().to_string();
+    assert!(e.contains("usb_power_blocked"), "{e}");
+    h.usb_power_blocked = true;
+    check_usb_power(&h).unwrap();
 }
 
 #[test]

@@ -27,6 +27,9 @@ typedef enum {
 } FUNCTION_Type_t;
 extern FUNCTION_Type_t gCurrentFunction;
 
+// helper/battery.h
+extern bool gChargingWithTypeC;
+
 // misc.h, app/cwapp.h
 enum { CW_INACTIVE = 0, CW_TRANSMITTING, CW_SUSPENDED };
 extern uint8_t gCW_State;

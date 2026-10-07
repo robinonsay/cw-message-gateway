@@ -1,4 +1,4 @@
-//! The serial command set between `hfnode` and a handheld's CW firmware, version 1
+//! The serial command set between `hfnode` and a handheld's CW firmware, version 2
 //! (docs/handheld-protocol.md has the firmware's side of it, and
 //! firmware/uv-k1/app/hfnode.c is that firmware).
 //!
@@ -14,7 +14,7 @@
 use std::fmt;
 use std::time::Duration;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Longest line either side sends, without the newline.
 pub const MAX_LINE: usize = 80;
@@ -93,7 +93,8 @@ impl fmt::Display for Power {
 pub enum Command {
     /// Protocol version and the firmware's own transmit limits.
     Hello,
-    /// Transmit state and how long the frequency has been quiet.
+    /// Transmit state, how long the frequency has been quiet, and whether the radio
+    /// is charging.
     Status,
     /// Read the receive and transmit frequencies.
     Freq,
@@ -173,6 +174,11 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
              it could not tell a transmitter stuck on: switch the radio off and on, and \
              do not leave it to the node until this is understood"
         }
+        (Command::Cw { .. }, "CHARGE") => {
+            "the radio is charging over USB-C, and must not transmit while it charges \
+             (its manual): unplug the charger, and use a USB-C cable or adapter that \
+             carries no 5 V from the computer (docs/handheld.md)"
+        }
         (Command::Cw { .. }, "STOP") => "stopped before it began",
         (Command::TestHang, "RUN") => "nothing was being sent",
         (_, "UNKNOWN") => "the firmware does not have this command: is it the hfnode build?",
@@ -241,7 +247,20 @@ impl Hello {
     }
 }
 
-/// `OK STATUS <tx> <quiet, ms>`.
+/// Whether the radio is charging over USB-C, by its own battery reading. It must
+/// not transmit while it charges (its manual): the firmware refuses `CW` while it
+/// reads charging, and stops a run that starts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Charging {
+    No,
+    Yes,
+    /// The firmware cannot tell: the UV-K1's and UV-K5 v3's boards do not measure
+    /// the charging current. Only a cable that carries no 5 V keeps it from
+    /// charging.
+    Unknown,
+}
+
+/// `OK STATUS <tx> <quiet, ms> <charging: 0, 1, or ? when it cannot tell>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
     /// Sending: from a `CW` being accepted until its text has gone out, a `STOP`,
@@ -251,12 +270,13 @@ pub struct Status {
     /// How long since the squelch was last open (someone else on the frequency),
     /// zero while it is.
     pub quiet: Duration,
+    pub charging: Charging,
 }
 
 impl Status {
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [tx, quiet] = f else {
-            return Err(format!("STATUS reply {f:?}: expected two fields"));
+        let [tx, quiet, charging] = f else {
+            return Err(format!("STATUS reply {f:?}: expected three fields"));
         };
         let tx = match tx.as_str() {
             "0" => false,
@@ -266,9 +286,20 @@ impl Status {
         let quiet = quiet
             .parse::<u64>()
             .map_err(|_| format!("STATUS reply: quiet {quiet:?} is not a number"))?;
+        let charging = match charging.as_str() {
+            "0" => Charging::No,
+            "1" => Charging::Yes,
+            "?" => Charging::Unknown,
+            _ => {
+                return Err(format!(
+                    "STATUS reply: charging {charging:?} is not 0, 1 or ?"
+                ))
+            }
+        };
         Ok(Self {
             tx,
             quiet: Duration::from_millis(quiet),
+            charging,
         })
     }
 }
@@ -372,8 +403,8 @@ mod tests {
     #[test]
     fn replies_must_answer_the_command_sent() {
         assert_eq!(
-            parse_reply(&Command::Status, "OK STATUS 0 1500"),
-            Ok(Reply::Ok(words("0 1500")))
+            parse_reply(&Command::Status, "OK STATUS 0 1500 ?"),
+            Ok(Reply::Ok(words("0 1500 ?")))
         );
         assert_eq!(
             parse_reply(&Command::Stop, "OK STOP"),
@@ -389,16 +420,16 @@ mod tests {
             ),
             Ok(Reply::Err("TX".into()))
         );
-        assert!(parse_reply(&Command::Stop, "OK STATUS 0 0").is_err());
+        assert!(parse_reply(&Command::Stop, "OK STATUS 0 0 ?").is_err());
         assert!(parse_reply(&Command::Stop, "MAYBE STOP").is_err());
     }
 
     #[test]
     fn reads_hello_status_and_freq() {
         assert_eq!(
-            Hello::parse(&words("1 60 2000 12340 UV-K1 CW")),
+            Hello::parse(&words("2 60 2000 12340 UV-K1 CW")),
             Ok(Hello {
-                version: 1,
+                version: 2,
                 tx_limit: Duration::from_secs(60),
                 link_timeout: Duration::from_millis(2000),
                 uptime: Duration::from_millis(12340),
@@ -408,13 +439,19 @@ mod tests {
         assert!(Hello::parse(&words("1 60 2000")).is_err());
         assert!(Hello::parse(&words("1 60 2000 UV-K1 CW")).is_err());
         assert_eq!(
-            Status::parse(&words("1 0")),
+            Status::parse(&words("1 0 ?")),
             Ok(Status {
                 tx: true,
-                quiet: Duration::ZERO
+                quiet: Duration::ZERO,
+                charging: Charging::Unknown,
             })
         );
-        assert!(Status::parse(&words("2 0")).is_err());
+        let charging = |c: &str| Status::parse(&words(&format!("0 1500 {c}"))).map(|s| s.charging);
+        assert_eq!(charging("0"), Ok(Charging::No));
+        assert_eq!(charging("1"), Ok(Charging::Yes));
+        assert!(charging("2").is_err() && charging("").is_err());
+        assert!(Status::parse(&words("2 0 ?")).is_err());
+        assert!(Status::parse(&words("0 0")).is_err(), "version 1's STATUS");
         assert!(Status::parse(&words("0")).is_err());
         assert_eq!(
             parse_freq(&words("144060000 144060000")),
@@ -514,6 +551,17 @@ mod tests {
             assert!(watch + Duration::from_millis(300) <= crate::handheld::STOP_WATCH_WAIT);
             let budget = Duration::from_millis(define(HFNODE_C, "HF_DUTY_REFUSE_MS"));
             assert!(crate::handheld::MAX_DUTY_BUDGET + Duration::from_secs(10) <= budget);
+        }
+
+        #[test]
+        fn it_cannot_tell_when_the_radio_is_charging() {
+            // The UV-K1's and UV-K5 v3's boards do not measure the charging current
+            // (app/hfnode.c), so STATUS reads `?`, and docs/handheld.md has the
+            // operator's cable keep the radio from charging. A build that can tell
+            // changes both.
+            assert_eq!(define(HFNODE_C, "HF_CHARGE_SENSED"), 0);
+            let doc = include_str!("../../../../docs/handheld.md");
+            assert!(doc.contains("usb_power_blocked"));
         }
 
         #[test]

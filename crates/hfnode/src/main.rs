@@ -1315,7 +1315,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
 }
 
 /// Open the handheld for `action` (`None`: nothing that keys it), once the bring-up
-/// stage allows it.
+/// stage allows it and its USB-C cable is known to carry no 5 V.
 fn open_handheld(cfg: &Config, action: Option<handheld::Action>) -> Result<Handheld> {
     if cfg.station.rig != RigKind::Handheld {
         bail!("station.rig is not \"handheld\": use `hfnode radio ...` for the IC-7300");
@@ -1323,6 +1323,7 @@ fn open_handheld(cfg: &Config, action: Option<handheld::Action>) -> Result<Handh
     let h = cfg.handheld.as_ref().context("no [handheld] section")?;
     if let Some(a) = action {
         handheld::check_stage(h.commissioned, a)?;
+        handheld::check_usb_power(h)?;
     }
     if cfg!(target_os = "macos") && civ::ports::is_macos_dialin(&cfg.station.serial_port) {
         log::warn!(
@@ -1347,7 +1348,26 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
                 s.tx,
                 s.quiet.as_secs_f32()
             );
-            let wrong = handheld_settings(&mut rig, cfg);
+            let mut wrong = handheld_settings(&mut rig, cfg);
+            match s.charging {
+                handheld::proto::Charging::Yes => {
+                    wrong += 1;
+                    println!(
+                        "charging over USB-C: transmit is forbidden while it charges; unplug \
+                         the charger, and use a cable that carries no 5 V"
+                    );
+                }
+                handheld::proto::Charging::No => println!("charging: no"),
+                handheld::proto::Charging::Unknown => println!(
+                    "charging: the radio cannot tell. It must not transmit while it charges, \
+                     so its USB-C cable must carry no 5 V: its blue charging light must stay \
+                     off with the cable plugged in"
+                ),
+            }
+            println!(
+                "USB-C cable checked to carry no 5 V (handheld.usb_power_blocked): {}",
+                h.usb_power_blocked
+            );
             println!(
                 "bring-up stage passed (handheld.commissioned): {}",
                 h.commissioned

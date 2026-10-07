@@ -28,6 +28,13 @@ static void test_hang(void) { g_hangs++; }
 // The code under test, with its static state in reach.
 #include "app/hfnode.c"
 
+// STATUS's charging field when not charging: unknown on a board that cannot tell.
+#if HF_CHARGE_SENSED
+#define NOT_CHARGING " 0"
+#else
+#define NOT_CHARGING " ?"
+#endif
+
 // ---------------------------------------------------------------------------
 // The simulated radio
 // ---------------------------------------------------------------------------
@@ -41,6 +48,7 @@ bool            g_SquelchLost;
 bool            gCW_PlaybackActive;
 bool            gCW_Recording;
 uint8_t         gCW_MessageRepeatCountdown_500ms;
+bool            gChargingWithTypeC;
 EEPROM_Config_t gEeprom;
 const char      gModulationStr[MODULATION_UKNOWN][4] = {"FM", "AM", "USB", "CW"};
 
@@ -158,6 +166,7 @@ static void reset_radio(void)
     g_SquelchLost = false;
     gCW_PlaybackActive = gCW_Recording = false;
     gCW_MessageRepeatCountdown_500ms = 0;
+    gChargingWithTypeC = false;
     gEeprom.CW_BREAKIN_ENABLE = true;
     g_rx_freq.Frequency = g_tx_freq.Frequency = 14406000;
     g_vfo_tx = (VFO_Info_t){&g_rx_freq, &g_tx_freq, MODULATION_CW, OUTPUT_POWER_LOW1};
@@ -394,8 +403,8 @@ static void test_cw_chars(void)
 static void test_queries(void)
 {
     reset_radio();
-    expect(1, "HELLO", "OK HELLO 1 60 2000 0 NR7Y-CW HFNODE");
-    expect(2, "STATUS", "OK STATUS 0 0");
+    expect(1, "HELLO", "OK HELLO 2 60 2000 0 NR7Y-CW HFNODE");
+    expect(2, "STATUS", "OK STATUS 0 0" NOT_CHARGING);
     expect(3, "FREQ", "OK FREQ 144060000 144060000");
     g_tx_freq.Frequency = 14466000;
     expect(4, "FREQ", "OK FREQ 144060000 144660000");
@@ -423,7 +432,7 @@ static void test_queries(void)
     CHECK(g_tx_freq.Frequency == 14466000);
     // How long since it started, by its own clock.
     run_for(12345, false);
-    expect(19, "HELLO", "OK HELLO 1 60 2000 12340 NR7Y-CW HFNODE");
+    expect(19, "HELLO", "OK HELLO 2 60 2000 12340 NR7Y-CW HFNODE");
 }
 
 static void test_damaged_lines_do_nothing(void)
@@ -831,15 +840,15 @@ static void test_quiet_time(void)
 {
     reset_radio();
     run_for(1500, false);
-    expect(1, "STATUS", "OK STATUS 0 1500");
+    expect(1, "STATUS", "OK STATUS 0 1500" NOT_CHARGING);
     g_SquelchLost = true;
     run_for(10, false);
-    expect(2, "STATUS", "OK STATUS 0 0");
+    expect(2, "STATUS", "OK STATUS 0 0" NOT_CHARGING);
     g_SquelchLost = false;
     run_for(700, false);
-    expect(3, "STATUS", "OK STATUS 0 700");
+    expect(3, "STATUS", "OK STATUS 0 700" NOT_CHARGING);
     run_for(70000, true);
-    expect(4, "STATUS", "OK STATUS 0 60000");
+    expect(4, "STATUS", "OK STATUS 0 60000" NOT_CHARGING);
     // The squelch tail after our own transmission is not someone else.
     start_run(5, "TEST");
     text_done();
@@ -849,12 +858,56 @@ static void test_quiet_time(void)
     g_SquelchLost = false;
     status_tx();
     run_for(200, false);
-    expect(6, "STATUS", "OK STATUS 0 60000");
+    expect(6, "STATUS", "OK STATUS 0 60000" NOT_CHARGING);
     g_SquelchLost = true;
     run_for(200, false);
     g_SquelchLost = false;
     run_for(100, false);
-    expect(7, "STATUS", "OK STATUS 0 100");
+    expect(7, "STATUS", "OK STATUS 0 100" NOT_CHARGING);
+}
+
+// The radio must not transmit while it charges over USB-C: CW is refused, and a
+// run is stopped, and its stop checked, like a STOP's.
+static void test_charging(void)
+{
+    reset_radio();
+    expect(1, "STATUS", "OK STATUS 0 0" NOT_CHARGING);
+    gChargingWithTypeC = true;
+    expect(2, "STATUS", "OK STATUS 0 0 1");
+    expect(3, "CW 20 TEST", "ERR CW CHARGE");
+    CHECK(g_played[0] == 0 && s_run == RUN_NONE && !s_run_armed);
+    // Before the first key-down: the CW is answered.
+    gChargingWithTypeC = false;
+    expect(4, "CW 20 TEST", "");
+    CHECK(s_run == RUN_STARTING);
+    gChargingWithTypeC = true;
+    loop();
+    expect_reply(4, "ERR CW CHARGE");
+    CHECK(s_run == RUN_STOPPING && s_run_armed && !gCW_PlaybackActive);
+    CHECK(g_stop_playback_calls == 1);
+    gChargingWithTypeC = false;
+    expect(5, "CW 20 TEST", "ERR CW WAIT");
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE && !s_wdg_starve);
+    // Keying: off at once, with no reply (the CW was answered), and watched.
+    start_run(6, "TEST");
+    gChargingWithTypeC = true;
+    loop();
+    CHECK(s_run == RUN_STOPPING && gCW_State == CW_INACTIVE && !g_reg30_tx);
+    CHECK(g_usb_out[0] == 0);
+    CHECK(!status_tx());
+    run_for(1000, false);
+    CHECK(s_run == RUN_NONE && !s_wdg_starve);
+    expect(7, "CW 20 TEST", "ERR CW CHARGE");
+    // A stop for charging that leaves the transmitter on resets the radio.
+    gChargingWithTypeC = false;
+    start_run(8, "TEST");
+    g_end_tx_fails = true;
+    gChargingWithTypeC = true;
+    loop();
+    CHECK(s_run == RUN_STOPPING && status_tx() && !s_wdg_starve);
+    run_for(500, false);
+    CHECK(s_wdg_starve);
 }
 
 static void test_replies_wait_for_the_host(void)
@@ -897,6 +950,7 @@ int main(void)
     test_the_watchdog();
     test_the_hang_test();
     test_quiet_time();
+    test_charging();
     test_replies_wait_for_the_host();
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);

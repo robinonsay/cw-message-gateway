@@ -35,6 +35,11 @@
 //! - **A shared channel**: the node keys only once the squelch has been closed for
 //!   `busy_quiet_ms` (the firmware reports how long), and gives up after
 //!   `busy_max_wait_secs`.
+//! - **Charging over USB-C**, which the radio's manual forbids while transmitting,
+//!   and which a computer's USB-C port does: the firmware refuses `CW` while it
+//!   reads charging and stops a run that starts to, but a UV-K1 or UV-K5 v3 cannot
+//!   tell ([`proto::Charging::Unknown`]). So nothing keys it until `[handheld]
+//!   usb_power_blocked` says its cable carries no 5 V ([`check_usb_power`]).
 
 pub mod link;
 pub mod mock;
@@ -44,7 +49,7 @@ use crate::config::{Config, RigKind};
 use anyhow::{bail, Context, Result};
 use civ::{Rig, RigError, MAX_CW_CHARS};
 use link::Link;
-use proto::{Command, Hello, Power, Status};
+use proto::{Charging, Command, Hello, Power, Status};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::fmt;
@@ -169,6 +174,23 @@ pub fn check_stage(stage: Stage, action: Action) -> Result<()> {
         bail!(
             "{name} needs bring-up stage `{needs}` to have passed, but \
              handheld.commissioned is `{stage}` (docs/handheld.md, \"Bring-up\")"
+        );
+    }
+    Ok(())
+}
+
+/// Whether a command that keys the handheld may run: only once `[handheld]
+/// usb_power_blocked` says the cable to it carries no 5 V. The radio must not
+/// transmit while it charges (its manual), a computer's USB-C port charges it, and
+/// it cannot tell that it is charging (docs/handheld.md, "No 5 V on the USB-C
+/// cable").
+pub fn check_usb_power(h: &crate::config::Handheld) -> Result<()> {
+    if !h.usb_power_blocked {
+        bail!(
+            "the handheld must not transmit while it charges, and a computer's USB-C port \
+             charges it: connect it through a cable or adapter that carries no 5 V, check \
+             that its blue charging light stays off, then set handheld.usb_power_blocked = \
+             true (docs/handheld.md, \"No 5 V on the USB-C cable\")"
         );
     }
     Ok(())
@@ -357,6 +379,14 @@ struct State {
 }
 
 impl State {
+    /// The `CW` just sent was refused: nothing was keyed, so no time on the air.
+    fn not_keyed(&mut self) {
+        self.keyed = false;
+        self.since = None;
+        self.end = None;
+        self.deadline = None;
+    }
+
     fn ended(&mut self) {
         if let (true, Some(since)) = (self.keyed, self.since) {
             self.on_air.push_back((since, Instant::now()));
@@ -408,9 +438,15 @@ impl Shared {
             if let (Some(since), Some(end)) = (st.since, st.end) {
                 let now = Instant::now();
                 if now < since + (end - since).mul_f32(0.8) {
+                    let why = if s.charging == Charging::Yes {
+                        "it started charging over USB-C, and must not transmit while it \
+                         charges: unplug the charger"
+                    } else {
+                        "its link timeout or transmit limit?"
+                    };
                     st.fault = Some(format!(
                         "the handheld stopped sending after {:.1} s of a {:.1} s run: cut \
-                         short (its link timeout or transmit limit?)",
+                         short ({why})",
                         (now - since).as_secs_f32(),
                         (end - since).as_secs_f32()
                     ));
@@ -1012,15 +1048,18 @@ impl Rig for Handheld {
                 // Still watching its last stop: nothing keyed. Try again shortly,
                 // with the run's times from then.
                 Ok(proto::Reply::Err(code)) if code == "WAIT" && now < wait_until => {
-                    st.keyed = false;
-                    st.since = None;
-                    st.end = None;
-                    st.deadline = None;
+                    st.not_keyed();
                     drop(st);
                     log::debug!("handheld: still checking its last stop; trying again");
                     thread::sleep(Duration::from_millis(100));
                 }
                 Ok(proto::Reply::Ok(_)) => break Ok(()),
+                // Charging: refused before anything was keyed, and not tried again;
+                // nothing to stop, and no time on the air.
+                Ok(proto::Reply::Err(code)) if code == "CHARGE" => {
+                    st.not_keyed();
+                    return Err(link::refused(&cmd, &code));
+                }
                 Ok(proto::Reply::Err(code)) => break Err(link::refused(&cmd, &code)),
                 Err(e) => break Err(e),
             }

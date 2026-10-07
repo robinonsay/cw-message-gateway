@@ -199,5 +199,8 @@ extra_policy = ""
 # duty_window_secs = 300
 # busy_quiet_ms = 1000            # key only after the squelch has been closed this long
 # busy_max_wait_secs = 30         # then give up on the transmission
+# usb_power_blocked = false       # true once its USB-C cable is checked to carry no 5 V:
+#                                 # nothing keys it before (docs/handheld.md, "No 5 V on
+#                                 # the USB-C cable")
 # commissioned = "none"           # the handheld's bring-up stage, not [station]'s: none,
 #                                 # listen, keying or done (docs/handheld.md, "Bring-up")

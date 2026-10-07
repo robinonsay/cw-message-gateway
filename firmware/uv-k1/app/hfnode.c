@@ -36,6 +36,11 @@
 // time. These limits are timed by hfnode's own clock, counted from SysTick
 // (HFNODE_WatchdogTick), not by the keyer's timer (millis), so that a fault in one
 // does not stop both the keyer and its limits.
+// The radio must not transmit while it charges over USB-C (its manual), and the
+// USB-C port is hfnode's link: CW is refused while the firmware's battery reading
+// says it is charging, and a run under way is stopped. That reading cannot tell on
+// the K1 and K5 v3 (HF_CHARGE_SENSED), so the operator's cable, which must carry no
+// 5 V, is what keeps it from charging (docs/handheld.md).
 // A reset should turn the transmitter off: the patched start-up code resets the
 // BK4819 as soon as its pins are set up (board.c, BOARD_Init), before the
 // display's start-up, and BK4819_Init resets it again; how long the bootloader
@@ -61,6 +66,7 @@
 #include "driver/vcp.h"
 #include "external/printf/printf.h"
 #include "functions.h"
+#include "helper/battery.h"
 #include "misc.h"
 #include "py32f071_ll_iwdg.h"
 #include "py32f071_ll_rcc.h"
@@ -68,7 +74,7 @@
 #include "settings.h"
 #include "usbd_core.h"
 
-#define HF_VERSION            1
+#define HF_VERSION            2
 #define HF_TX_LIMIT_S         60
 #define HF_LINK_TIMEOUT_MS    2000
 // From a CW being accepted to the first key-down: the keyer starts at once, so
@@ -97,6 +103,15 @@
 // The receiver's own squelch tail after a transmission is not someone else.
 #define HF_SQUELCH_HOLDOFF_MS 300
 #define HF_NAME               "NR7Y-CW HFNODE"
+// Whether this board's battery reading can tell that the radio is charging over
+// USB-C. The K1's and K5 v3's cannot: the board code reads only the battery's
+// voltage and gives its current as 0 (board.c, BOARD_ADC_GetBatteryInfo), so
+// gChargingWithTypeC, which is set from that current (helper/battery.c), never
+// turns on. STATUS then gives the charging state as unknown, not as off. A build
+// whose board reads the charging current defines this as 1.
+#ifndef HF_CHARGE_SENSED
+#define HF_CHARGE_SENSED      0
+#endif
 #define HF_WPM_MIN            5
 #define HF_WPM_MAX            50
 #define HF_TEXT_MAX           30
@@ -228,6 +243,20 @@ static bool hf_cw_tx_on(void)
 
 // The firmware's own state only: the BK4819 is read where it matters, in STATUS and
 // in a run's end and stop checks.
+// Charging over USB-C, as the firmware's battery reading has it (helper/battery.c).
+// That reading is not taken while transmitting (app.c), so a run is seen to start
+// charging only between its transmissions, and never on a board that cannot tell
+// (HF_CHARGE_SENSED).
+static bool hf_charging(void)
+{
+    return gChargingWithTypeC;
+}
+
+static const char *hf_charge_name(void)
+{
+    return hf_charging() ? "1" : HF_CHARGE_SENSED ? "0" : "?";
+}
+
 static bool hf_busy(void)
 {
     if (s_run != RUN_NONE || hf_tx_soft() || gCW_PlaybackActive || gCW_Recording
@@ -345,6 +374,11 @@ static void hf_cw(uint8_t id, char *arg)
         hf_error(id, "CW", "BKIN");
         return;
     }
+    // Transmitting while charging is forbidden by the radio's manual.
+    if (hf_charging()) {
+        hf_error(id, "CW", "CHARGE");
+        return;
+    }
     if (s_readback_bad) {
         hf_error(id, "CW", "CHECK");
         return;
@@ -383,7 +417,8 @@ static void hf_command(uint8_t id, char *body)
     } else if (!strcmp(body, "STATUS") && !arg) {
         // Once stopped, the transmitter as it reads; the watch goes on behind it.
         const bool tx = s_run == RUN_STARTING || s_run == RUN_KEYING || hf_tx_on();
-        sprintf_(out, "OK STATUS %u %u", tx ? 1u : 0u, (unsigned)hf_quiet_ms());
+        sprintf_(out, "OK STATUS %u %u %s", tx ? 1u : 0u, (unsigned)hf_quiet_ms(),
+                 hf_charge_name());
         hf_reply(id, out);
     } else if (!strcmp(body, "FREQ") && !arg) {
         // Frequencies are kept in 10 Hz units.
@@ -477,6 +512,13 @@ static void hf_run_limits(void)
         } else if (t >= HF_STOP_WATCH_MS) {
             hf_end_run();
         }
+        return;
+    }
+    if (hf_charging()) {
+        // Started charging: stopped as a STOP would stop it.
+        if (s_run == RUN_STARTING)
+            hf_error(s_run_id, "CW", "CHARGE");
+        hf_halt();
         return;
     }
     if (gTxVfo->Modulation != MODULATION_CW) {

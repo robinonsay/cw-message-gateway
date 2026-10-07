@@ -143,6 +143,12 @@ pub struct Handheld {
     /// Give up on a transmission after waiting this long for the frequency.
     #[serde(default = "default_busy_wait")]
     pub busy_max_wait_secs: u64,
+    /// The cable or adapter on the radio's USB-C port carries no 5 V from the
+    /// computer, as checked at the radio (its blue charging light stays off with it
+    /// plugged in). The radio must not transmit while it charges, and cannot tell
+    /// that it is: nothing keys it until this is true (docs/handheld.md).
+    #[serde(default)]
+    pub usb_power_blocked: bool,
     /// The last bring-up stage passed with this handheld (docs/handheld.md,
     /// "Bring-up"). Commands that need a later stage are refused.
     #[serde(default)]
@@ -1308,6 +1314,8 @@ mod tests {
         assert_eq!(h.baud, 38_400);
         assert_eq!(h.max_duty_percent, 50);
         assert_eq!(h.commissioned, crate::handheld::Stage::None);
+        // Nothing keys it until the operator has checked the cable.
+        assert!(!h.usb_power_blocked);
         // Outside the handheld's amateur bands; HF is the IC-7300's.
         for hz in [7_030_000, 162_550_000, 148_100_000] {
             let mut c = cfg.clone();

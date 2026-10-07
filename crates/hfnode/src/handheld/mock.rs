@@ -2,11 +2,11 @@
 //! the firmware's side of docs/handheld-protocol.md (firmware/uv-k1/app/hfnode.c),
 //! including its own limits, its watch of every stop and its watchdog, and can be
 //! made to misbehave. For tests; nothing here touches a radio. Unlike the firmware,
-//! it answers `CW` at once rather than at the first key-down, and has no key-down
-//! budget.
+//! it answers `CW` at once rather than at the first key-down, has no key-down
+//! budget, and sees charging start at once rather than between transmissions.
 
 use super::link::Transport;
-use super::proto::{self, Hello};
+use super::proto::{self, Charging, Hello};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,6 +25,8 @@ pub enum Off {
     Limit,
     /// The watchdog reset the radio: its main loop stopped, or a stop failed.
     Watchdog,
+    /// The radio started charging over USB-C.
+    Charging,
 }
 
 /// After a stop, the firmware watches the transmitter this long, refusing `CW`
@@ -61,6 +63,8 @@ struct Fw {
     rx_mode: String,
     power: String,
     break_in: bool,
+    /// What the firmware reads of charging over USB-C.
+    charging: Charging,
     key: Option<Key>,
     runs: Vec<Run>,
     /// When it last started: `HELLO` reports how long ago.
@@ -208,7 +212,16 @@ impl Fw {
                 (now - self.booted).as_millis(),
                 self.hello.name
             ),
-            ("STATUS", None) => format!("OK STATUS {} {}", tx as u8, self.quiet_ms(now)),
+            ("STATUS", None) => format!(
+                "OK STATUS {} {} {}",
+                tx as u8,
+                self.quiet_ms(now),
+                match self.charging {
+                    Charging::No => "0",
+                    Charging::Yes => "1",
+                    Charging::Unknown => "?",
+                }
+            ),
             ("FREQ", None) => format!("OK FREQ {} {}", self.rx_hz, self.tx_hz),
             ("MODE", None) => format!("OK MODE {} {}", self.tx_mode, self.rx_mode),
             ("POWER", None) => format!("OK POWER {}", self.power),
@@ -231,6 +244,8 @@ impl Fw {
                     "ERR CW MODE".into()
                 } else if !self.break_in {
                     "ERR CW BKIN".into()
+                } else if self.charging == Charging::Yes {
+                    "ERR CW CHARGE".into()
                 } else if self.watch_until.is_some_and(|w| now < w) {
                     "ERR CW WAIT".into()
                 } else if tx {
@@ -273,7 +288,8 @@ pub struct MockFirmware {
 
 impl MockFirmware {
     /// Set up as the operator leaves it for the node: 144.060 MHz simplex, CW,
-    /// power LOW1, break-in on, on receive; a 60 s transmit limit, a 2 s link
+    /// power LOW1, break-in on, on receive, and unable to tell whether it is
+    /// charging, as a UV-K1 is; a 60 s transmit limit, a 2 s link
     /// timeout, and a watchdog that resets it 3 s after its main loop stops. Morse
     /// goes `time_scale` times faster than at its speed.
     pub fn new(time_scale: f32) -> Self {
@@ -293,6 +309,7 @@ impl MockFirmware {
                 rx_mode: "CW".into(),
                 power: "LOW1".into(),
                 break_in: true,
+                charging: Charging::Unknown,
                 key: None,
                 runs: Vec::new(),
                 booted: Instant::now(),
@@ -375,6 +392,16 @@ impl MockFirmware {
 
     pub fn set_break_in(&self, on: bool) {
         self.lock().break_in = on;
+    }
+
+    /// What the firmware reads of charging over USB-C. Read as charging, it stops a
+    /// keying run (not a transmission keyed by hand), as the firmware does.
+    pub fn set_charging(&self, c: Charging) {
+        let mut fw = self.lock();
+        fw.charging = c;
+        if c == Charging::Yes && fw.key.as_ref().is_some_and(|k| k.end.is_some()) {
+            fw.stop(Instant::now(), Off::Charging);
+        }
     }
 
     /// Answer `CW` with `ERR CW REFUSED`: the radio would not transmit.
@@ -540,14 +567,14 @@ mod tests {
     #[test]
     fn its_link_watchdog_and_limit_stop_keying() {
         let mut fw = MockFirmware::new(1.0);
-        fw.set_hello(1, Duration::from_secs(60), Duration::from_millis(50));
+        fw.set_hello(proto::VERSION, Duration::from_secs(60), Duration::from_millis(50));
         // (Shorter than a node accepts, to keep the test quick.)
         send(&mut fw, 2, "CW 5 PARIS PARIS");
         assert!(fw.wait_receive(Duration::from_millis(500)));
         assert_eq!(fw.runs()[0].off.unwrap().1, Off::Link);
 
         fw.set_no_link_watchdog(true);
-        fw.set_hello(1, Duration::from_millis(100), Duration::from_millis(50));
+        fw.set_hello(proto::VERSION, Duration::from_millis(100), Duration::from_millis(50));
         thread::sleep(STOP_WATCH);
         send(&mut fw, 3, "CW 5 PARIS PARIS");
         assert!(fw.wait_receive(Duration::from_millis(500)));
@@ -576,6 +603,7 @@ mod tests {
         let status = send(&mut fw, 5, "STATUS").unwrap();
         let quiet: u64 = status
             .strip_prefix("OK STATUS 0 ")
+            .and_then(|r| r.strip_suffix(" ?"))
             .unwrap()
             .parse()
             .unwrap();
@@ -611,6 +639,33 @@ mod tests {
     }
 
     #[test]
+    fn charging_shows_in_status_and_stops_a_run() {
+        let mut fw = MockFirmware::new(1.0);
+        let mut fw2 = fw.clone();
+        // STATUS's transmit and charging fields.
+        let mut status = |id| {
+            let r = send(&mut fw, id, "STATUS").unwrap();
+            let f: Vec<&str> = r.split(' ').collect();
+            assert_eq!(f.len(), 5, "{r}");
+            format!("{} {}", f[2], f[4])
+        };
+        assert_eq!(status(1), "0 ?");
+        fw2.set_charging(Charging::No);
+        assert_eq!(status(2), "0 0");
+        send(&mut fw2, 3, "CW 5 PARIS PARIS");
+        assert_eq!(status(4), "1 0");
+        fw2.set_charging(Charging::Yes);
+        assert!(!fw2.transmitting());
+        assert_eq!(fw2.runs()[0].off.unwrap().1, Off::Charging);
+        assert_eq!(status(5), "0 1");
+        // A transmission keyed by hand is the operator's.
+        fw2.set_charging(Charging::No);
+        fw2.key_by_hand();
+        fw2.set_charging(Charging::Yes);
+        assert!(fw2.transmitting());
+    }
+
+    #[test]
     fn refuses_what_the_protocol_does_not_allow() {
         let mut fw = MockFirmware::new(1.0);
         fw.set_modes("FM", "FM");
@@ -641,6 +696,14 @@ mod tests {
         assert_eq!(
             send(&mut fw, 7, "CW 20 TEST").as_deref(),
             Some("ERR CW REFUSED")
+        );
+        assert!(fw.runs().is_empty());
+        fw.set_refuse_tx(false);
+        thread::sleep(STOP_WATCH);
+        fw.set_charging(Charging::Yes);
+        assert_eq!(
+            send(&mut fw, 8, "CW 20 TEST").as_deref(),
+            Some("ERR CW CHARGE")
         );
         assert!(fw.runs().is_empty());
         // A damaged line is ignored entirely.

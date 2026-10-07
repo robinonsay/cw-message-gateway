@@ -171,11 +171,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Twice: as built (a board that cannot tell when it is charging), and as for
+      # a board that can (HF_CHARGE_SENSED in app/hfnode.c).
       - name: build and run the host test
         run: |
-          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
-             -I test/stubs -I . test/test_hfnode.c app/hfnode_line.c -o test_hfnode
-          ./test_hfnode
+          for sensed in 0 1; do
+            cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
+               -DHF_CHARGE_SENSED=$sensed \
+               -I test/stubs -I . test/test_hfnode.c app/hfnode_line.c -o test_hfnode
+            ./test_hfnode
+          done
 
   # The handheld firmware itself (firmware/uv-k1/build.sh): the NR7Y CW firmware
   # fetched at the upstream commit the patch was made for, the patch applied and
