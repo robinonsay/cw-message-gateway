@@ -60,6 +60,9 @@ bandwidth_hz = 150
 # sidetone_hz = 600               # the radio's sidetone pitch, if not audio.pitch_hz
 # min_level_dbfs = -65            # band noise quieter than this means the radio is off
                                   # or its audio cable out: nothing is keyed
+# max_duty_percent = 50           # key down at most this share of any duty_window_secs
+# duty_window_secs = 600          # (at most 50 and 600; the box keeps a budget too)
+# firmware_build = "1a2b3c4d"     # if set, only a box running this build is used
 
 [auth]
 key_file = "/etc/hfnode/node.key" # create with: hfnode keygen --out /etc/hfnode/node.key

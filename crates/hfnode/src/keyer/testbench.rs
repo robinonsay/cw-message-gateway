@@ -106,6 +106,8 @@ pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
             frequency_hz: 7_030_000,
             min_level_dbfs: -65.0,
             scale,
+            duty: 0.5,
+            duty_window: Duration::from_secs(600),
         },
     )
     .unwrap();

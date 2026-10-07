@@ -6,8 +6,10 @@
 //!
 //! The box times the Morse itself from text the node sends ([`proto`],
 //! docs/keyer-protocol.md), with limits of its own that do not depend on the node:
-//! a 1 s key-down limit that trips it, a 60 s run limit, a 2 s link timeout and a
-//! hardware watchdog ([`keyer_core`], the same code the box runs).
+//! a 1 s key-down limit that trips it, a 60 s run limit, a 2 s link timeout, a 1 s
+//! rest after every run, a duty budget, a watch on its own key pin and a hardware
+//! watchdog ([`keyer_core`], the same code the box runs). The node keeps a duty
+//! window of its own on top (`[keyer] max_duty_percent`).
 
 pub mod bench;
 pub mod link;
@@ -59,6 +61,14 @@ pub const MAX_LINK_TIMEOUT: Duration =
     Duration::from_millis(keyer_core::limits::LINK_TIMEOUT_MS as u64);
 /// How long the node waits for each reply from the box.
 pub const REPLY_TIMEOUT: Duration = Duration::from_millis(300);
+/// The shortest rest after a run the box may report, and the largest duty budget:
+/// [`keyer_core::limits::REST_MS`] and [`keyer_core::limits::DUTY_BUDGET_MS`].
+pub const MIN_REST: Duration = Duration::from_millis(keyer_core::limits::REST_MS as u64);
+pub const MAX_DUTY_BUDGET: Duration =
+    Duration::from_millis(keyer_core::limits::DUTY_BUDGET_MS as u64);
+/// `[keyer] max_duty_percent` and `duty_window_secs` may be no looser than these.
+pub const MAX_DUTY_PERCENT: u32 = 50;
+pub const MAX_DUTY_WINDOW_SECS: u64 = 600;
 
 /// Bring-up stages for the keyer box (docs/keyer.md, "Bring-up"): `[keyer]
 /// commissioned` names the last one passed.
@@ -189,6 +199,25 @@ pub fn validate(cfg: &Config) -> Result<()> {
     if !(-90.0..=-20.0).contains(&k.min_level_dbfs) {
         bail!("keyer.min_level_dbfs must be -90 to -20");
     }
+    if !(10..=MAX_DUTY_PERCENT).contains(&k.max_duty_percent) {
+        bail!("keyer.max_duty_percent must be 10-{MAX_DUTY_PERCENT}");
+    }
+    if !(60..=MAX_DUTY_WINDOW_SECS).contains(&k.duty_window_secs) {
+        bail!("keyer.duty_window_secs must be 60-{MAX_DUTY_WINDOW_SECS}");
+    }
+    // Every piece must fit the window, counted at its whole length.
+    let allows = k.duty_window_secs * u64::from(k.max_duty_percent) / 100;
+    if allows < MAX_RUN_LIMIT.as_secs() {
+        bail!(
+            "keyer.max_duty_percent of keyer.duty_window_secs allows {allows} s keyed: it              must allow at least the box's run limit, {} s",
+            MAX_RUN_LIMIT.as_secs()
+        );
+    }
+    if let Some(b) = &k.firmware_build {
+        if b.is_empty() || b.len() > 12 || b.contains(char::is_whitespace) {
+            bail!("keyer.firmware_build must be the build `hfnode keyer check` reports");
+        }
+    }
     Ok(())
 }
 
@@ -198,14 +227,36 @@ pub fn is_keyer_box(usb_product: &str) -> bool {
     usb_product.trim() == keyer_core::NAME
 }
 
-/// Whether the node can work with the box that sent `h`: this protocol version,
-/// and limits of its own no looser than the box's ([`keyer_core::limits`]).
+/// Whether the node can work with the box that sent `h`: the keyer box (its
+/// name), this protocol version, and limits of its own no looser than the box's
+/// ([`keyer_core::limits`]).
 pub fn check_hello(h: &Hello) -> Result<()> {
+    if h.name != keyer_core::NAME {
+        bail!(
+            "the device answering is {:?}, not the keyer box {}",
+            h.name,
+            keyer_core::NAME
+        );
+    }
     if h.version != keyer_core::VERSION {
         bail!(
-            "the box speaks version {} of the keyer protocol; hfnode speaks {}",
+            "the box speaks version {} of the keyer protocol; hfnode speaks {}: flash it              with this hfnode's firmware",
             h.version,
             keyer_core::VERSION
+        );
+    }
+    if h.rest < MIN_REST {
+        bail!(
+            "the box's rest after a run is {} ms; it must be at least {} ms",
+            h.rest.as_millis(),
+            MIN_REST.as_millis()
+        );
+    }
+    if h.duty_budget.is_zero() || h.duty_budget > MAX_DUTY_BUDGET {
+        bail!(
+            "the box's duty budget is {} s; it must be 1-{} s",
+            h.duty_budget.as_secs(),
+            MAX_DUTY_BUDGET.as_secs()
         );
     }
     if h.run_limit.is_zero() || h.run_limit > MAX_RUN_LIMIT {
@@ -231,6 +282,17 @@ pub fn check_hello(h: &Hello) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// With `[keyer] firmware_build` set, whether the box runs that build.
+pub fn check_build(h: &Hello, want: Option<&str>) -> Result<()> {
+    match want {
+        Some(b) if h.build != b => bail!(
+            "the box runs firmware build {:?}, not keyer.firmware_build {b:?}: flash the              checked UF2, or set keyer.firmware_build to the build you checked",
+            h.build
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

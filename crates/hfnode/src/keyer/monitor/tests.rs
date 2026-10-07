@@ -34,6 +34,8 @@ struct Radio {
     floor: f32,
     /// A carrier at the pitch on receive: (from, to, amplitude).
     carrier: Option<(f64, f64, f32)>,
+    /// Stretches the sound card lost: only the floor arrives.
+    dropouts: Vec<(f64, f64)>,
     /// The field station's CW at the pitch on receive: key-down stretches.
     field: Vec<(f64, f64)>,
     off: bool,
@@ -52,6 +54,7 @@ impl Default for Radio {
             noise: 0.02,
             floor: 0.0002,
             carrier: None,
+            dropouts: Vec::new(),
             field: Vec::new(),
             off: false,
         }
@@ -94,7 +97,7 @@ impl Radio {
     fn sample(&self, t: f64, rng: &mut cw::synth::Noise) -> f32 {
         let mut one = [0.0f32];
         let w = 2.0 * std::f64::consts::PI * f64::from(PITCH) * t;
-        if self.off {
+        if self.off || inside(&self.dropouts, t) {
             rng.add(&mut one, self.floor);
             return one[0];
         }
@@ -306,6 +309,26 @@ fn a_key_stuck_during_the_run_is_caught_after_it() {
     assert!(why.contains("after the box opened its key"), "{why}");
     // However late the audio stops.
     assert!(matches!(c.m.key_state(), KeyState::Held(_)));
+}
+
+#[test]
+fn a_dropout_in_the_audio_does_not_clear_a_stuck_key() {
+    // The key is closed at the radio from the ninth element on, and the sound card
+    // loses a fifth of a second of audio shortly after the run: that silence looks
+    // like the key opening, but the sidetone comes back, so the key is still held.
+    let mut c = case(
+        "DE N0CALL K",
+        |r| {
+            let end = r.box_downs.last().unwrap().1;
+            r.stuck_from = Some(r.box_downs[8].0);
+            r.dropouts = vec![(end + 0.3, end + 0.5)];
+        },
+        4.0,
+    );
+    let KeyState::Held(why) = c.state() else {
+        panic!("not held: {:?}", c.state())
+    };
+    assert!(why.contains("after the box opened its key"), "{why}");
 }
 
 #[test]

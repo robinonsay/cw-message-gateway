@@ -34,6 +34,71 @@ fn a_run_longer_than_the_link_timeout_is_kept_alive() {
 }
 
 #[test]
+fn the_link_test_sees_the_box_open_its_key_on_its_own() {
+    // The one check that the node dying, or its cable coming out, leaves the radio
+    // on receive: the node keys a run and then says nothing (the safety audit's
+    // KB-11).
+    let b = bench(|_| {});
+    let rig = b.station.rig();
+    let waited = lock(&rig).link_test("TTTT TTTT TTTT TTTT").unwrap();
+    assert!(waited >= radio_secs(2.0), "{waited:?}");
+    let st = b.keyer_box.now();
+    assert_eq!(st.ended(), Ended::Link);
+    // Its key opened on its own: nothing told it to stop after the run began.
+    let stops = st
+        .lines
+        .iter()
+        .skip_while(|l| !l.contains(" CW "))
+        .filter(|l| l.contains(" STOP"))
+        .count();
+    assert_eq!(stops, 0, "{:?}", st.lines);
+    drop(st);
+    // And the run's keying still counts against the duty window.
+    assert!(lock(&rig).rest_needed(Duration::from_secs(1)).unwrap() > Duration::ZERO);
+}
+
+#[test]
+fn the_link_test_fails_on_a_box_that_keeps_keying() {
+    // A box whose link timeout never fires: the node must say so, not pass.
+    let b = bench(|_| {});
+    b.keyer_box.now().deaf_to_silence = true;
+    let rig = b.station.rig();
+    let e = lock(&rig)
+        .link_test("TTTT TTTT TTTT TTTT")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("link timeout did not open the key"), "{e}");
+}
+
+#[test]
+fn a_run_still_keying_past_its_end_is_stopped_once() {
+    // The box keys at half the speed it was asked (a wrong clock), so it is still
+    // sending when the node's run is over. The keep-alive must stop it once and
+    // fail the transmission, not keep answering STATUS for ever: with that arm
+    // removed, every other test still passed (the safety audit's KB-10).
+    let mut b = bench(|_| {});
+    b.keyer_box.now().slow_wpm = Some(10);
+    let e = b.station.transmit(&tx(&["PARIS PARIS"])).unwrap_err();
+    assert_ne!(e, TxError::Inhibited, "{e}");
+    // The keep-alive's STOP went out while the box was still keying, and the box
+    // read the run as stopped: without it, STATUS would have kept the run alive
+    // until the station's own stuck-key handling, long past its end.
+    let st = b.keyer_box.now();
+    let after_cw: Vec<&String> = st
+        .lines
+        .iter()
+        .skip_while(|l| !l.contains(" CW "))
+        .collect();
+    let first_stop = after_cw
+        .iter()
+        .position(|l| l.contains(" STOP"))
+        .unwrap_or_else(|| panic!("no STOP: {after_cw:?}"));
+    // Before the station's own forced receive, which sends its own STOPs.
+    assert!(first_stop < after_cw.len() - 1, "{after_cw:?}");
+    assert_eq!(st.ended(), Ended::Stop);
+}
+
+#[test]
 fn a_radio_not_heard_keying_locks_out_until_the_next_window() {
     let mut b = bench(|r| r.cable_out = true);
     assert_eq!(
@@ -250,6 +315,89 @@ fn a_key_closed_at_the_radio_just_before_a_piece_inhibits() {
     );
     let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
     assert!(why.contains("after the box opened its key"), "{why}");
+}
+
+#[test]
+fn a_hold_at_the_radio_that_clears_by_itself_still_inhibits() {
+    // The key stays closed at the radio when the box opens its own, and lets go a
+    // few seconds later: soon enough that the station would see receive by its own
+    // deadline and count the transmission done. The radio keyed on its own, so the
+    // node must stop for good and say why (the safety audit's KB-2(i), which found
+    // 2 s and 4 s holds passing as Ok(())).
+    for hold in [2.0, 4.0] {
+        let mut b = bench(|_| {});
+        let kb = b.keyer_box.clone();
+        let radio = &b.radio;
+        let station = &mut b.station;
+        let sent = thread::scope(|sc| {
+            // The hold starts the moment the box's run is over, so the run itself is
+            // keyed and heard as it should be.
+            sc.spawn(move || {
+                let deadline = Instant::now() + radio_secs(30.0);
+                while Instant::now() < deadline {
+                    if kb.now().ended() == Ended::Done {
+                        let at = kb.clock.secs();
+                        radio.set(|r| {
+                            r.stuck_from = Some(at);
+                            r.stuck_until = Some(at + hold);
+                        });
+                        return;
+                    }
+                    thread::sleep(radio_secs(0.02));
+                }
+                panic!("the box never finished a run");
+            });
+            station.transmit(&tx(&["DE N0DE K"]))
+        });
+        assert_eq!(sent, Err(TxError::Inhibited), "a {hold} s hold");
+        assert!(b.station.tx_inhibited(), "a {hold} s hold");
+        let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+        assert!(
+            why.contains("key is closed at the radio"),
+            "{why}: a {hold} s hold"
+        );
+    }
+}
+
+#[test]
+fn a_key_held_at_the_radio_is_never_forgotten() {
+    // The key stays closed at the radio when the box opens its own, then lets go.
+    // Before, the rig called that "still transmitting" and went on keying once the
+    // audio came back (the safety audit's KB-2(i)); now the radio has keyed on its
+    // own once, which is enough to stop for good.
+    let b = bench(|_| {});
+    let rig = b.station.rig();
+    let mut r = lock(&rig);
+    r.send_cw("DE N0DE K").unwrap();
+    let deadline = Instant::now() + radio_secs(30.0);
+    while b.keyer_box.now().ended() != Ended::Done {
+        assert!(Instant::now() < deadline, "the box never finished the run");
+        thread::sleep(radio_secs(0.02));
+    }
+    let at = b.keyer_box.clock.secs();
+    b.radio.set(|s| {
+        s.stuck_from = Some(at);
+        s.stuck_until = Some(at + 2.0);
+    });
+    // The audio shows the radio's key held, with the box's open ...
+    let why = loop {
+        match r.is_transmitting() {
+            Err(e) => break e.to_string(),
+            Ok(_) => {
+                assert!(Instant::now() < deadline, "the held key was never seen");
+                thread::sleep(radio_secs(0.1));
+            }
+        }
+    };
+    assert!(why.contains("key is closed at the radio"), "{why}");
+    // ... and it stays refused after the key lets go.
+    thread::sleep(radio_secs(4.0));
+    let e = r.is_transmitting().unwrap_err().to_string();
+    assert!(e.contains("key is closed at the radio"), "{e}");
+    assert!(r.held_key().is_some());
+    assert!(r.refusal().is_some());
+    assert!(r.send_cw("DE N0DE K").is_err());
+    assert_eq!(b.cw_lines(), 1);
 }
 
 #[test]

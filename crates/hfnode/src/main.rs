@@ -10,7 +10,7 @@ use hfnode::handheld::{self, Handheld};
 use hfnode::inbox::Inbox;
 use hfnode::keyer;
 use hfnode::session::{Outcome, Services};
-use hfnode::station::{Station, StationConfig};
+use hfnode::station::{InhibitLatch, Station, StationConfig};
 use hfnode::storm::StormHold;
 use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
@@ -312,6 +312,9 @@ enum KeyerCmd {
     /// Identify, then make the box hold its key down: its 1 s limit must open the
     /// key and trip it (unplug it and plug it in again afterwards).
     Stucktest,
+    /// Key a long message and then stop talking to the box: its link timeout must
+    /// open the key by itself, as it would if the node died or the cable came out.
+    Linktest,
 }
 
 #[derive(Subcommand)]
@@ -426,12 +429,14 @@ fn main() -> Result<()> {
 type DynRig = dyn civ::Rig + 'static;
 type Radio = Arc<Mutex<DynRig>>;
 
-/// The radio, once a command has passed the preflight and may write to it.
-static RADIO: Mutex<Option<Radio>> = Mutex::new(None);
+/// The radio, once a command has passed the preflight and may write to it, with the
+/// inhibit a failed stop latches.
+static RADIO: Mutex<Option<(Radio, InhibitLatch)>> = Mutex::new(None);
 
-/// From here on a stop signal puts `radio` back on receive before the program exits.
-fn guard_radio(radio: Radio) {
-    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some(radio);
+/// From here on a stop signal puts `radio` back on receive before the program exits,
+/// and latches `inhibit` if it cannot.
+fn guard_radio(radio: Radio, inhibit: InhibitLatch) {
+    *RADIO.lock().unwrap_or_else(|e| e.into_inner()) = Some((radio, inhibit));
 }
 
 /// Ctrl-C, or a stop from systemd or launchd (SIGINT, SIGTERM, SIGHUP, or on Windows
@@ -442,21 +447,29 @@ fn guard_radio(radio: Radio) {
 /// receive is not confirmed, and 130 if no radio was in use (interrupted, as without
 /// this handler).
 fn on_stop_signal() {
-    let radio = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(radio) = radio else {
+    let guarded = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some((radio, inhibit)) = guarded else {
         std::process::exit(130);
     };
-    let (_held, code) = stop_radio(&radio);
+    let (_held, code) = stop_radio(&radio, &inhibit);
     std::process::exit(code);
 }
 
 /// Take the radio, stop the keyer and confirm receive. The radio may first finish
 /// the text already in its keyer (at most 30 characters). Returns the radio, still
 /// held, and the exit code.
-fn stop_radio(radio: &Mutex<DynRig>) -> (MutexGuard<'_, DynRig>, i32) {
+///
+/// A stop that cannot confirm receive latches the transmit inhibit, so that the node
+/// transmits nothing after a restart until someone has looked at the radio: the
+/// process exiting here is the one thing that cannot be taken back (the safety
+/// audit's KB-2(iii) for the keyer box, K5 for the IC-7300).
+fn stop_radio<'a>(
+    radio: &'a Mutex<DynRig>,
+    inhibit: &InhibitLatch,
+) -> (MutexGuard<'a, DynRig>, i32) {
     log::warn!("stop requested: stopping the keyer and forcing receive");
     let mut rig = radio.lock().unwrap_or_else(|e| e.into_inner());
-    let code = match hfnode::station::force_receive(&mut *rig) {
+    let code = match hfnode::station::force_receive_or_latch(&mut *rig, inhibit) {
         Ok(()) => {
             log::info!("radio confirmed on receive; exiting");
             0
@@ -929,7 +942,11 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         }
         RadioCmd::Rx => {
             let mut rig = open_radio(cfg)?;
-            hfnode::station::force_receive(&mut rig).context("radio not confirmed on receive")?;
+            // A radio this command cannot bring back to receive must stop the node
+            // too, until someone has looked at it (the audit's K5).
+            let inhibit = InhibitLatch::in_dir(&cfg.state_dir);
+            hfnode::station::force_receive_or_latch(&mut rig, &inhibit)
+                .context("radio not confirmed on receive")?;
             println!("receive (confirmed)");
         }
         RadioCmd::Setup | RadioCmd::Tune | RadioCmd::Cw { .. } => {
@@ -947,7 +964,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 StationConfig::from_config(&cfg.station),
                 Some(cfg.state_dir.join("health.csv")),
             );
-            guard_radio(st.rig());
+            guard_radio(st.rig(), st.inhibit_latch());
             st.configure()?;
             verify_setup(cfg, &st)?;
             println!(
@@ -1164,7 +1181,7 @@ fn serve<R: civ::Rig + 'static>(
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
-    guard_radio(station.rig());
+    guard_radio(station.rig(), station.inhibit_latch());
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -1230,7 +1247,10 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             let (_cap, monitor) = bench::start_listening(cfg)?;
             let mut rig = bench::open_rig(cfg, monitor)?;
             if matches!(action, KeyerCmd::Rx) {
-                hfnode::station::force_receive(&mut rig)
+                // A key this command cannot confirm open stops the node too, until
+                // someone has looked at the radio (the audit's KB-2(iii)).
+                let inhibit = InhibitLatch::in_dir(&cfg.state_dir);
+                hfnode::station::force_receive_or_latch(&mut rig, &inhibit)
                     .context("the radio's key is not confirmed open")?;
                 // The box's key is open; the radio's, as far as its audio shows.
                 let band = bench::wait_for_band(&rig.monitor(), Duration::from_secs(5));
@@ -1258,7 +1278,11 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             println!("all ok; nothing was keyed");
             Ok(())
         }
-        KeyerCmd::Key { .. } | KeyerCmd::Sidetone | KeyerCmd::Hangtest | KeyerCmd::Stucktest => {
+        KeyerCmd::Key { .. }
+        | KeyerCmd::Sidetone
+        | KeyerCmd::Hangtest
+        | KeyerCmd::Stucktest
+        | KeyerCmd::Linktest => {
             let needs = match action {
                 KeyerCmd::Key { .. } | KeyerCmd::Sidetone => keyer::Action::Key,
                 _ => keyer::Action::Test,
@@ -1270,11 +1294,24 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             let sc = StationConfig::from_config(&cfg.station);
             let id = sc.station_id.clone();
             let mut st = Station::new(rig, sc, Some(cfg.state_dir.join("health.csv")));
-            guard_radio(st.rig());
+            guard_radio(st.rig(), st.inhibit_latch());
             st.configure()?;
             match action {
                 KeyerCmd::Key { text } => {
-                    match bench::key(&mut st, &sanitize(&text))? {
+                    let text = sanitize(&text);
+                    // Until both box tests have passed, one piece at a time: a long
+                    // text is many minutes of keying on an untested box (the safety
+                    // audit's KB-4).
+                    if k.commissioned < keyer::Stage::Done
+                        && text.chars().count() > keyer_core::MAX_TEXT
+                    {
+                        bail!(
+                            "{} characters: until keyer.commissioned is `done`, `keyer key` sends                              one piece of at most {} characters at a time",
+                            text.chars().count(),
+                            keyer_core::MAX_TEXT
+                        );
+                    }
+                    match bench::key(&mut st, &text)? {
                         Some(j) => println!("sent: {j}"),
                         None => println!("sent"),
                     }
@@ -1287,9 +1324,32 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                     if !ok {
                         bail!("sidetone check failed");
                     }
+                    // Kept for later runs: the level a tone must come near to be
+                    // this radio's sidetone and not the band.
+                    bench::save_sidetone(&cfg.state_dir, rep.judge.tone_db)?;
+                    println!(
+                        "sidetone level kept in state_dir/{}: a tone at the pitch within 10 dB of                          it counts as the key held at the radio",
+                        bench::SIDETONE_FILE
+                    );
+                    Ok(())
+                }
+                KeyerCmd::Linktest => {
+                    let rig = st.rig();
+                    let waited = rig
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .link_test("TTTT TTTT TTTT TTTT")?;
+                    println!(
+                        "passed: the box opened its key by itself within {:.1} s of the node's                          last line, and reports the run ended by the link going quiet",
+                        waited.as_secs_f32()
+                    );
+                    // The test text carries no call.
+                    bench::key(&mut st, &id)?;
+                    println!("identified: {id}");
                     Ok(())
                 }
                 _ => {
+                    println!("{}", bench::MANUAL_STOP);
                     let rep = if matches!(action, KeyerCmd::Hangtest) {
                         bench::hangtest(&mut st, &id, 1.0)?
                     } else {
@@ -1436,7 +1496,7 @@ fn handheld_station(cfg: &Config, rig: Handheld) -> Result<Station<Handheld>> {
         StationConfig::from_config(&cfg.station),
         Some(cfg.state_dir.join("health.csv")),
     );
-    guard_radio(st.rig());
+    guard_radio(st.rig(), st.inhibit_latch());
     st.configure()
         .context("the handheld is not set up as configured (`hfnode handheld check`)")?;
     st.check()
@@ -1812,21 +1872,91 @@ mod tests {
         sim
     }
 
-    #[test]
-    fn a_stop_signal_puts_the_radio_on_receive() {
-        let radio: Radio = Arc::new(Mutex::new(keying()));
-        let (held, code) = stop_radio(&radio);
-        assert_eq!(code, 0);
-        drop(held);
-        assert!(!radio.lock().unwrap().is_transmitting().unwrap());
+    /// A configuration for the keyer box on a port that does not exist, with the
+    /// bring-up stage at `commissioned`.
+    fn keyer_cfg(dir: &Path, commissioned: &str) -> Config {
+        let path = dir.join("hfnode.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+state_dir = "{}"
+[station]
+node_call = "N0DE"
+field_calls = ["N0CALL"]
+frequency_hz = 7030000
+key_speed_wpm = 20
+max_key_seconds = 60
+rig = "keyer"
+serial_port = "/dev/does-not-exist"
+[audio]
+device = "default"
+[keyer]
+commissioned = "{commissioned}"
+[auth]
+key_file = "{}"
+"#,
+                dir.join("state").display(),
+                dir.join("key").display(),
+            ),
+        )
+        .unwrap();
+        Config::load(&path).unwrap()
     }
 
     #[test]
-    fn a_stop_signal_reports_a_radio_stuck_on_transmit() {
+    fn a_keying_command_is_refused_before_the_port_is_opened() {
+        // Opening the port pulses DTR on Linux, which keys some radios: a command
+        // the bring-up stage does not allow must stop before that, not after
+        // (the safety audit's KB-10). A port that does not exist tells the two
+        // apart: the error is the stage's, not the port's.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = keyer_cfg(dir.path(), "none");
+        let e = match open_keyer(&cfg, Some(keyer::Action::Key)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("the port does not exist"),
+        };
+        assert!(e.contains("needs bring-up stage `listen`"), "{e}");
+        // With the stage passed it gets as far as the port, and fails there.
+        let cfg = keyer_cfg(dir.path(), "done");
+        let e = match open_keyer(&cfg, Some(keyer::Action::Key)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("the port does not exist"),
+        };
+        assert!(!e.contains("bring-up stage"), "{e}");
+    }
+
+    #[test]
+    fn a_stop_signal_puts_the_radio_on_receive() {
+        let dir = tempfile::tempdir().unwrap();
+        let inhibit = InhibitLatch::in_dir(dir.path());
+        let radio: Radio = Arc::new(Mutex::new(keying()));
+        let (held, code) = stop_radio(&radio, &inhibit);
+        assert_eq!(code, 0);
+        drop(held);
+        assert!(!radio.lock().unwrap().is_transmitting().unwrap());
+        // Nothing to stop the node starting again.
+        assert!(!inhibit.is_set());
+        assert!(!dir.path().join(hfnode::station::INHIBIT_FILE).exists());
+    }
+
+    #[test]
+    fn a_stop_that_cannot_confirm_receive_inhibits_transmitting() {
+        // The process is about to exit with the radio possibly still keying: the
+        // only way to stop it keying again at the next start is the inhibit file
+        // (the safety audit's KB-2(iii) for the keyer box, K5 for the IC-7300).
+        let dir = tempfile::tempdir().unwrap();
+        let inhibit = InhibitLatch::in_dir(dir.path());
         let mut sim = keying();
         sim.tx_jammed = true;
         let radio: Radio = Arc::new(Mutex::new(sim));
-        assert_eq!(stop_radio(&radio).1, 1);
+        assert_eq!(stop_radio(&radio, &inhibit).1, 1);
+        assert!(inhibit.is_set());
+        let file = dir.path().join(hfnode::station::INHIBIT_FILE);
+        let why = std::fs::read_to_string(&file).expect("inhibit file written");
+        assert!(why.contains("not confirmed on receive"), "{why}");
+        // A node starting in that state transmits nothing.
+        assert!(InhibitLatch::in_dir(dir.path()).is_set());
     }
 
     #[test]

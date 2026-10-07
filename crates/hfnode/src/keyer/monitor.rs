@@ -10,10 +10,16 @@
 //!   audio delay fits best (up to [`MAX_LAG`]), loud in the elements and quiet in
 //!   the gaps. That shows the key cable, the radio's key setting, its sidetone and
 //!   the audio are all working, which is also what the stuck-key checks need.
-//! - [`Monitor::stuck`]: whether the radio's key is down when the box's is not.
+//! - [`Monitor::key_state`]: whether the radio's key is down when the box's is not.
 //!   Either the sidetone carried on, without a break, after the box opened its key
-//!   (a shorted optocoupler or cable), or a steady tone at the pitch has gone on for
-//!   [`STEADY_TONE`], far longer than anyone tunes up on the frequency.
+//!   (a shorted optocoupler or cable); or the tone came back within
+//!   [`CARRIER_AFTER_RUN`] of the box opening it, before the key was ever seen open
+//!   (so a dropout in the audio does not clear a held key, while a station tuning up
+//!   after the node's over does not read as one); or a steady tone at the pitch has
+//!   gone on for [`STEADY_TONE`], far longer than anyone tunes up on the frequency. A run counts as over only once it has been judged: until then
+//!   its key counts as open only once the tone drops under both the band's level
+//!   plus 10 dB and the last sidetone heard (or measured by `hfnode keyer sidetone`)
+//!   less 10 dB, so that a quiet sidetone held on is not taken for the band.
 //! - [`Monitor::band`]: whether audio is arriving, whether the band noise is loud
 //!   enough (`[keyer] min_level_dbfs`) that the node would hear its own sidetone and
 //!   the field station, and whether a steady tone sits at the pitch right now (a
@@ -94,6 +100,10 @@ const OVER_MIN_LEVEL_DB: f32 = 10.0;
 /// Over the band's level when the run started: the sidetone, if the run gave no
 /// level.
 const OVER_RECEIVE_DB: f32 = 10.0;
+/// A steady tone at the pitch heard within this long after the box opened its key
+/// is the radio's key held, whatever came between.
+pub const CARRIER_AFTER_RUN: Duration = Duration::from_secs(10);
+const CARRIER_AFTER_RUN_S: f64 = 10.0;
 /// Audio is arriving if a block came within this (wall-clock) time.
 pub const AUDIO_FRESH: Duration = Duration::from_secs(1);
 /// The band's level is measured over this much receive audio.
@@ -280,6 +290,9 @@ pub struct Monitor {
     next_id: u64,
     /// The sidetone level of the last run heard.
     sidetone_db: Option<f32>,
+    /// The sidetone level `hfnode keyer sidetone` measured and stored, for until a
+    /// run is heard here.
+    known_sidetone_db: Option<f32>,
     /// The last receive level measured, and when (wall clock).
     level: Option<(Instant, f32)>,
     /// Bring-up: raw audio kept from the sample with this index on.
@@ -309,6 +322,7 @@ impl Monitor {
             runs: VecDeque::new(),
             next_id: 1,
             sidetone_db: None,
+            known_sidetone_db: None,
             level: None,
             raw: None,
         }
@@ -506,12 +520,125 @@ impl Monitor {
         Some(j)
     }
 
+    /// The sidetone level `hfnode keyer sidetone` measured, kept in the state
+    /// directory: what a key held at the radio sounds like before any run is heard.
+    pub fn set_known_sidetone(&mut self, db: f32) {
+        self.known_sidetone_db = Some(db);
+    }
+
+    /// The sidetone as last heard, or as measured by `hfnode keyer sidetone`.
+    fn sidetone_ref(&self) -> Option<f32> {
+        self.sidetone_db.or(self.known_sidetone_db)
+    }
+
+    /// The level a tone at the pitch must reach to be the sidetone.
+    fn tone_floor(&self) -> f32 {
+        match self.sidetone_ref() {
+            Some(db) => db - BELOW_SIDETONE_DB,
+            None => self.s.min_level_dbfs + OVER_MIN_LEVEL_DB,
+        }
+    }
+
     /// What the audio says about the radio's key, while the box's is open.
     pub fn key_state(&mut self) -> KeyState {
         match self.after_run() {
-            KeyState::Open => self.steady_tone().map_or(KeyState::Open, KeyState::Held),
+            KeyState::Open => self
+                .carrier_after_run()
+                .or_else(|| self.steady_tone())
+                .map_or(KeyState::Open, KeyState::Held),
             other => other,
         }
+    }
+
+    /// The audio delay after `run`, and the level under which a tone at the pitch
+    /// counts as the radio's key open.
+    ///
+    /// Before the run was judged, or if it was not heard, the delay is not known:
+    /// the longest there may be; and the key counts as open only once the tone at
+    /// the pitch drops near the band's level from before the run, and under the
+    /// sidetone last heard less [`BELOW_SIDETONE_DB`], so that a quiet sidetone,
+    /// near the band's level, is not taken for it. Not the audio just before the
+    /// run: if the key was already closed at the radio, that is the sidetone itself.
+    fn release_level(&self, run: &Run) -> (f64, f32) {
+        match &run.judge {
+            Some(j) if j.heard => (j.lag.as_secs_f64(), (j.tone_db + j.gap_db) / 2.0),
+            _ => {
+                let band = run
+                    .band_db
+                    .or_else(|| median_before(&self.slices, run.start))
+                    .unwrap_or(self.s.min_level_dbfs)
+                    + OVER_RECEIVE_DB;
+                let sidetone_floor = self.sidetone_ref().map(|db| db - BELOW_SIDETONE_DB);
+                (MAX_LAG_S, sidetone_floor.map_or(band, |f| band.min(f)))
+            }
+        }
+    }
+
+    /// A steady tone at the pitch for a second, heard within
+    /// [`CARRIER_AFTER_RUN`] of the box opening its key after the last run, with the
+    /// key never seen open in between.
+    ///
+    /// [`Self::after_run`] takes a break of [`RELEASE_S`] for the key opening, which
+    /// a dropout in the audio also looks like; this catches the tone coming back
+    /// after such a break. A break as long as [`STUCK_AFTER_RUN`], on the other
+    /// hand, is the key open for certain: tones after that are other stations on the
+    /// frequency, not this radio.
+    fn carrier_after_run(&self) -> Option<String> {
+        let run = self.runs.back()?;
+        let (lag, open_under) = self.release_level(run);
+        let from = run.start + run.open_at() + lag + EDGE_S;
+        let to = from + CARRIER_AFTER_RUN_S + CARRIER_S;
+        let floor = (self.s.min_level_dbfs + OVER_MIN_LEVEL_DB).min(self.tone_floor());
+        // When the key was first open for certain: the tone quiet for
+        // [`STUCK_AFTER_RUN`]. Counted from the earliest the box's key opening could
+        // show in the audio, whatever the delay, because while the key is closed at
+        // the radio its sidetone is there: a stretch that long with no tone is the
+        // key open, and a tone after it is another station.
+        let confirm = (STUCK_AFTER_RUN_S / SLICE_S).round() as usize;
+        let mut quiet = 0usize;
+        let open_at = self
+            .slices
+            .iter()
+            .filter(|s| s.t >= run.start + run.open_at() + EDGE_S && s.t < to)
+            .find_map(|s| {
+                quiet = if s.tone_db < open_under { quiet + 1 } else { 0 };
+                (quiet >= confirm).then_some(s.t)
+            });
+        let mut prev: Option<f32> = None;
+        let steady: Vec<(f64, bool)> = self
+            .slices
+            .iter()
+            .filter(|s| s.t >= from && s.t < to)
+            .map(|s| {
+                let holds = prev.is_none_or(|p| (s.tone_db - p).abs() <= STEADY_STEP_DB);
+                prev = Some(s.tone_db);
+                (s.t, holds && s.purity >= MIN_PURITY && s.tone_db >= floor)
+            })
+            .collect();
+        // Each second of audio in turn.
+        let w = (CARRIER_S / SLICE_S).round() as usize;
+        if steady.len() < w {
+            return None;
+        }
+        let need = (CARRIER_SHARE * w as f32).ceil() as usize;
+        let mut count = steady[..w].iter().filter(|&&(_, b)| b).count();
+        for i in 0..=steady.len() - w {
+            if i > 0 {
+                count = count + usize::from(steady[i + w - 1].1) - usize::from(steady[i - 1].1);
+            }
+            let end = steady[i + w - 1].0;
+            if open_at.is_some_and(|o| o <= end) {
+                return None;
+            }
+            if count >= need {
+                return Some(format!(
+                    "a steady tone at the sidetone pitch {:.1} s after the box opened its key: \
+                     the key is closed at the radio (a shorted optocoupler or key cable?)",
+                    end - from
+                ));
+            }
+        }
+        None
     }
 
     /// After the last run: the sidetone went on, unbroken, after the box opened its
@@ -525,21 +652,10 @@ impl Monitor {
             return KeyState::Open;
         }
         let open = run.start + run.open_at();
-        // Before the run was judged, or if it was not heard, the delay is not
-        // known: the longest there may be; and the key counts as open only once the
-        // tone at the pitch drops near the band's level from before the run. Not
-        // the audio just before the run: if the key was already closed at the
-        // radio, that is the sidetone itself.
-        let (lag, threshold) = match &run.judge {
-            Some(j) if j.heard => (j.lag.as_secs_f64(), (j.tone_db + j.gap_db) / 2.0),
-            _ => (
-                MAX_LAG_S,
-                run.band_db
-                    .or_else(|| median_before(&self.slices, run.start))
-                    .unwrap_or(self.s.min_level_dbfs)
-                    + OVER_RECEIVE_DB,
-            ),
-        };
+        let (lag, threshold) = self.release_level(run);
+        // Only a judged run is ever done with: until then the threshold and the
+        // delay are guesses, and the next look starts again.
+        let judged = run.judge.is_some();
         let from = open + lag + EDGE_S;
         // A break as long as RELEASE_S anywhere since: the key did open.
         let need = (RELEASE_S / SLICE_S).round() as usize;
@@ -549,7 +665,7 @@ impl Monitor {
             if s.tone_db < threshold {
                 quiet += 1;
                 if quiet >= need {
-                    self.runs[idx].released = true;
+                    self.runs[idx].released = judged;
                     return KeyState::Open;
                 }
             } else {
@@ -569,7 +685,7 @@ impl Monitor {
                  key is closed at the radio (a shorted optocoupler or key cable?)"
             ))
         } else {
-            self.runs[idx].released = true;
+            self.runs[idx].released = judged;
             KeyState::Open
         }
     }
@@ -582,10 +698,7 @@ impl Monitor {
         if first.t > from + SLICE_S {
             return None;
         }
-        let floor = match self.sidetone_db {
-            Some(db) => db - BELOW_SIDETONE_DB,
-            None => self.s.min_level_dbfs + OVER_MIN_LEVEL_DB,
-        };
+        let floor = self.tone_floor();
         let (n, toned) = self.steady_count(from, floor);
         (n > 0 && toned as f32 >= STEADY_SHARE * n as f32).then(|| {
             format!(
@@ -733,10 +846,7 @@ impl Monitor {
     /// less 10 dB) since `from`: how long a key stayed closed at the radio.
     pub fn longest_tone(&self, from: Instant) -> Duration {
         let from = self.radio(from);
-        let floor = match self.sidetone_db {
-            Some(db) => db - BELOW_SIDETONE_DB,
-            None => self.s.min_level_dbfs + OVER_MIN_LEVEL_DB,
-        };
+        let floor = self.tone_floor();
         let (mut run, mut longest) = (0usize, 0usize);
         for s in self.slices.iter().filter(|s| s.t >= from) {
             if s.tone_db >= floor {

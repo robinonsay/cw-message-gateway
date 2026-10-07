@@ -123,7 +123,10 @@ jobs:
 
   # The keyer box's firmware (docs/keyer.md): built for the Pico 2's RP2350 and
   # turned into the UF2 file people copy onto it, kept as the run's
-  # `pico2-keyer-firmware` artifact.
+  # `pico2-keyer-firmware` artifact with its SHA-256. The compiler is pinned in
+  # firmware/pico2-keyer/rust-toolchain.toml and the commit goes into the firmware's
+  # `HELLO` as its build, so that what is flashed can be checked against what was
+  # audited (the audit's KB-13).
   pico2-keyer:
     name: keyer box firmware (Pico 2)
     runs-on: ubuntu-latest
@@ -133,8 +136,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # No `toolchain:` here: rust-toolchain.toml in firmware/pico2-keyer pins it.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0
           targets: thumbv8m.main-none-eabihf
           components: rustfmt, clippy
 
@@ -148,16 +153,36 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --release --locked -- -D warnings
 
+      # The box reports this in `HELLO`, and `[keyer] firmware_build` is checked
+      # against it: eight characters of the commit, which is all `HELLO` carries.
       - name: cargo build
-        run: cargo build --release --locked
+        run: |
+          id="$(git rev-parse --short=8 HEAD)"
+          echo "KEYER_BUILD_ID=$id" >>"$GITHUB_ENV"
+          KEYER_BUILD_ID="$id" cargo build --release --locked
 
-      - name: UF2
-        run: python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
+      - name: UF2 and its SHA-256
+        run: |
+          python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
+          sha256sum pico2-keyer.uf2 >pico2-keyer.uf2.sha256
+          {
+            echo "### Keyer box firmware"
+            echo
+            echo "- build id in \`HELLO\`, for \`[keyer] firmware_build\`: \`$KEYER_BUILD_ID\`"
+            echo "- UF2 size: $(wc -c <pico2-keyer.uf2) bytes"
+            echo "- UF2 SHA-256: \`$(cut -d ' ' -f 1 pico2-keyer.uf2.sha256)\`"
+            echo
+            echo "Check the file you copy onto the box against that checksum"
+            echo "(\`sha256sum\` on Linux, \`shasum -a 256\` on a Mac)."
+          } >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: pico2-keyer-firmware
-          path: firmware/pico2-keyer/pico2-keyer.uf2
+          path: |
+            firmware/pico2-keyer/pico2-keyer.uf2
+            firmware/pico2-keyer/pico2-keyer.uf2.sha256
+          if-no-files-found: error
 
   # hfnode's part of the handheld firmware (firmware/uv-k1/app), compiled for the
   # computer against stand-ins for the radio, with its commands and limits tested.
