@@ -1,6 +1,7 @@
 //! Closed-loop tests against the byte-level mock IC-7300: a scripted field operator
 //! keys CW audio into the whole node, listens to what the mock radio keys and
-//! reacts to it. One test per scenario in [`hfnode::selftest::scenarios`].
+//! reacts to it. One test per scenario in [`hfnode::selftest::scenarios`], the
+//! keyer box's aside (`keyer_e2e.rs`).
 //!
 //! The scenarios run time-scaled ([`selftest::DEFAULT_SCALE`] times real time).
 //! On a slow machine, such as a Raspberry Pi, set `HFNODE_E2E_SCALE` lower, for
@@ -112,7 +113,11 @@ macro_rules! scenario_tests {
         fn every_scenario_has_a_test() {
             let tested = [$($name),*];
             assert_eq!(tested, NAMES);
-            let all: Vec<String> = selftest::scenarios().into_iter().map(|s| s.name).collect();
+            let all: Vec<String> = selftest::scenarios()
+                .into_iter()
+                .filter(|s| !s.radio.keyer)
+                .map(|s| s.name)
+                .collect();
             assert_eq!(all, NAMES);
         }
     };

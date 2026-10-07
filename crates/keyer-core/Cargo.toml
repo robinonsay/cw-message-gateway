@@ -1,0 +1,14 @@
+[package]
+name = "keyer-core"
+version = "0.1.0"
+description = "The Pico 2 keyer box's rules (lines, commands, Morse timing, limits), shared by its firmware and hfnode"
+edition.workspace = true
+license.workspace = true
+
+# No dependencies, and no_std: the same code runs in the box's firmware
+# (firmware/pico2-keyer) and in hfnode's keyer rig and mock box.
+[dependencies]
+
+[dev-dependencies]
+# The Morse table is checked against the decoder's.
+cw = { path = "../cw" }

@@ -162,13 +162,25 @@ pub struct Capture {
     _source: backend::Source,
 }
 
+/// Sees every captured block, on the capture thread, as soon as it is cut and
+/// before it is queued (so also while nobody takes from the queue): the time it
+/// was completed and its samples. It must be quick.
+pub type Tap = Box<dyn FnMut(Instant, &[f32]) + Send>;
+
 impl Capture {
     /// Start capturing from `device` (see [`DEVICE_HINT`]), delivered as mono at
     /// `sample_rate`. Samples arrive in blocks of about 50 ms; if they are not taken,
     /// only the newest 10 s are kept.
     pub fn start(device: &str, sample_rate: u32) -> Result<Self> {
+        Self::start_with_tap(device, sample_rate, None)
+    }
+
+    /// [`Capture::start`], with every block also shown to `tap` as it is captured.
+    pub fn start_with_tap(device: &str, sample_rate: u32, tap: Option<Tap>) -> Result<Self> {
         let (tx, rx) = queue(CAPTURE_BLOCKS);
-        let source = backend::start(device, sample_rate, Blocker::new(tx, sample_rate, device))?;
+        let mut blocker = Blocker::new(tx, sample_rate, device);
+        blocker.tap = tap;
+        let source = backend::start(device, sample_rate, blocker)?;
         Ok(Self {
             samples: rx,
             _source: source,
@@ -276,6 +288,7 @@ pub(crate) struct Blocker {
     /// Samples left to watch for silence; 0 once done.
     watch: usize,
     heard: bool,
+    tap: Option<Tap>,
 }
 
 impl Blocker {
@@ -287,6 +300,7 @@ impl Blocker {
             device: device.to_string(),
             watch: sample_rate as usize * SILENCE_CHECK_SECS,
             heard: false,
+            tap: None,
         }
     }
 
@@ -321,6 +335,9 @@ impl Blocker {
                 at: Instant::now(),
                 samples: self.pending[start..start + self.block].to_vec(),
             };
+            if let Some(tap) = self.tap.as_mut() {
+                tap(block.at, &block.samples);
+            }
             start += self.block;
             if self.tx.send(block).is_err() {
                 return false;
@@ -497,6 +514,28 @@ mod tests {
             got += blk.samples.len();
         }
         assert_eq!(got, 3000);
+    }
+
+    #[test]
+    fn the_tap_sees_every_block_even_when_the_queue_overflows() {
+        let (tx, rx) = queue(1);
+        let mut b = Blocker::new(tx, 1000, "test");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        b.tap = Some(Box::new(move |_, x: &[f32]| {
+            s.lock().unwrap().push(x.len())
+        }));
+        assert!(b.push(&vec![0.5; 520]));
+        assert_eq!(*seen.lock().unwrap(), vec![50; 10]);
+        // The queue kept only the newest block; the rest waits for a whole one.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(1))
+                .unwrap()
+                .samples
+                .len(),
+            50
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(1)).is_err());
     }
 
     #[test]

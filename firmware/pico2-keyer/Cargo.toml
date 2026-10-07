@@ -1,0 +1,34 @@
+[package]
+name = "pico2-keyer"
+version = "0.1.0"
+description = "Firmware for the keyer box: a Raspberry Pi Pico 2 that keys any radio's key jack for hfnode"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Its own workspace: it builds only for the RP2350 (thumbv8m.main-none-eabihf,
+# set in .cargo/config.toml), so it is not a member of the hfnode workspace.
+[workspace]
+
+[[bin]]
+name = "pico2-keyer"
+test = false
+bench = false
+
+[dependencies]
+# The box's rules, shared with hfnode's mock box.
+keyer-core = { path = "../../crates/keyer-core" }
+# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at the
+# master commit that merged its clocks, timer, watchdog and USB serial drivers
+# (rustos PR #1).
+api = { git = "https://github.com/robinonsay/rustos", rev = "cfc2b140af7d13e91d79f0fb40e36bc84a4a3ca4" }
+pico2 = { git = "https://github.com/robinonsay/rustos", rev = "cfc2b140af7d13e91d79f0fb40e36bc84a4a3ca4" }
+
+# The runtime has no unwinder.
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+debug = true
+lto = true
+codegen-units = 1

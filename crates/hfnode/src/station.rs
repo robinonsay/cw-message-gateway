@@ -59,6 +59,13 @@
 //! - **Storm stand-down.** With a [`StormHold`] attached, nothing is tuned or keyed
 //!   while it is on, and a transmission under way is stopped and the radio forced to
 //!   receive ([`crate::storm`]).
+//! - **Rigs without a tuner or meters** (any radio keyed through its key jack by the
+//!   keyer box, [`crate::keyer`]): a window start sets the radio up and checks it but
+//!   tunes and keys nothing, and SWR is not checked. Instead, once the radio reads
+//!   receive after each piece, the rig says whether it saw the radio key it
+//!   ([`Rig::keying_confirmed`]: the keyer box's rig listens for the sidetone); if
+//!   not, the node stops and stays silent until its next window start, as for no
+//!   output on the Po meter.
 
 use crate::session::Transmission;
 use crate::storm::StormHold;
@@ -68,7 +75,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -94,7 +101,8 @@ pub struct StationConfig {
     /// stays on transmit for a whole piece.
     pub break_in_delay_dots: f32,
     /// Extra time allowed beyond the keying time and break-in delay before the
-    /// transmitter is declared stuck.
+    /// transmitter is declared stuck (or the rig's [`Rig::receive_settle`], if
+    /// longer).
     pub stuck_margin: Duration,
     /// Longest a tuner cycle may take before it is abandoned and receive forced.
     pub tune_timeout: Duration,
@@ -153,6 +161,10 @@ pub enum TxError {
     /// A piece was keyed without the Po meter showing output, so SWR could not be
     /// measured; treated like high SWR (the radio cuts its power into a bad load).
     NoOutput,
+    /// A rig without meters did not see the radio key the piece just sent (the
+    /// keyer box's rig heard no sidetone following it: the key cable, the radio
+    /// off or not in CW, its sidetone off, or the audio); treated like no output.
+    NotHeard,
     /// The radio stayed on transmit too long and was forced back to receive.
     Stuck,
     /// The radio could not be confirmed back on receive; nothing more is sent until
@@ -172,11 +184,17 @@ impl std::fmt::Display for TxError {
         match self {
             Self::SwrLockout => write!(
                 f,
-                "transmit locked out until the node next tunes (high SWR, no tuner \
-                 match, or the radio could not be set up)"
+                "transmit locked out until the node next tunes, or starts a window \
+                 on a rig without a tuner (high SWR, no output, keying not heard, no \
+                 tuner match, or the radio could not be set up)"
             ),
             Self::HighSwr(s) => write!(f, "SWR {s:.1} above limit"),
             Self::NoOutput => write!(f, "no output while keying: SWR not measured"),
+            Self::NotHeard => write!(
+                f,
+                "the radio was not heard keying (no sidetone): check the key cable, the \
+                 radio and its sidetone"
+            ),
             Self::Stuck => write!(f, "transmitter did not return to receive"),
             Self::Inhibited => write!(
                 f,
@@ -214,11 +232,14 @@ const SLOWEST_DOT: Duration = Duration::from_millis(200);
 /// With semi break-in the radio "returns to receive after a preset time after you
 /// stop keying" (p. 4-15), and the receive command may not cut that short, so the
 /// attempts go on for the longest break-in delay at the keyer's speed before giving
-/// up. That time counts from when the first stop and receive commands have gone
-/// out: after a CI-V timeout the driver first waits for the link to go quiet (up to
-/// four reply timeouts), and the radio cannot start its delay before then.
+/// up, or for as long as the rig says it needs to see receive
+/// ([`Rig::receive_settle`]) if that is longer. That time counts from when the
+/// first stop and receive commands have gone out: after a CI-V timeout the driver
+/// first waits for the link to go quiet (up to four reply timeouts), and the radio
+/// cannot start its delay before then.
 pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
     let dot = r.dot_duration().unwrap_or(SLOWEST_DOT);
+    let settle = r.receive_settle();
     let mut deadline = None;
     let mut last = RigError::Timeout;
     for attempt in 0.. {
@@ -234,10 +255,15 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
         if let Err(e) = r.set_transmit(false) {
             log::warn!("forcing receive: set receive: {e}");
         }
-        deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS));
+        deadline.get_or_insert_with(|| Instant::now() + dot.mul_f32(MAX_BREAK_IN_DOTS).max(settle));
         match r.is_transmitting() {
             Ok(false) => return Ok(()),
-            Ok(true) => last = RigError::Protocol("radio still reports transmit".into()),
+            Ok(true) => {
+                last = RigError::Protocol(match r.transmit_detail() {
+                    Some(why) => format!("radio still reports transmit: {why}"),
+                    None => "radio still reports transmit".into(),
+                })
+            }
             Err(e) => last = e,
         }
     }
@@ -505,6 +531,19 @@ impl<R: Rig + 'static> Station<R> {
                     if force_receive_or_inhibit(&rig, &inhibit).is_ok() {
                         *since.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     }
+                } else if started.is_none() && !inhibit.is_set() {
+                    // Not keying: a radio that looks keyed all the same (a key held
+                    // closed at the radio) is found now, not at the next check.
+                    // Without waiting for the rig while another thread uses it.
+                    let held = match rig.try_lock() {
+                        Ok(mut r) => r.held_key(),
+                        Err(TryLockError::Poisoned(e)) => e.into_inner().held_key(),
+                        Err(TryLockError::WouldBlock) => None,
+                    };
+                    if let Some(why) = held {
+                        log::error!("watchdog: the radio looks keyed while idle: {why}");
+                        let _ = force_receive_or_inhibit(&rig, &inhibit);
+                    }
                 }
             }
         });
@@ -636,8 +675,8 @@ impl<R: Rig + 'static> Station<R> {
             .unwrap_or_else(|e| e.into_inner())
             .has_tuner()
         {
-            // Nothing to tune (a handheld): set up and checked is all a window start
-            // needs, and nothing is transmitted.
+            // Nothing to tune (a handheld, or any radio on the keyer box): set up and
+            // checked is all a window start needs, and nothing is transmitted.
             return Ok(());
         }
         if let Err(e) = self.tune(t0) {
@@ -701,7 +740,8 @@ impl<R: Rig + 'static> Station<R> {
     /// matched (no lockout, no inhibit), `DE <call>` to identify its carrier, keyed
     /// as a transmission of its own with every check of [`Station::transmit`],
     /// the SWR check included. The bench's `radio tune` uses `start_window` alone.
-    /// A rig without a tuner (a handheld) keyed nothing, so it sends no ID either.
+    /// A rig without a tuner (a handheld, the keyer box) keyed nothing, so it
+    /// sends no ID either.
     pub fn open_window(&mut self) -> Result<(), String> {
         self.start_window()
             .map_err(|e| format!("tune failed at window start: {e}"))?;
@@ -738,6 +778,9 @@ impl<R: Rig + 'static> Station<R> {
         let result = self
             .transmit_inner(tx)
             .or_else(|e| self.force_rx().and(Err(e)));
+        if let Err(e) = &result {
+            self.health("tx-failed", &e.to_string());
+        }
         if result != Err(TxError::Inhibited) {
             *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
         } else {
@@ -941,13 +984,15 @@ impl<R: Rig + 'static> Station<R> {
         let keying = dot * cw::units(piece);
         let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
         self.rest_before_keying(keying)?;
-        // A rig without meters (a handheld) cannot measure SWR or output: it has its
-        // own limits instead, waited out just above.
-        let meters = self
-            .rig
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .has_meters();
+        // A rig without meters (a handheld, or any radio on the keyer box) cannot
+        // measure SWR or output: it has its own limits instead (a handheld's waited
+        // out just above), and may confirm the keying itself. One that only hears its
+        // radio shows it back on receive once the audio has caught up, which takes
+        // real time whatever the time scale.
+        let (meters, settle) = {
+            let r = self.rig.lock().unwrap_or_else(|e| e.into_inner());
+            (r.has_meters(), r.receive_settle())
+        };
         *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         self.with_rig(|r| r.send_cw(piece))?;
         let sent = Instant::now();
@@ -959,7 +1004,13 @@ impl<R: Rig + 'static> Station<R> {
         // piece has had time to go out (it reads receive before semi
         // break-in has switched over), so wait that long first.
         self.sleep_until(sent + keying)?;
-        self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin)?;
+        self.wait_for_receive(sent + keying + hang + self.cfg.stuck_margin.max(settle))?;
+        if !meters && self.with_rig(|r| r.keying_confirmed())? == Some(false) {
+            self.health("keying", "not-heard");
+            self.swr_lockout = true;
+            log::error!("the radio was not heard keying: silent until the next window start");
+            return Err(TxError::NotHeard);
+        }
         *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }

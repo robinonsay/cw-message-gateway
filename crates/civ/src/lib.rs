@@ -125,6 +125,34 @@ pub trait Rig: Send {
         let _ = keying;
         Ok(Duration::ZERO)
     }
+    /// For a rig without meters, once the radio reads receive after a piece sent
+    /// with [`Rig::send_cw`]: whether the rig saw by its own means that the radio
+    /// keyed it (a keyer box listens for the radio's sidetone). `Some(false)` stops
+    /// the transmission and keeps the node silent until its next window start, as
+    /// no output on the Po meter does. Rigs that cannot tell answer `None`.
+    fn keying_confirmed(&mut self) -> Result<Option<bool>> {
+        Ok(None)
+    }
+    /// Why [`Rig::is_transmitting`] last answered `true`, if the rig can say more
+    /// than that (a keyer box: the sidetone heard after its key opened). It goes
+    /// into the reason an inhibit gives.
+    fn transmit_detail(&mut self) -> Option<String> {
+        None
+    }
+    /// How long after it is first told to stop the rig may need before it can
+    /// show the radio back on receive, at the least: one that only hears its radio
+    /// (a keyer box) waits for the audio to catch up. The station waits for this or
+    /// the radio's longest break-in delay, whichever is longer.
+    fn receive_settle(&self) -> Duration {
+        Duration::ZERO
+    }
+    /// Whether the radio looks keyed with nothing keying it, from what the rig
+    /// knows without asking the radio (a keyer box: a steady tone at the sidetone
+    /// pitch): why. The station asks often while it is not keying, so it must be
+    /// quick.
+    fn held_key(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Split `text` into pieces the keyer accepts, on word boundaries where possible.

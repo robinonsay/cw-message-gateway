@@ -8,6 +8,7 @@ use hfnode::config::{Config, RigKind};
 use hfnode::gateway::OfflineServices;
 use hfnode::handheld::{self, Handheld};
 use hfnode::inbox::Inbox;
+use hfnode::keyer;
 use hfnode::session::{Outcome, Services};
 use hfnode::station::{Station, StationConfig};
 use hfnode::storm::StormHold;
@@ -96,6 +97,14 @@ enum Cmd {
         #[command(subcommand)]
         action: RadioCmd,
     },
+    /// Any radio on the keyer box (`station.rig = "keyer"`): check the box and the
+    /// radio's audio, and the bring-up tests.
+    Keyer {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: KeyerCmd,
+    },
     /// Talk to a handheld running the CW firmware (`station.rig = "handheld"`), for
     /// bench testing and bring-up (docs/handheld.md).
     Handheld {
@@ -131,13 +140,15 @@ enum Cmd {
         #[command(subcommand)]
         action: FilterCmd,
     },
-    /// Run the closed-loop scenarios against a mock IC-7300: no radio, sound card,
+    /// Run the closed-loop scenarios against a mock IC-7300, and the `keyer-` ones
+    /// against a mock keyer box and the radio it keys: no radio, sound card,
     /// network or config needed. Exits non-zero if any fails.
     Selftest {
         /// Run only these scenarios (exact name, or a prefix such as `fault-`).
         #[arg(long)]
         scenario: Vec<String>,
-        /// Times faster than real time, 1 to 200; lower it on a slow machine.
+        /// Times faster than real time, 1 to 200 (the `keyer-` scenarios at most
+        /// 5); lower it on a slow machine.
         #[arg(long, default_value_t = selftest::DEFAULT_SCALE)]
         scale: f32,
         /// Scenarios run at once (default: one per CPU).
@@ -284,6 +295,26 @@ enum RadioCmd {
 }
 
 #[derive(Subcommand)]
+enum KeyerCmd {
+    /// Greet the box (its limits, why it last started, its key) and check the
+    /// radio's audio: band level, no key held at the radio. Keys nothing.
+    Check,
+    /// Stop the box and confirm the radio's key open, by the box and the audio.
+    Rx,
+    /// Key TEXT through the box with every check `run` makes but the storm
+    /// stand-down, and report whether the radio was heard sending it.
+    Key { text: String },
+    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch.
+    Sidetone,
+    /// Hang the box's control loop mid-run: its watchdog must reset it and open
+    /// the key within 0.5 s. Then identifies.
+    Hangtest,
+    /// Identify, then make the box hold its key down: its 1 s limit must open the
+    /// key and trip it (unplug it and plug it in again afterwards).
+    Stucktest,
+}
+
+#[derive(Subcommand)]
 enum HandheldCmd {
     /// Ask the firmware who it is, stop anything it is sending, read its status, and
     /// check the radio's frequency, mode, power and break-in against the config.
@@ -340,6 +371,7 @@ fn main() -> Result<()> {
         } => record(&Config::load(&config)?, &out, seconds),
         Cmd::Devices => devices(),
         Cmd::Radio { config, action } => radio(&Config::load(&config)?, action),
+        Cmd::Keyer { config, action } => keyer_cmd(&Config::load(&config)?, action),
         Cmd::Handheld { config, action } => handheld_cmd(&Config::load(&config)?, action),
         Cmd::Run { config } => run(&config, &Config::load(&config)?),
         Cmd::Storm { config } => storm_check(&Config::load(&config)?),
@@ -763,7 +795,13 @@ fn devices() -> Result<()> {
                 .collect();
             format!("  USB {:04X}:{:04X} {}", u.vid, u.pid, parts.join(", "))
         });
+        let keyer_box = p
+            .usb
+            .as_ref()
+            .and_then(|u| u.product.as_deref())
+            .is_some_and(keyer::is_keyer_box);
         let note = match p.radio_match() {
+            _ if keyer_box => "  <- the keyer box",
             Match::Ic7300 => "  <- the IC-7300",
             Match::Cp210x => "  <- a CP210x bridge, as in the IC-7300",
             Match::No => "",
@@ -860,8 +898,15 @@ fn verify_setup(cfg: &Config, st: &Station<civ::ic7300::Ic7300>) -> Result<()> {
 
 fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     use civ::Rig;
-    if cfg.station.rig != RigKind::Ic7300 {
-        bail!("station.rig is \"handheld\": use `hfnode handheld ...` (docs/handheld.md)");
+    match cfg.station.rig {
+        RigKind::Ic7300 => {}
+        RigKind::Keyer => bail!(
+            "station.rig is \"keyer\": the radio itself is not controlled; use `hfnode keyer \
+             --config C ...` (docs/keyer.md)"
+        ),
+        RigKind::Handheld => {
+            bail!("station.rig is \"handheld\": use `hfnode handheld ...` (docs/handheld.md)")
+        }
     }
     match action {
         RadioCmd::Status => {
@@ -1068,11 +1113,15 @@ fn run_node(cfg: &Config, alerts: &alert::Alerts, storm: Option<Arc<StormHold>>)
     match cfg.station.rig {
         RigKind::Ic7300 => {
             let rig = open_for(cfg, Action::Run)?;
-            serve(cfg, rig, parts, |st| verify_setup(cfg, st))
+            serve(cfg, rig, None, parts, |st| verify_setup(cfg, st))
+        }
+        RigKind::Keyer => {
+            let (rig, cap) = open_keyer(cfg, None)?;
+            serve(cfg, rig, cap, parts, |_| Ok(()))
         }
         RigKind::Handheld => {
             let rig = open_handheld(cfg, Some(handheld::Action::Run))?;
-            serve(cfg, rig, parts, |st| {
+            serve(cfg, rig, None, parts, |st| {
                 st.check().context(
                     "the handheld is not set up as the config says: change it at the radio",
                 )
@@ -1091,10 +1140,13 @@ struct NodeParts<'a> {
     storm: Option<Arc<StormHold>>,
 }
 
-/// Run the node on `rig`, once `verify` has passed on the station set up.
+/// Run the node on `rig`, once `verify` has passed on the station set up. `cap` is
+/// the audio capture if the rig opened one already (the keyer box's rig listens to
+/// the radio from the start).
 fn serve<R: civ::Rig + 'static>(
     cfg: &Config,
     rig: R,
+    cap: Option<audio::Capture>,
     parts: NodeParts,
     verify: impl FnOnce(&Station<R>) -> Result<()>,
 ) -> Result<()> {
@@ -1126,13 +1178,140 @@ fn serve<R: civ::Rig + 'static>(
     }
     station.configure()?;
     verify(&station)?;
-    let cap = audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?;
+    let cap = match cap {
+        Some(c) => c,
+        None => audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?,
+    };
     log::info!(
         "{} listening on {} Hz",
         cfg.station.node_call,
         cfg.station.frequency_hz
     );
     node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+}
+
+/// The keyer box and the radio's audio, for a command that may key (`needs`, or
+/// `run` if none): the bring-up stage must allow it. The audio is captured first,
+/// as the rig listens to the radio from the start.
+fn open_keyer(
+    cfg: &Config,
+    needs: Option<keyer::Action>,
+) -> Result<(keyer::rig::KeyerRig, Option<audio::Capture>)> {
+    let k = keyer_section(cfg)?;
+    keyer::check_stage(k.commissioned, needs.unwrap_or(keyer::Action::Run))?;
+    let (cap, monitor) = keyer::bench::start_listening(cfg)?;
+    let rig = keyer::bench::open_rig(cfg, monitor.clone())?;
+    let band = keyer::bench::wait_for_band(&monitor, Duration::from_secs(5));
+    match band.level_db {
+        Some(db) => log::info!("keyer: the band is at {db:.0} dBFS"),
+        None => log::warn!("keyer: no band level yet: nothing is keyed until there is one"),
+    }
+    if let Some(db) = band.carrier_db {
+        log::warn!("keyer: {}", keyer::bench::carrier_note(db));
+    }
+    Ok((rig, Some(cap)))
+}
+
+fn keyer_section(cfg: &Config) -> Result<&hfnode::config::Keyer> {
+    if cfg.station.rig != RigKind::Keyer {
+        bail!(
+            "station.rig is not \"keyer\": `hfnode keyer` is for any radio on the keyer box \
+             (docs/keyer.md)"
+        );
+    }
+    cfg.keyer.as_ref().context("no [keyer] section")
+}
+
+fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
+    use keyer::bench;
+    let k = keyer_section(cfg)?;
+    match action {
+        KeyerCmd::Check | KeyerCmd::Rx => {
+            let (_cap, monitor) = bench::start_listening(cfg)?;
+            let mut rig = bench::open_rig(cfg, monitor)?;
+            if matches!(action, KeyerCmd::Rx) {
+                hfnode::station::force_receive(&mut rig)
+                    .context("the radio's key is not confirmed open")?;
+                // The box's key is open; the radio's, as far as its audio shows.
+                let band = bench::wait_for_band(&rig.monitor(), Duration::from_secs(5));
+                if !band.audio {
+                    bail!("no audio from the radio: the radio's key is not confirmed open");
+                }
+                if let Some(db) = band.carrier_db {
+                    bail!(
+                        "the radio's key is not confirmed open: {}",
+                        bench::carrier_note(db)
+                    );
+                }
+                println!("key open: the box is idle and no sidetone is heard");
+                return Ok(());
+            }
+            let (report, ok) = bench::check(&mut rig, k.min_level_dbfs);
+            print!("{report}");
+            println!(
+                "bring-up stage passed (keyer.commissioned): {}",
+                k.commissioned
+            );
+            if !ok {
+                bail!("check failed: fix the lines above before keying");
+            }
+            println!("all ok; nothing was keyed");
+            Ok(())
+        }
+        KeyerCmd::Key { .. } | KeyerCmd::Sidetone | KeyerCmd::Hangtest | KeyerCmd::Stucktest => {
+            let needs = match action {
+                KeyerCmd::Key { .. } | KeyerCmd::Sidetone => keyer::Action::Key,
+                _ => keyer::Action::Test,
+            };
+            // The health log and any transmit inhibit are written there.
+            std::fs::create_dir_all(&cfg.state_dir)
+                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+            let (rig, _cap) = open_keyer(cfg, Some(needs))?;
+            let sc = StationConfig::from_config(&cfg.station);
+            let id = sc.station_id.clone();
+            let mut st = Station::new(rig, sc, Some(cfg.state_dir.join("health.csv")));
+            guard_radio(st.rig());
+            st.configure()?;
+            match action {
+                KeyerCmd::Key { text } => {
+                    match bench::key(&mut st, &sanitize(&text))? {
+                        Some(j) => println!("sent: {j}"),
+                        None => println!("sent"),
+                    }
+                    Ok(())
+                }
+                KeyerCmd::Sidetone => {
+                    let rep = bench::sidetone(&mut st, &id)?;
+                    let (text, ok) = rep.explain(bench::pitch(cfg));
+                    print!("{text}");
+                    if !ok {
+                        bail!("sidetone check failed");
+                    }
+                    Ok(())
+                }
+                _ => {
+                    let rep = if matches!(action, KeyerCmd::Hangtest) {
+                        bench::hangtest(&mut st, &id, 1.0)?
+                    } else {
+                        bench::stucktest(&mut st, &id, 1.0)?
+                    };
+                    println!(
+                        "longest sidetone {} ms (limit {} ms)",
+                        rep.longest.as_millis(),
+                        rep.limit.as_millis()
+                    );
+                    for n in &rep.notes {
+                        println!("{n}");
+                    }
+                    if !rep.passed {
+                        bail!("test failed: do not go on to `run`");
+                    }
+                    println!("passed");
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 /// Open the handheld for `action` (`None`: nothing that keys it), once the bring-up
@@ -1400,34 +1579,52 @@ fn run_selftest(
     let jobs = jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .clamp(1, picked.len().max(1));
+    let on_keyer = picked.iter().filter(|s| s.radio.keyer).count();
     println!(
-        "{} scenarios against the mock IC-7300 at {scale}x real time, {jobs} at once",
-        picked.len()
+        "{} scenarios at {scale}x real time, {jobs} at once: {} against the mock IC-7300{}",
+        picked.len(),
+        picked.len() - on_keyer,
+        match on_keyer {
+            0 => String::new(),
+            n => format!(
+                ", then {n} against the mock keyer box and radio (at most {}x)",
+                selftest::KEYER_MAX_SCALE
+            ),
+        }
     );
     let t0 = Instant::now();
-    let next = std::sync::atomic::AtomicUsize::new(0);
     let results = std::sync::Mutex::new(vec![None; picked.len()]);
-    std::thread::scope(|sc| {
-        for _ in 0..jobs {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(s) = picked.get(i) else { break };
-                let out = selftest::run(s, scale);
-                if verbose {
-                    print!("{}", out.render());
-                } else {
-                    println!(
-                        "{:<24} {}  {:>5.1} s  {}",
-                        out.scenario,
-                        if out.passed() { "PASS" } else { "FAIL" },
-                        out.wall.as_secs_f32(),
-                        out.summary()
-                    );
-                }
-                results.lock().unwrap()[i] = Some(out);
-            });
-        }
-    });
+    // The keyer scenarios hear their radio in real time, and the IC-7300 ones take
+    // all the processor they can get: on a busy machine the first would then miss
+    // real time. So the keyer ones run on their own, after the others.
+    for keyer in [false, true] {
+        let todo: Vec<usize> = (0..picked.len())
+            .filter(|&i| picked[i].radio.keyer == keyer)
+            .collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..jobs {
+                sc.spawn(|| loop {
+                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&i) = todo.get(k) else { break };
+                    let s = &picked[i];
+                    let out = selftest::run(s, scale);
+                    if verbose {
+                        print!("{}", out.render());
+                    } else {
+                        println!(
+                            "{:<24} {}  {:>5.1} s  {}",
+                            out.scenario,
+                            if out.passed() { "PASS" } else { "FAIL" },
+                            out.wall.as_secs_f32(),
+                            out.summary()
+                        );
+                    }
+                    results.lock().unwrap()[i] = Some(out);
+                });
+            }
+        });
+    }
     let results: Vec<_> = results
         .into_inner()
         .unwrap()
@@ -1658,15 +1855,18 @@ mod tests {
         use clap::CommandFactory;
         let readme = include_str!("../../../README.md");
         let cli = Cli::command();
-        let radio = cli.find_subcommand("radio").expect("radio subcommand");
+        let sub = |name: &str| {
+            cli.find_subcommand(name)
+                .expect(name)
+                .get_subcommands()
+                .map(move |c| format!("| `hfnode {name} --config C {}", c.get_name()))
+                .collect::<Vec<_>>()
+        };
         let rows = cli
             .get_subcommands()
             .map(|c| format!("| `hfnode {}", c.get_name()))
-            .chain(
-                radio
-                    .get_subcommands()
-                    .map(|c| format!("| `hfnode radio --config C {}", c.get_name())),
-            );
+            .chain(sub("radio"))
+            .chain(sub("keyer"));
         for row in rows.filter(|r| !r.ends_with(" help")) {
             assert!(readme.contains(&row), "README.md, Commands: no row {row}`");
         }

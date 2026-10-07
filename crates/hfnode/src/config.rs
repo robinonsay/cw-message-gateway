@@ -29,6 +29,8 @@ pub struct Config {
     pub storm: Option<Storm>,
     #[serde(default)]
     pub filter: Filter,
+    /// The keyer box, with `station.rig = "keyer"` (docs/keyer.md).
+    pub keyer: Option<Keyer>,
     /// The handheld, with `station.rig = "handheld"` (docs/handheld.md).
     pub handheld: Option<Handheld>,
 }
@@ -36,8 +38,9 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Station {
-    /// The radio: the IC-7300 over CI-V (the default), or a handheld running the
-    /// CW firmware, set up in `[handheld]`.
+    /// The radio: the IC-7300 over CI-V (the default), any radio keyed through its
+    /// key jack by the keyer box, set up in `[keyer]`, or a handheld running the CW
+    /// firmware, set up in `[handheld]`.
     #[serde(default)]
     pub rig: RigKind,
     /// The node's own callsign, sent as `DE <call>` on every transmission.
@@ -54,8 +57,8 @@ pub struct Station {
     #[serde(default = "default_civ_address")]
     pub civ_address: u8,
     /// The last bring-up stage passed on the IC-7300 (docs/hardware-test-plan.md,
-    /// "Bring-up stages"). Commands that need a later stage are refused. A
-    /// handheld's is `handheld.commissioned`.
+    /// "Bring-up stages"). Commands that need a later stage are refused. The keyer
+    /// box's is `keyer.commissioned`, a handheld's `handheld.commissioned`.
     #[serde(default)]
     pub commissioned: crate::commissioning::Stage,
     /// RF output power in watts. The design calls for 30-50 W.
@@ -85,7 +88,29 @@ pub struct Station {
 pub enum RigKind {
     #[default]
     Ic7300,
+    Keyer,
     Handheld,
+}
+
+/// Any radio, keyed through its key jack by the Pico 2 keyer box
+/// (firmware/pico2-keyer) on `station.serial_port`, its receive audio taken from
+/// its headphone jack through `[audio]`: see docs/keyer.md, the box's commands in
+/// docs/keyer-protocol.md, and [`crate::keyer`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keyer {
+    /// The pitch of the radio's sidetone in Hz, if not `audio.pitch_hz` (most
+    /// radios use their CW pitch for both).
+    pub sidetone_hz: Option<f32>,
+    /// The quietest band noise, in dB below full scale, at which the node still
+    /// keys: quieter means the radio is off, its volume down or the audio cable out,
+    /// and the node could not hear its own sidetone.
+    #[serde(default = "default_min_level")]
+    pub min_level_dbfs: f32,
+    /// The last bring-up stage passed with the box (docs/keyer.md, "Bring-up").
+    /// Commands that need a later stage are refused.
+    #[serde(default)]
+    pub commissioned: crate::keyer::Stage,
 }
 
 /// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in
@@ -729,6 +754,9 @@ fn default_end_of_message_ms() -> u64 {
 fn default_bandwidth() -> f32 {
     150.0
 }
+fn default_min_level() -> f32 {
+    -65.0
+}
 fn default_handheld_baud() -> u32 {
     38_400
 }
@@ -1099,6 +1127,7 @@ impl Config {
         self.decoder_config()
             .validate()
             .map_err(|e| anyhow::anyhow!("audio.{e}"))?;
+        crate::keyer::validate(self)?;
         crate::handheld::validate(self)?;
         Ok(())
     }

@@ -178,7 +178,7 @@ pub fn check_stage(stage: Stage, action: Action) -> Result<()> {
 pub fn validate(cfg: &Config) -> Result<()> {
     let s = &cfg.station;
     let h = match (s.rig, &cfg.handheld) {
-        (RigKind::Ic7300, _) => return Ok(()),
+        (RigKind::Ic7300 | RigKind::Keyer, _) => return Ok(()),
         (RigKind::Handheld, None) => {
             bail!("station.rig is \"handheld\" but there is no [handheld] section")
         }
