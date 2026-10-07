@@ -1880,7 +1880,8 @@ mod tests {
             &path,
             format!(
                 r#"
-state_dir = "{}"
+# Literal strings: a Windows path's backslashes are escapes in a TOML string.
+state_dir = '{}'
 [station]
 node_call = "N0DE"
 field_calls = ["N0CALL"]
@@ -1894,7 +1895,7 @@ device = "default"
 [keyer]
 commissioned = "{commissioned}"
 [auth]
-key_file = "{}"
+key_file = '{}'
 "#,
                 dir.join("state").display(),
                 dir.join("key").display(),
