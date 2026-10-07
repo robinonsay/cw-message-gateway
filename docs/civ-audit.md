@@ -293,7 +293,11 @@ commands as a window start (`1C 00` read; `06`, `05`, `14 0A`, `14 0C`, `14 0F`,
 The independent hardware-safety audit (2026-10-07, at commit `2e39996`) found
 three things to fix before the IC-7300 is connected or keyed on the bench. No CI-V
 command was added; `1C 01` and `1C 00` are read at new moments, and the mock radio
-answers more reads. What changed:
+answers more reads. One driver change came with them: a reply is now looked for
+once more after the 500 ms reply timeout before the command counts as unanswered,
+so that a computer that held the node's thread up past the timeout does not turn a
+reply that came in time into a fault (the SWR checks now make many more reads while
+keying). What changed:
 
 - **SWR on every piece (K1).** The SWR, Po and `1C 00` samples ran only for about
   the first second of the first piece of a transmission. They now run all through

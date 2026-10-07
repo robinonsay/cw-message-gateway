@@ -138,7 +138,7 @@ impl StationConfig {
             swr_limit: c.swr_limit,
             segment_pause: Duration::from_millis(c.chunk_pause_ms),
             swr_delay: Duration::from_millis(50),
-            // With NO_OUTPUT_SAMPLES samples, at least 1.6 s at the 100 ms poll.
+            // With NO_OUTPUT_SAMPLES samples, at least 4 s at the 100 ms poll.
             swr_window: Duration::from_secs(1),
             // A quarter of the set power: well clear of key-up (0) and of the
             // CW envelope's rise and fall.
@@ -237,11 +237,14 @@ const SLOWEST_DOT: Duration = Duration::from_millis(200);
 
 /// Samples in a row, taken while a piece keys, with the Po meter showing no output
 /// on either reading, that stop a transmission ([`TxError::NoOutput`]), once
-/// [`StationConfig::swr_window`] has passed too. Each Po reading lands on key-down
-/// about half the time in Morse text, so 16 samples (32 readings) with none is
-/// not a word gap; at the 100 ms poll they take 1.6 s or more. To be checked
-/// against the radio's Po meter on the bench (docs/hardware-test-plan.md, step 6).
-pub const NO_OUTPUT_SAMPLES: u32 = 16;
+/// [`StationConfig::swr_window`] has passed too. A sample lands on key-up a little
+/// over half the time in Morse text, and its two Po readings are often in the same
+/// gap, so a run of 40 is about 1 in 10^10 by chance, and longer than any gap in
+/// the keying (a word gap at 6 wpm is 1.4 s, about 7 samples); at the 100 ms poll
+/// they take 4 s or more. A radio protecting itself has already cut its output, so
+/// the wait costs little. To be checked against the radio's Po meter on the bench
+/// (docs/hardware-test-plan.md, step 6).
+pub const NO_OUTPUT_SAMPLES: u32 = 40;
 
 /// Put the radio on receive and confirm it: stop the keyer and switch to receive
 /// (each sent whether or not the other worked), then read the transmit status.
@@ -1191,7 +1194,10 @@ impl<R: Rig + 'static> Station<R> {
             if !tx && at >= keyed_by {
                 break;
             }
-            if Instant::now() > stuck_at {
+            // Timed from before the status was read, so that a thread held up
+            // during this sample's other reads does not make a radio that was on
+            // transmit before `stuck_at` look stuck.
+            if tx && at > stuck_at {
                 log::error!("radio still transmitting; forcing receive");
                 return Err(TxError::Stuck);
             }
@@ -1976,6 +1982,10 @@ mod tests {
         sent_at: Vec<(Instant, String)>,
         /// Rests on receive it asks for, as a handheld's duty cycle does.
         rests: Option<Rests>,
+        /// The first SWR reading taken once the keyer has finished, while the radio
+        /// is still on transmit for its break-in delay, is held up this long (the
+        /// station's thread descheduled on a busy computer).
+        hold_up_in_hang: Option<Duration>,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -2007,6 +2017,7 @@ mod tests {
                 dead_after: None,
                 sent_at: Vec::new(),
                 rests: None,
+                hold_up_in_hang: None,
             }
         }
 
@@ -2070,6 +2081,12 @@ mod tests {
             self.sim.split_or_delta_tx()
         }
         fn read_swr(&mut self) -> civ::Result<f32> {
+            if let Some(d) = self.hold_up_in_hang {
+                if !self.sim.keyer_busy() && self.sim.is_transmitting()? {
+                    self.hold_up_in_hang = None;
+                    thread::sleep(d);
+                }
+            }
             if let (Some((after, swr)), Some((first, _))) = (self.swr_at, self.sent_at.first()) {
                 if first.elapsed() >= after {
                     self.sim.swr = swr;
@@ -2222,6 +2239,22 @@ mod tests {
         assert!(!r.is_transmitting().unwrap());
         let log = std::fs::read_to_string(&health).unwrap();
         assert!(log.contains(",swr,no-output"), "{log}");
+    }
+
+    #[test]
+    fn a_sample_held_up_in_the_hang_time_is_not_a_stuck_radio() {
+        // The radio was on transmit (in its break-in delay) when the sample read
+        // its status; the sample's SWR read is then held up past the stuck margin.
+        // The radio was not stuck: the next sample finds it on receive.
+        let mut rig = Radio::new(fast_rig());
+        rig.hold_up_in_hang = Some(cfg().stuck_margin + Duration::from_millis(200));
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert!(r.hold_up_in_hang.is_none(), "the hold-up happened");
+        assert_eq!(r.stops, 0, "receive was not forced");
     }
 
     #[test]

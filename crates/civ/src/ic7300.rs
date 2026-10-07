@@ -410,6 +410,10 @@ impl<P: Port> Ic7300<P> {
         log::trace!("CI-V > {out:02X?}");
         let deadline = sent + self.timeout;
         let mut chunk = [0u8; 64];
+        // Once past the deadline, the port is read once more before giving up, so
+        // that a thread held up past it (a busy computer) still finds a reply that
+        // came in time.
+        let mut last_look = false;
         loop {
             while let Some(f) = take_frame(&mut self.buf) {
                 log::trace!(
@@ -428,9 +432,10 @@ impl<P: Port> Ic7300<P> {
                     }
                 }
             }
-            if Instant::now() > deadline {
+            if last_look {
                 return Err(RigError::Timeout);
             }
+            last_look = Instant::now() > deadline;
             match self.port.read(&mut chunk) {
                 Ok(0) => {}
                 Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
@@ -737,6 +742,9 @@ mod tests {
         timed: VecDeque<(Instant, Vec<u8>)>,
         /// When set, each scripted reply arrives this long after its command.
         reply_delay: Option<Duration>,
+        /// When set, the next read is held up this long (the thread descheduled)
+        /// and then times out without looking at what has arrived.
+        hold_up: Option<Duration>,
     }
 
     impl Port for Script {
@@ -748,6 +756,10 @@ mod tests {
 
     impl Read for Script {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(d) = self.hold_up.take() {
+                std::thread::sleep(d);
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
             for b in self.late.drain(..).rev() {
                 self.pending.push_front(b);
             }
@@ -800,6 +812,7 @@ mod tests {
                 late: vec![],
                 timed: VecDeque::new(),
                 reply_delay: None,
+                hold_up: None,
             },
             0x94,
         )
@@ -984,6 +997,19 @@ mod tests {
         r.port.reply_delay = Some(Duration::from_millis(150));
         r.port.replies.push_back(reply(&[0xFA]));
         assert!(matches!(r.set_transmit(false), Err(RigError::Rejected)));
+    }
+
+    #[test]
+    fn a_reply_that_came_in_time_is_read_after_a_hold_up() {
+        // The reply is there at once, but the first read is held up past the
+        // timeout: the port is read once more before giving up.
+        let mut r = radio(&[&[0x1C, 0x00, 0x01]], false);
+        r.timeout = Duration::from_millis(20);
+        r.port.hold_up = Some(Duration::from_millis(60));
+        assert!(r.is_transmitting().unwrap());
+        // With nothing there, still a timeout.
+        r.port.hold_up = Some(Duration::from_millis(60));
+        assert!(matches!(r.frequency(), Err(RigError::Timeout)));
     }
 
     #[test]

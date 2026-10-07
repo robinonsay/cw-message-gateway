@@ -107,7 +107,7 @@ what the code does, not what the radio does.
   after it starts until the radio is back on receive: each sample reads the Po
   meter (`15 11`), the transmit status (`1C 00`) and SWR (`15 12`). SWR above
   `swr_limit` stops the transmission at once; so does no output on the Po meter
-  for 16 samples in a row, and at least a second, while the keyer is sending (the
+  for 40 samples in a row, and at least a second, while the keyer is sending (the
   radio's protection reduces its output once its power amplifier is hot, p. 13-4,
   lines 7316-7324). Output on the Po meter while the radio reads receive means none
   of the node's receive confirmations can be trusted: transmitting is inhibited.
@@ -711,7 +711,7 @@ radio's own SWR meter; the radio returns to receive when the text ends.
 **Fail:** wrong characters sent, SWR reading far from the radio's meter (check step
 0.19), or the radio does not return to receive. `no output while keying` into the
 dummy load means the Po meter read no output for longer than the node allows while
-the keyer sends (16 samples in a row, at least a second): stop and report it, with
+the keyer sends (40 samples in a row, at least a second): stop and report it, with
 the trace. If the node stops with
 `radio not confirmed on receive: transmit inhibited ...` and `health.csv` has a
 `tx-status` line, the radio reported receive while its Po meter showed output:
