@@ -1014,7 +1014,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             check_state_dir(&cfg.state_dir)?;
             let mut rig = open_for(cfg, needs)?;
             if matches!(action, RadioCmd::Setup) {
-                release_tx_inhibit(&mut rig, &cfg.state_dir)?;
+                release_tx_inhibit(&mut rig, &cfg.state_dir, hfnode::config::home_dir())?;
             }
             let mut st = Station::new(
                 rig,
@@ -1059,21 +1059,22 @@ const STANDARD_STATE_DIRS: [&str; 3] = [
 /// the [`STANDARD_STATE_DIRS`]: someone has checked the radio and removed it, also
 /// when this runs with another config than the node's (a bench one). Until then
 /// nothing is written, and every command that can transmit is refused by the
-/// preflight as well as by the file.
+/// preflight as well as by the file. `home` is this user's home directory.
 fn release_tx_inhibit<P: civ::ic7300::Port>(
     rig: &mut civ::ic7300::Ic7300<P>,
     state_dir: &Path,
+    home: Option<PathBuf>,
 ) -> Result<()> {
-    release_tx_inhibit_unless(rig, &inhibit_dirs(state_dir))
+    release_tx_inhibit_unless(rig, &inhibit_dirs(state_dir, home))
 }
 
-/// `state_dir`, then the [`STANDARD_STATE_DIRS`] this user's home expands them to.
-fn inhibit_dirs(state_dir: &Path) -> Vec<PathBuf> {
+/// `state_dir`, then the [`STANDARD_STATE_DIRS`] `home` expands them to.
+fn inhibit_dirs(state_dir: &Path, home: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs = vec![state_dir.to_path_buf()];
     dirs.extend(
         STANDARD_STATE_DIRS
             .iter()
-            .filter_map(|d| hfnode::config::expand_home(Path::new(d)).ok()),
+            .filter_map(|d| hfnode::config::expand_home_from(Path::new(d), home.clone()).ok()),
     );
     dirs
 }
@@ -2316,7 +2317,7 @@ key_file = '{}'
         });
         let mut rig = civ::ic7300::Ic7300::with_port(radio.port(), 0x94);
         InhibitLatch::in_dir(dir.path()).latch("stuck");
-        release_tx_inhibit(&mut rig, dir.path()).unwrap();
+        release_tx_inhibit(&mut rig, dir.path(), None).unwrap();
         assert!(
             rig.tx_inhibit().unwrap(),
             "left on while tx-inhibited is there"
@@ -2343,7 +2344,7 @@ key_file = '{}'
     fn radio_setup_looks_in_the_standard_state_directories() {
         let home = hfnode::config::expand_home(Path::new("~")).unwrap();
         let mac = home.join("Library/Application Support/hfnode/state");
-        let found = inhibit_dirs(Path::new("/srv/bench"));
+        let found = inhibit_dirs(Path::new("/srv/bench"), hfnode::config::home_dir());
         assert_eq!(found[0], Path::new("/srv/bench"));
         assert!(found.contains(&PathBuf::from("/var/lib/hfnode")));
         assert!(found.contains(&mac), "{found:?}");
@@ -2353,6 +2354,34 @@ key_file = '{}'
             "{:?}",
             example.state_dir
         );
+    }
+
+    #[test]
+    fn radio_setup_leaves_the_inhibit_on_while_a_standard_state_directory_holds_it() {
+        // S7's call site (the safety audit's pass at 894e995): `radio setup` with a
+        // bench config on a Mac whose node has latched the inhibit in its own state
+        // directory under this user's home.
+        use civ::mock::{MockConfig, MockRadio};
+        let bench = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let node = home.path().join("Library/Application Support/hfnode/state");
+        std::fs::create_dir_all(&node).unwrap();
+        InhibitLatch::in_dir(&node).latch("stuck");
+        let radio = MockRadio::new(MockConfig {
+            tx_inhibit: true,
+            ..MockConfig::default()
+        });
+        let mut rig = civ::ic7300::Ic7300::with_port(radio.port(), 0x94);
+        release_tx_inhibit(&mut rig, bench.path(), Some(home.path().into())).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while the node's is there"
+        );
+        std::fs::remove_file(node.join(INHIBIT_FILE)).unwrap();
+        release_tx_inhibit(&mut rig, bench.path(), Some(home.path().into())).unwrap();
+        assert!(!rig.tx_inhibit().unwrap());
+        let violations = radio.report().violations;
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]

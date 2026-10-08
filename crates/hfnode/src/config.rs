@@ -863,13 +863,15 @@ pub fn expand_home(path: &Path) -> Result<PathBuf> {
     expand_home_from(path, home_dir())
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// The user's home directory, from HOME (USERPROFILE on Windows).
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
 }
 
-fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
+/// [`expand_home`], with the home directory given.
+pub fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
     let mut parts = path.components();
     match parts.next() {
         Some(std::path::Component::Normal(first)) if first == "~" => match home {
