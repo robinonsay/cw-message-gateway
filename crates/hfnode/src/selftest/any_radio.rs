@@ -423,7 +423,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         stick: Mutex::new(None),
         stuck_until: Mutex::new(None),
     };
-    let mut air = air(s, AirRadio::Keyer(k), None, book, scale);
+    let mut air = air(s, AirRadio::Keyer(Box::new(k)), None, book, scale);
     let ran = operate(s, &mut air, &done, out);
     out.checks.push(pauses.check(scale));
     let Some((station, session, svc)) = ran else {

@@ -713,7 +713,7 @@ enum Heard {
 /// The radio the node drives: the mock IC-7300, or any radio on the keyer box.
 enum AirRadio {
     Ic7300(MockRadio),
-    Keyer(any_radio::KeyerAir),
+    Keyer(Box<any_radio::KeyerAir>),
 }
 
 impl AirRadio {
