@@ -132,6 +132,21 @@ fn stucktest_sees_the_key_down_limit_trip_the_box() {
 }
 
 #[test]
+fn a_box_that_comes_back_from_its_watchdog_untripped_fails_the_hang_test() {
+    // It restarted and opened its key, but it would key again at once: after its
+    // watchdog fires it must key nothing until it is plugged in again.
+    let mut b = bench(|_| {});
+    b.keyer_box.now().forgets_on_reset = true;
+    let rep = hangtest(&mut b.station, "DE N0DE", SCALE).unwrap();
+    assert!(!rep.passed, "{rep:?}");
+    assert_eq!(b.keyer_box.now().resets, 1);
+    assert!(
+        rep.notes.iter().any(|n| n.contains("not tripped WATCHDOG")),
+        "{rep:?}"
+    );
+}
+
+#[test]
 fn a_box_that_never_resets_fails_the_hang_test() {
     // A radio whose key stays closed after the hang: as a box with no watchdog
     // would leave it.

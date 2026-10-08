@@ -118,6 +118,9 @@ pub struct BoxState {
     /// A fault: it keys every run at this speed, whatever it was asked, so that a
     /// run lasts longer than the node expects (a box with a wrong clock).
     pub slow_wpm: Option<u32>,
+    /// A fault: a watchdog reset brings it back as if plugged in, keeping nothing
+    /// (firmware without the saved state of the safety audit's KB-7).
+    pub forgets_on_reset: bool,
 }
 
 impl BoxState {
@@ -133,6 +136,7 @@ impl BoxState {
             resets: 0,
             deaf_to_silence: false,
             slow_wpm: None,
+            forgets_on_reset: false,
         }
     }
 
@@ -172,8 +176,12 @@ impl BoxState {
                 }
                 // As the firmware: what the last pass before the hang saved comes
                 // back, and a watchdog restart comes up tripped.
-                let saved = self.keyer.saved(at);
-                self.keyer = Keyer::restore(Limits::BOX, Boot::Watchdog, reset, Some(saved));
+                self.keyer = if self.forgets_on_reset {
+                    Keyer::new(Limits::BOX, Boot::Power, reset)
+                } else {
+                    let saved = self.keyer.saved(at);
+                    Keyer::restore(Limits::BOX, Boot::Watchdog, reset, Some(saved))
+                };
                 self.hung_at = None;
                 self.resets += 1;
                 self.replies.clear();
