@@ -4244,7 +4244,7 @@ mod tests {
         // A rig with no such setting.
         st.rig().lock().unwrap().time_out_timer = None;
         st.start_window().unwrap();
-        st.transmit(&tx(&["E"])).unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
         let rig = st.rig();
         let r = rig.lock().unwrap();
         assert_eq!((r.tunes, r.sent.len()), (4, 1));
@@ -4260,7 +4260,7 @@ mod tests {
         // The budget used up just now: the next piece waits for it to come back.
         st.record_carrier(Duration::from_millis(750));
         let t0 = Instant::now();
-        st.transmit(&tx(&["E"])).unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
         assert!(
             t0.elapsed() >= Duration::from_millis(1400),
             "{:?}",
@@ -4301,8 +4301,8 @@ mod tests {
         st.configure().unwrap();
         let long = tx(&["THIS ONE IS FAR TOO LONG", "TO KEY IN HALF A SECOND HERE"]);
         assert!(matches!(st.transmit(&long), Err(TxError::TooLong { .. })));
-        st.transmit(&tx(&["E"])).unwrap();
-        assert_eq!(st.rig().lock().unwrap().sent, ["E"]);
+        st.transmit(&tx(&["TEST"])).unwrap();
+        assert_eq!(st.rig().lock().unwrap().sent, ["TEST"]);
     }
 
     /// K14: at 18 wpm 30 zeros take 44 s, against the 45 s watchdog with the
@@ -4436,7 +4436,7 @@ mod tests {
         assert!(!st.tx_inhibited(), "a storm is not the radio's fault");
         assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::SwrLockout));
         st.start_window().unwrap();
-        st.transmit(&tx(&["E"])).unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
     }
 
     /// K4: no flush, so no wait without a limit while the radio's lock is held:
