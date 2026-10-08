@@ -17,6 +17,14 @@
 //! sidetone monitor times the audio against the wall clock, as on the air, and
 //! the box's link timeout (2 s) leaves a busy machine 0.4 s of real time to send
 //! its keep-alive (a CI runner has held a test's thread up for longer than 0.2 s).
+//!
+//! **Pauses.** A busy machine (a CI runner) can stop the whole test process for a
+//! moment. The box's clock and the node's both run on meanwhile, as they would if
+//! the node's host stopped on the air, so a pause of half a second at 5x plays as
+//! the host stopping for 2.5 s: the box's link timeout ends the run, as it should,
+//! and the scenario fails through no fault of the node. Each run measures the
+//! longest pause (its `machine` check); a run with a pause of [`PAUSE_LIMIT`] of
+//! radio time or more is not judged, and [`super::run`] runs it again.
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -25,13 +33,107 @@ use crate::keyer::monitor::Monitor;
 use crate::keyer::rig::KeyerRig;
 use keyer_core::keyer::{Ended, Trip};
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 
 /// Real time the radio waits for the operator's next audio when it falls behind.
 const FIELD_WAIT: Duration = Duration::from_millis(250);
 
 /// The fastest the keyer scenarios run, whatever scale is asked for.
 pub const MAX_SCALE: f32 = 5.0;
+
+/// The longest pause of the whole test process, in radio time, that a keyer
+/// scenario is judged through. Under the least slack its timing leaves: the box's
+/// link timeout (2 s) against the node's keep-alive every 0.25 s, and the operator
+/// answering 2 s after the radio goes quiet against the node coming back to
+/// receive about 1 s after its last key-up.
+pub const PAUSE_LIMIT: Duration = Duration::from_secs(1);
+
+/// How often the pause meter looks at the clock (real time).
+const PAUSE_TICK: Duration = Duration::from_millis(5);
+
+/// Measures how long the whole process stops running: a thread that looks at the
+/// clock every [`PAUSE_TICK`] and keeps the longest gap past that. Nothing the node
+/// does holds it up; only the machine can.
+struct PauseMeter {
+    stop: Arc<AtomicBool>,
+    /// The longest pause (real time), and the radio time it ended.
+    thread: Option<JoinHandle<(Duration, f64)>>,
+}
+
+impl PauseMeter {
+    fn start(clock: Clock) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let mut longest = (Duration::ZERO, 0.0);
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(PAUSE_TICK);
+                    let now = Instant::now();
+                    let gap = (now - last).saturating_sub(PAUSE_TICK);
+                    if gap > longest.0 {
+                        longest = (gap, clock.secs());
+                    }
+                    last = now;
+                }
+                longest
+            })
+        };
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// The `machine` check: whether the process ran without a pause too long for
+    /// the scenario's timing at `scale`.
+    fn check(mut self, scale: f32) -> Check {
+        self.stop.store(true, Ordering::Relaxed);
+        let (pause, at) = self
+            .thread
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        machine_check(pause, at, scale)
+    }
+}
+
+/// The `machine` check for a run whose longest pause was `pause` (real time),
+/// ending at radio time `at`.
+pub(super) fn machine_check(pause: Duration, at: f64, scale: f32) -> Check {
+    let limit = PAUSE_LIMIT.div_f32(scale);
+    let detail = format!(
+        "longest pause of the test process {:.2} s ({:.1} s radio time, at {at:.0} s); \
+         limit {:.2} s",
+        pause.as_secs_f32(),
+        pause.mul_f32(scale).as_secs_f32(),
+        limit.as_secs_f32()
+    );
+    if pause < limit {
+        check("machine", true, detail)
+    } else {
+        check(
+            "machine",
+            false,
+            format!(
+                "{detail}: the machine stopped the test for longer than the scenario's \
+                 timing allows at {scale}x, so the run says nothing about the node"
+            ),
+        )
+    }
+}
+
+impl Drop for PauseMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -227,6 +329,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let cfg = config(s, &dir.0, scale)?;
     let book = node::load_codebook(&cfg)?;
     let clock = Clock::new(scale);
+    let pauses = PauseMeter::start(clock);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
         monitor_settings(&cfg, scale),
@@ -293,7 +396,9 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         stuck_until: Mutex::new(None),
     };
     let mut air = air(s, AirRadio::Keyer(k), None, book, scale);
-    let Some((station, session, svc)) = operate(s, &mut air, &done, out) else {
+    let ran = operate(s, &mut air, &done, out);
+    out.checks.push(pauses.check(scale));
+    let Some((station, session, svc)) = ran else {
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
