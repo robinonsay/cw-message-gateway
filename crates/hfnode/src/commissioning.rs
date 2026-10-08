@@ -193,16 +193,24 @@ impl Limits {
 /// (for a command that can transmit, with the radio's own Time-Out Timer at 3 min
 /// and its TX Inhibit OFF), or the radio is closed again with nothing written.
 /// `open` opens the port, DTR and RTS lowered ([`Ic7300::open`] for the real radio).
+/// `node_inhibited`: the node's tx-inhibited file is there, so `run` starts
+/// without transmitting and the radio's TX Inhibit is only a warning
+/// ([`civ::preflight::preflight_for`]).
 pub fn open_for<P: Port>(
     stage: Stage,
     action: Action,
     limits: Limits,
+    node_inhibited: bool,
     open: impl FnOnce() -> Result<Ic7300<P>>,
 ) -> Result<Ic7300<P>> {
     check(stage, action, limits.power_watts)?;
     check_keying(action, limits)?;
     let mut rig = open()?;
-    let report = civ::preflight::preflight(&mut rig, action.purpose());
+    let report = civ::preflight::preflight_for(
+        &mut rig,
+        action.purpose(),
+        node_inhibited && action == Action::Run,
+    );
     for line in report.to_string().lines() {
         log::info!("preflight: {line}");
     }
@@ -284,7 +292,7 @@ mod tests {
         let radio = MockRadio::new(MockConfig::default());
         let limits = limits(60, 18, 60);
         let mut opened = false;
-        let Err(e) = open_for(Stage::Done, Action::Run, limits, || {
+        let Err(e) = open_for(Stage::Done, Action::Run, limits, false, || {
             opened = true;
             Ok(Ic7300::with_port(radio.port(), 0x94))
         }) else {
@@ -358,7 +366,7 @@ mod tests {
             key_speed_wpm: 18,
             chunk_chars: 60,
         };
-        let r = open_for(stage, action, limits, || {
+        let r = open_for(stage, action, limits, false, || {
             opened = true;
             Ok(Ic7300::with_port(radio.port(), 0x94))
         });

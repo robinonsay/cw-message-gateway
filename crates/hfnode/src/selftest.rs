@@ -363,9 +363,8 @@ pub struct Expect {
     /// The node forced the radio to receive (stopped the keyer with `17 FF`) while
     /// it ran, as it must after any fault and never otherwise.
     pub forced_receive: bool,
-    /// The node inhibited transmitting until restart. It leaves the radio's semi
-    /// break-in off, and, if it latched the inhibit while it ran, the radio's own
-    /// TX Inhibit on (16 66 01).
+    /// The node inhibited transmitting until restart (or started inhibited). It
+    /// leaves the radio's semi break-in off and its own TX Inhibit on (16 66 01).
     pub inhibited: bool,
     /// `DE <call>` keyed right after a tune: one per tune that matched when the node
     /// started listening (at start-up or a window's start; a tune before a reply is
@@ -1623,9 +1622,12 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     });
     // As `hfnode run` opens the radio, on a station past every bring-up stage: the
     // read-only preflight, with the radio's Time-Out Timer at 3 min and its TX
-    // Inhibit OFF required, before anything is written.
+    // Inhibit OFF required (unless tx-inhibited is there), before anything is
+    // written.
+    inhibit_at_start(s, &cfg)?;
     let limits = commissioning::Limits::of(&cfg.station);
-    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, || {
+    let inhibited = crate::station::InhibitLatch::in_dir(&cfg.state_dir).is_set();
+    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, inhibited, || {
         Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
     });
     let inner = match (opened, s.expect.refused) {
@@ -1648,7 +1650,6 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         radio.inject(f.clone());
     }
     let rig = TimeScaled { inner, scale };
-    inhibit_at_start(s, &cfg)?;
     let station = Station::new(
         rig,
         station_config(&cfg, scale),
@@ -2057,10 +2058,18 @@ fn ends_with_call(text: &str) -> bool {
     }
 }
 
+/// Whether `text` ends with an over prosign (K, KN, SK, ...).
+fn ends_over(text: &str) -> bool {
+    text.split_whitespace()
+        .last()
+        .is_some_and(protocol::is_over)
+}
+
 /// The node's station IDs: `DE <call>` as the first piece after each tune that
 /// matched (`tunes_at`, radio time), the expected number inside overs, and never
 /// longer than the station's ID interval from the start of a transmission (or an
-/// ID) to the end of the next ID. A piece cut short by a fault ends the stretch.
+/// ID) to the end of the next ID. An over cut short by a fault, part-way through a
+/// piece or between two, ends the stretch, which must fit the interval too.
 fn station_id_check(
     keyed: &[civ::mock::Keyed],
     tunes_at: &[Duration],
@@ -2079,13 +2088,17 @@ fn station_id_check(
     let ids = (0..tunes_at.len()).filter(|&i| after_tune(i)).count() as u32;
     let mid_ids = on_air.iter().filter(|k| k.text == id).count() as u32 - ids;
     let (mut longest, mut from) = (Duration::ZERO, None);
-    for k in &on_air {
-        if !k.complete {
-            from = None;
-            continue;
-        }
+    for (i, k) in on_air.iter().enumerate() {
         let start = *from.get_or_insert(k.start);
-        if ends_with_call(&k.text) {
+        // Cut short by a fault: stopped part-way through a piece, or between two
+        // (no over prosign, and nothing more keyed as soon as the transcript waits
+        // for). The node goes silent, so the stretch ends with it.
+        let stopped = !k.complete
+            || !ends_over(&k.text)
+                && on_air
+                    .get(i + 1)
+                    .is_none_or(|n| n.start.saturating_sub(k.end).as_secs_f32() > CUT_AFTER);
+        if k.complete && ends_with_call(&k.text) || stopped {
             longest = longest.max(k.end.saturating_sub(start));
             from = None;
         }
@@ -2116,7 +2129,9 @@ fn station_id_check(
 /// latched the inhibit while it ran.
 fn settings_check(cfg: &Config, scenario: &Scenario, s: &Settings) -> Check {
     let e = &scenario.expect;
-    let radio_inhibited = e.inhibited && !scenario.node.inhibited_at_start;
+    // Inhibited at start too: the node turns the radio's TX Inhibit on once it
+    // has the radio.
+    let radio_inhibited = e.inhibited;
     let st = &cfg.station;
     let watts = s.rf_power_level as f32 * 100.0 / 255.0;
     let wpm = 6.0 + s.key_speed_level as f32 * 42.0 / 255.0;
@@ -3487,53 +3502,91 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.forced_receive = true;
         s
     });
-    let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
-        let mut s = tx(name, about, "MOM", LONG_TEXT);
+    v.push({
+        let mut s = tx(
+            "fault-civ-ng",
+            "the radio answers NG to the first CW message: nothing keyed and no fault, the \
+             operator repeats",
+            "MOM",
+            LONG_TEXT,
+        );
         // After the first tune and ID, which read the meters too.
         s.script.insert(
             0,
+            Step::Inject(Fault::Reply {
+                cmd: vec![0x17],
+                skip: 0,
+                times: 1,
+                kind: ReplyFault::Ng,
+            }),
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    // A reply lost or late while the node keys counts as a fault (the safety
+    // audit's B1: RF on the USB cable from a bad load fails the same way at every
+    // transmission): silent until the next tune, 10 minutes on here, and the next
+    // fault in a row would latch the inhibit.
+    let civ_fault = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault| {
+        let mut s = base(name, about);
+        s.node.retune_minutes = 10;
+        let rb44 = rb_tx(44, "MOM", LONG_TEXT);
+        let done = de("SENT 45");
+        s.script = vec![
+            // After the first tune and ID, which read the meters too.
             Step::Inject(Fault::Reply {
                 cmd: cmd.to_vec(),
                 skip: 0,
                 times: 1,
                 kind,
             }),
-        );
-        if cut {
-            s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
-        }
+            Step::Unanswered {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM {LONG_TEXT} K"),
+                tries: 2,
+            },
+            Step::Wait(600.0),
+            Step::FirstTry,
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM {LONG_TEXT} K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = vec![
+            Over::Cut(rb_long.clone()),
+            Over::Full(rb44),
+            Over::Full(done),
+        ];
+        s.expect.sent = sent("MOM", LONG_TEXT);
+        s.expect.last_seq = 45;
+        s.expect.tunes = 2;
         s.expect.forced_receive = true;
         s
     };
-    v.push(civ(
-        "fault-civ-ng",
-        "the radio answers NG to the first CW message: nothing keyed, the operator repeats",
-        &[0x17],
-        ReplyFault::Ng,
-        false,
-    ));
-    v.push(civ(
+    v.push(civ_fault(
         "fault-civ-lost-reply",
-        "the reply to the first CW message is lost: the node stops and forces receive",
+        "the reply to the first CW message is lost: the node stops, forces receive and counts \
+         a fault, silent until its next tune; then it answers",
         &[0x17],
         ReplyFault::Drop,
-        true,
     ));
-    v.push(civ(
+    v.push(civ_fault(
         "fault-civ-late-reply",
-        "an SWR reading arrives after the driver's timeout: the node stops, resynchronises and recovers",
+        "an SWR reading arrives after the driver's timeout: the node stops, resynchronises and \
+         counts a fault, silent until its next tune; then it answers",
         &[0x15, 0x12],
         ReplyFault::Delay(Duration::from_millis(700)),
-        true,
     ));
     v.push({
-        let mut s = civ(
+        let mut s = civ_fault(
             "transceive",
             "someone at the radio keeps nudging the dial: CI-V Transceive frames to 00h arrive \
              unasked, also while the driver resynchronises after a late SWR reading",
             &[0x15, 0x12],
             ReplyFault::Delay(Duration::from_millis(700)),
-            true,
         );
         s.radio.dial_nudges = true;
         s
@@ -3583,6 +3636,24 @@ pub fn scenarios() -> Vec<Scenario> {
              and tells the owner once",
         );
         s.node.inhibited_at_start = true;
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HI K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s.expect.tunes = 0;
+        s.expect.ids = 0;
+        s.expect.inhibited = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-inhibited-at-start-radio-inhibited",
+            "as fault-inhibited-at-start, with the radio's TX Inhibit still on from the latch: \
+             the preflight lets the node start, so that it tells the owner",
+        );
+        s.node.inhibited_at_start = true;
+        s.radio.tx_inhibit = true;
         s.script = vec![Step::Unanswered {
             text: format!("{FIELD_CALL} 42 {{42}} TX MOM HI K"),
             tries: 2,
@@ -4987,6 +5058,15 @@ mod tests {
         // An over cut short by a fault ends the stretch.
         keyed[2].complete = false;
         assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // Or stopped between two pieces: no over prosign, then nothing keyed for
+        // longer than the transcript waits.
+        keyed[2].complete = true;
+        keyed[3].accepted = s(320);
+        keyed[3].start = s(320);
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // An over that ended (K) does not end the stretch.
+        keyed[2].text = "NR 1 FM MOM TEST = A K".into();
+        assert!(!station_id_check(&keyed, &tunes, &e, 100.0).pass);
     }
 
     /// An outcome whose checks all pass, as a clean sweep run's would.

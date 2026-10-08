@@ -433,6 +433,9 @@ type Radio = Arc<Mutex<DynRig>>;
 /// inhibit a failed stop latches.
 static RADIO: Mutex<Option<(Radio, InhibitLatch)>> = Mutex::new(None);
 
+/// The alerts of `hfnode run`, which a stop signal waits for before it exits.
+static ALERTS: Mutex<Option<alert::Flush>> = Mutex::new(None);
+
 /// From here on a stop signal puts `st`'s radio back on receive before the program
 /// exits, and latches `st`'s own transmit inhibit if it cannot: the one in the state
 /// directory, which the next start reads.
@@ -451,14 +454,19 @@ fn on_stop_signal() {
     stop_guarded(|code| std::process::exit(code));
 }
 
-/// What a stop signal does: put the guarded radio back on receive, then `exit` with
-/// the exit code while still holding it.
+/// What a stop signal does: put the guarded radio back on receive, let the alerts
+/// already queued go out (a stop that latches the inhibit queues its own), for at
+/// most [`alert::EXIT_GRACE`], then `exit` with the exit code while still holding it.
 fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     let guarded = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some((radio, inhibit)) = guarded else {
         return exit(130);
     };
     let (_held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
+    let alerts = ALERTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if alerts.is_some_and(|a| !a.wait(alert::EXIT_GRACE)) {
+        log::warn!("stopped waiting for an inhibit alert to be sent");
+    }
     exit(code)
 }
 
@@ -900,6 +908,7 @@ fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
         cfg.station.commissioned,
         action,
         commissioning::Limits::of(&cfg.station),
+        action == Action::Run && InhibitLatch::in_dir(&cfg.state_dir).is_set(),
         || open_radio(cfg),
     )
 }
@@ -1008,23 +1017,49 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     Ok(())
 }
 
+/// The state directories the setup guides give (docs/raspberry-pi-setup.md,
+/// docs/macos-setup.md, docs/windows-setup.md).
+const STANDARD_STATE_DIRS: [&str; 3] = [
+    "/var/lib/hfnode",
+    "~/Library/Application Support/hfnode/state",
+    r"~\AppData\Local\hfnode\state",
+];
+
 /// `radio setup`: turn the radio's TX Inhibit (16 66) off again, which the node
-/// turns on when it inhibits transmitting ([`civ::Rig::inhibit_transmit`]), but only once [`INHIBIT_FILE`] is gone from the
-/// state directory: someone has checked the radio and removed it. Until then
+/// turns on when it inhibits transmitting ([`civ::Rig::inhibit_transmit`]), but
+/// only once [`INHIBIT_FILE`] is gone from the state directory, and from each of
+/// the [`STANDARD_STATE_DIRS`]: someone has checked the radio and removed it, also
+/// when this runs with another config than the node's (a bench one). Until then
 /// nothing is written, and every command that can transmit is refused by the
 /// preflight as well as by the file.
 fn release_tx_inhibit<P: civ::ic7300::Port>(
     rig: &mut civ::ic7300::Ic7300<P>,
     state_dir: &Path,
 ) -> Result<()> {
+    let mut dirs = vec![state_dir.to_path_buf()];
+    dirs.extend(
+        STANDARD_STATE_DIRS
+            .iter()
+            .filter_map(|d| hfnode::config::expand_home(Path::new(d)).ok()),
+    );
+    release_tx_inhibit_unless(rig, &dirs)
+}
+
+/// [`release_tx_inhibit`], with the state directories to look in.
+fn release_tx_inhibit_unless<P: civ::ic7300::Port>(
+    rig: &mut civ::ic7300::Ic7300<P>,
+    state_dirs: &[PathBuf],
+) -> Result<()> {
     if !rig.tx_inhibit()? {
         return Ok(());
     }
-    if InhibitLatch::in_dir(state_dir).is_set() {
+    // One this user cannot read counts as holding the file (the Pi's is the
+    // hfnode user's: run this as that user, as the alert says).
+    if let Some(dir) = state_dirs.iter().find(|d| InhibitLatch::in_dir(d).is_set()) {
         log::warn!(
-            "the radio's TX Inhibit is ON, and {INHIBIT_FILE} is in {}: left ON until the \
-             radio has been checked and the file removed",
-            state_dir.display()
+            "the radio's TX Inhibit is ON, and {INHIBIT_FILE} is in {} (or that directory \
+             cannot be read): left ON until the radio has been checked and the file removed",
+            dir.display()
         );
         return Ok(());
     }
@@ -1153,6 +1188,7 @@ fn run(config: &Path, cfg: &Config) -> Result<()> {
     // First, so the first check is likely back before the first window.
     let storm = start_storm_watch(cfg)?;
     let alerts = alert::Alerts::start(cfg, config);
+    *ALERTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(alerts.flush());
     let result = run_node(cfg, &alerts, storm);
     // The station is gone: dropping it forced receive, which can still latch the
     // inhibit. Let an alert already queued go out before the process exits.
@@ -2169,10 +2205,39 @@ key_file = '{}'
             "left on while tx-inhibited is there"
         );
         std::fs::remove_file(dir.path().join(INHIBIT_FILE)).unwrap();
-        release_tx_inhibit(&mut rig, dir.path()).unwrap();
+        // S7 (the safety audit's pre-review): nor while the node's own state
+        // directory holds it, `radio setup` run with another config.
+        let node = tempfile::tempdir().unwrap();
+        InhibitLatch::in_dir(node.path()).latch("stuck");
+        let dirs = [dir.path().to_path_buf(), node.path().to_path_buf()];
+        release_tx_inhibit_unless(&mut rig, &dirs).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while the node's is there"
+        );
+        std::fs::remove_file(node.path().join(INHIBIT_FILE)).unwrap();
+        release_tx_inhibit_unless(&mut rig, &dirs).unwrap();
         assert!(!rig.tx_inhibit().unwrap());
         let violations = radio.report().violations;
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn radio_setup_looks_in_the_standard_state_directories() {
+        let home = hfnode::config::expand_home(Path::new("~")).unwrap();
+        let mac = home.join("Library/Application Support/hfnode/state");
+        let found: Vec<PathBuf> = STANDARD_STATE_DIRS
+            .iter()
+            .map(|d| hfnode::config::expand_home(Path::new(d)).unwrap())
+            .collect();
+        assert!(found.contains(&PathBuf::from("/var/lib/hfnode")));
+        assert!(found.contains(&mac), "{found:?}");
+        let example: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        assert!(
+            found.contains(&example.state_dir),
+            "{:?}",
+            example.state_dir
+        );
     }
 
     #[test]
@@ -2187,6 +2252,24 @@ key_file = '{}'
         let e = radio_rx(&mut sim, dir.path()).unwrap_err();
         assert!(e.to_string().contains("not confirmed on receive"), "{e:#}");
         assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    /// Alerts that take half a second to send, and what they sent.
+    fn slow_alerts() -> (Arc<Mutex<Vec<String>>>, alert::Alerts) {
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = sent.clone();
+        let deliver: alert::Deliver = Box::new(move |subject: &str, _: &str| {
+            std::thread::sleep(Duration::from_millis(500));
+            log.lock().unwrap().push(subject.into());
+            Ok(())
+        });
+        let alerts = alert::Alerts::with_deliver(
+            "N0CALL",
+            Path::new("hfnode.toml"),
+            Some(deliver),
+            Vec::new(),
+        );
+        (sent, alerts)
     }
 
     #[test]
@@ -2205,10 +2288,17 @@ key_file = '{}'
             StationConfig::from_config(&cfg.station),
             Some(state.join("health.csv")),
         );
+        // Its alert goes out before it exits (S6 of the safety audit's
+        // pre-review): the exit does not wait for `run` to return.
+        let (sent, alerts) = slow_alerts();
+        st.notify_inhibit(alerts.sender());
+        *ALERTS.lock().unwrap() = Some(alerts.flush());
         guard_station(&st);
-        let code = stop_guarded(|code| code);
+        let (code, emailed) = stop_guarded(|code| (code, sent.lock().unwrap().len()));
         *RADIO.lock().unwrap() = None;
+        *ALERTS.lock().unwrap() = None;
         assert_eq!(code, 1);
+        assert_eq!(emailed, 1);
         assert!(InhibitLatch::in_dir(&state).is_set());
         // With nothing guarded, the signal only interrupts.
         assert_eq!(stop_guarded(|code| code), 130);

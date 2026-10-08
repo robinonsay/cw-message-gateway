@@ -224,9 +224,9 @@ pub const MAX_TRANSMISSION: Duration = Duration::from_secs(30 * 60);
 #[derive(Debug, PartialEq)]
 pub enum TxError {
     /// Since the last tune, SWR was too high, the output missing or too high, the
-    /// radio stuck on transmit, the tuner could not match, the tune failed, or the
-    /// radio could not be set up for the tune; transmitting is suspended until the
-    /// next one.
+    /// radio stuck on transmit, a transmission failed while keying, the tuner could
+    /// not match, the tune failed, or the radio could not be set up for the tune;
+    /// transmitting is suspended until the next one.
     SwrLockout,
     /// SWR was too high just now; the transmission was cut off.
     HighSwr(f32),
@@ -701,6 +701,22 @@ impl Inhibit {
         n.latched = Some(notice);
     }
 
+    /// Tell the owner of something more that happened while latched, as a notice
+    /// of its own; nothing else changes.
+    fn alert(&self, why: &str) {
+        log::error!("{why}");
+        let notice = InhibitNotice {
+            at: Some(crate::gateway::unix_now()),
+            reason: why.to_string(),
+            from_file: false,
+            file: self.file.clone().filter(|f| f.exists()),
+        };
+        let n = self.notice.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(to) = &n.to {
+            let _ = to.send(notice);
+        }
+    }
+
     fn notify(&self, to: Sender<InhibitNotice>) {
         let mut n = self.notice.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(latched) = &n.latched {
@@ -894,9 +910,20 @@ pub struct Station<R: Rig + 'static> {
     health_log: Option<PathBuf>,
     /// While this says so, nothing is tuned or keyed.
     storm: Option<Arc<StormHold>>,
-    /// Faults since the last transmission that went out whole
-    /// ([`FAULTS_TO_LATCH`]).
+    /// Faults since the last transmission that went out whole and keyed for at
+    /// least `fault_keying` ([`FAULTS_TO_LATCH`]).
     faults: u32,
+    /// The longest a transmission had keyed when it faulted, since `faults` was
+    /// last cleared: a load that fails only on longer keying (heating up) must not
+    /// see its count cleared by a short transmission between, such as the ID after
+    /// each tune.
+    fault_keying: Duration,
+    /// Keying handed to the keyer so far in the current transmission (pieces
+    /// sent, whether or not their replies came back); zero between transmissions.
+    tx_keying: Duration,
+    /// A tune is under way: the watchdog times it against `tune_timeout`, not
+    /// `max_key`.
+    tuning: Arc<AtomicBool>,
     /// For [`StationConfig::duty`].
     duty: DutyLog,
 }
@@ -948,6 +975,9 @@ impl<R: Rig + 'static> Station<R> {
             health_log,
             storm: None,
             faults: 0,
+            fault_keying: Duration::ZERO,
+            tx_keying: Duration::ZERO,
+            tuning: Arc::new(AtomicBool::new(false)),
             duty,
         };
         s.spawn_watchdog();
@@ -986,6 +1016,14 @@ impl<R: Rig + 'static> Station<R> {
         self.tx_inhibit.is_set()
     }
 
+    /// [`TxError::Inhibited`] once transmitting has been inhibited.
+    fn check_inhibit(&self) -> Result<(), TxError> {
+        match self.tx_inhibited() {
+            true => Err(TxError::Inhibited),
+            false => Ok(()),
+        }
+    }
+
     /// Whether a transmission could be keyed now: transmitting is not inhibited, and
     /// not locked out until the next tune (high SWR, no output, a tuner that could
     /// not match, or a radio that could not be set up for the last tune). Reads no
@@ -1005,20 +1043,27 @@ impl<R: Rig + 'static> Station<R> {
     /// The watchdog thread. Every [`WATCHDOG_TICK`]:
     ///
     /// - While the node keys (a piece, or a tune), if that has gone on longer than
-    ///   `max_key`, it forces receive, and keeps trying on later ticks until receive
-    ///   is confirmed (latching the inhibit if it is not). If the radio stays busy
-    ///   with another call for `radio_wait` (one that never returns), it latches the
-    ///   inhibit without it, and keeps trying.
-    /// - While it does not, it looks for the radio transmitting all the same: a key
-    ///   held closed at the radio as the rig sees it ([`Rig::held_key`]), and, on a
-    ///   rig whose status is a quick read ([`Rig::polls_status_while_idle`]), the
-    ///   radio's own status every [`IDLE_POLL_TICKS`] ticks: transmit on
-    ///   [`RX_READINGS`] reads in a row forces receive and latches the inhibit;
-    ///   [`IDLE_ERRORS`] failed reads in a row force receive (which latches it if
-    ///   receive cannot be confirmed). It never waits for the radio while another
-    ///   call has it.
+    ///   `max_key` (a tune: `tune_timeout` and the stuck margin), it forces
+    ///   receive, and keeps trying on later ticks until receive is confirmed
+    ///   (latching the inhibit if it is not). If the radio stays busy with another
+    ///   call for `radio_wait` (one that never returns), it latches the inhibit
+    ///   without it, and keeps trying.
+    /// - While it does not, inhibited or not, it looks for the radio transmitting
+    ///   all the same: a key held closed at the radio as the rig sees it
+    ///   ([`Rig::held_key`]), and, on a rig whose status is a quick read
+    ///   ([`Rig::polls_status_while_idle`]), the radio's own status every
+    ///   [`IDLE_POLL_TICKS`] ticks: transmit on [`RX_READINGS`] reads in a row
+    ///   forces receive and latches the inhibit (already latched: forces receive
+    ///   again, turns the radio's own inhibit on again, and tells the owner once);
+    ///   [`IDLE_ERRORS`] failed reads in a row, not inhibited, force receive (which
+    ///   latches it if receive cannot be confirmed). It never waits for the radio
+    ///   while another call has it.
+    /// - Once transmitting is inhibited, the first time it has the radio, it has
+    ///   the radio refuse to transmit on its own too ([`Rig::inhibit_transmit`]):
+    ///   an inhibit latched without the radio (a call to it that did not return,
+    ///   a stop signal) or before this process started has not reached it yet.
     fn spawn_watchdog(&self) {
-        let (rig, since, fired, inhibit, stop, max, wait) = (
+        let (rig, since, fired, inhibit, stop, max, wait, tuning) = (
             self.rig.clone(),
             self.keying_since.clone(),
             self.watchdog_fired.clone(),
@@ -1026,26 +1071,37 @@ impl<R: Rig + 'static> Station<R> {
             self.stop.clone(),
             self.cfg.max_key,
             self.cfg.radio_wait,
+            self.tuning.clone(),
         );
+        // A tune ends by itself within `tune_timeout` (the manual's longest is 15 s),
+        // whatever `max_key` is.
+        let tune_limit = self.cfg.tune_timeout + self.cfg.stuck_margin;
         thread::spawn(move || {
             // Not keying: ticks since the radio's status was last read, and the reads
             // in a row that found it transmitting, or failed.
             let (mut ticks, mut keyed, mut failed) = (0, 0, 0);
+            // The radio has been told to refuse to transmit since the inhibit
+            // latched; the owner has been told of it transmitting all the same.
+            let (mut at_radio, mut told) = (false, false);
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(WATCHDOG_TICK);
                 let started = *lock(&since);
-                if started.is_some() || inhibit.is_set() {
+                if started.is_some() {
                     (ticks, keyed, failed) = (0, 0, 0);
                 }
-                if started.is_some_and(|t| t.elapsed() > max) {
-                    log::error!("watchdog: keying exceeded {max:?}, forcing receive");
+                let limit = match tuning.load(Ordering::SeqCst) {
+                    true => tune_limit,
+                    false => max,
+                };
+                if started.is_some_and(|t| t.elapsed() > limit) {
+                    log::error!("watchdog: keying exceeded {limit:?}, forcing receive");
                     fired.store(true, Ordering::SeqCst);
                     let Some(mut r) = lock_within(&rig, wait) else {
                         // A call to the radio that has not returned: nothing can be
                         // sent to it, so nothing more may be keyed. Tried again on the
                         // next tick.
                         inhibit.latch(&format!(
-                            "keying exceeded {max:?}, and the radio could not be reached for \
+                            "keying exceeded {limit:?}, and the radio could not be reached for \
                              {wait:?} to stop it (a call to it did not return)"
                         ));
                         continue;
@@ -1056,7 +1112,7 @@ impl<R: Rig + 'static> Station<R> {
                     }
                     continue;
                 }
-                if started.is_some() || inhibit.is_set() {
+                if started.is_some() {
                     continue;
                 }
                 let mut r = match rig.try_lock() {
@@ -1069,7 +1125,17 @@ impl<R: Rig + 'static> Station<R> {
                 if lock(&since).is_some() {
                     continue;
                 }
-                if let Some(why) = r.held_key() {
+                if inhibit.is_set() && !at_radio {
+                    match r.inhibit_transmit() {
+                        Ok(()) => at_radio = true,
+                        Err(e) => log::error!(
+                            "watchdog: inhibiting transmit at the radio: {e}; trying again"
+                        ),
+                    }
+                }
+                // A key held at the radio is looked for until it latches the inhibit
+                // (the rig's own stop has then been sent, as forcing receive sends it).
+                if let Some(why) = r.held_key().filter(|_| !inhibit.is_set()) {
                     log::error!("watchdog: the radio looks keyed while idle: {why}");
                     let _ = force_receive_latching(&mut *r, &inhibit);
                     continue;
@@ -1086,7 +1152,26 @@ impl<R: Rig + 'static> Station<R> {
                     Ok(false) => (keyed, failed) = (0, 0),
                     Ok(true) => {
                         (keyed, failed) = (keyed + 1, 0);
-                        if keyed >= RX_READINGS {
+                        if keyed >= RX_READINGS && inhibit.is_set() {
+                            keyed = 0;
+                            log::error!(
+                                "watchdog: the radio is on transmit although transmitting is \
+                                 inhibited: forcing receive again"
+                            );
+                            let _ = force_receive(&mut *r);
+                            if let Err(e) = r.inhibit_transmit() {
+                                log::error!("inhibiting transmit at the radio: {e}");
+                            }
+                            if !told {
+                                told = true;
+                                inhibit.alert(
+                                    "the radio went on transmit while transmitting was inhibited \
+                                     (1C 00 read transmit twice), with nothing from the node \
+                                     keying it: someone at the radio, VOX, a key or PTT line, or \
+                                     another program. The node forces receive again each time",
+                                );
+                            }
+                        } else if keyed >= RX_READINGS {
                             keyed = 0;
                             log::error!(
                                 "watchdog: the radio is on transmit with nothing from the node \
@@ -1105,7 +1190,10 @@ impl<R: Rig + 'static> Station<R> {
                     }
                     Err(e) => {
                         (keyed, failed) = (0, failed + 1);
-                        if failed >= IDLE_ERRORS {
+                        // Inhibited already, and the radio not answering (switched
+                        // off, or its cable out): nothing to stop, and nothing more
+                        // to latch.
+                        if failed >= IDLE_ERRORS && !inhibit.is_set() {
                             failed = 0;
                             log::error!(
                                 "watchdog: the radio's status could not be read {IDLE_ERRORS} \
@@ -1153,8 +1241,11 @@ impl<R: Rig + 'static> Station<R> {
     /// IC-7300.
     fn apply_settings(&self) -> civ::Result<()> {
         let c = self.cfg.clone();
-        let break_in = !self.tx_inhibited();
         self.with_rig(|r| {
+            // Read with the radio held: an inhibit latched before this (the watchdog
+            // latches with the radio held) is seen, and one latched after reaches
+            // the radio after this.
+            let break_in = !self.tx_inhibit.is_set();
             // Mode first: with SSB/CW Synchronous Tuning ON, a change from SSB to CW
             // shifts the frequency by the CW pitch (p. 12-6, manual text line 6409).
             r.set_mode_cw()?;
@@ -1314,6 +1405,15 @@ impl<R: Rig + 'static> Station<R> {
             self.tuned = true;
             return Ok(());
         }
+        // Room in the duty budget for the longest tune first: its carrier is only
+        // counted once it has keyed.
+        let longest = self.cfg.tune_timeout;
+        if let Err(e) = self.rest_before_keying(Run {
+            keying: longest,
+            carrier: longest,
+        }) {
+            return Err(RigError::Protocol(e.to_string()));
+        }
         // Cleared only now, as the tune runs: the tune decides it again below.
         self.swr_lockout = false;
         let t0 = Instant::now();
@@ -1414,17 +1514,21 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     /// Start a tuner cycle, wait for it to end, for at most `tune_timeout`, and for
-    /// the radio to read receive after it. The watchdog times it as it times keying
-    /// (`max_key`), from the tune command; it stops for the storm stand-down. Its
-    /// whole time counts as carrier for [`StationConfig::duty`].
+    /// the radio to read receive after it. The watchdog times it as it times keying,
+    /// from the tune command, against `tune_timeout` and the stuck margin rather
+    /// than `max_key` (a tune may take 15 s, p. 16-3; manual text line 8119); it
+    /// stops for the storm stand-down. Its whole time counts as carrier for
+    /// [`StationConfig::duty`].
     fn tune(&mut self, t0: Instant) -> civ::Result<()> {
         // Tuning transmits: whoever calls this, not during a storm stand-down.
         if let Some(why) = self.storm_reason() {
             return Err(RigError::Protocol(format!("storm stand-down: {why}")));
         }
         self.watchdog_fired.store(false, Ordering::SeqCst);
+        self.tuning.store(true, Ordering::SeqCst);
         *lock(&self.keying_since) = Some(Instant::now());
         let result = self.run_tuner(t0);
+        self.tuning.store(false, Ordering::SeqCst);
         self.record_carrier(t0.elapsed());
         result
     }
@@ -1441,8 +1545,8 @@ impl<R: Rig + 'static> Station<R> {
         loop {
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(RigError::Protocol(format!(
-                    "the tune went on longer than max_key_seconds ({:?})",
-                    self.cfg.max_key
+                    "the tune went on longer than its limit ({:?})",
+                    self.cfg.tune_timeout + self.cfg.stuck_margin
                 )));
             }
             if let Some(why) = self.storm_reason() {
@@ -1521,21 +1625,43 @@ impl<R: Rig + 'static> Station<R> {
         // SWR is measured all through every transmission, not once per window: the
         // antenna or a connector can fail in the middle of one.
         (self.swr_measured, self.swr_worst, self.dark) = (false, None, None);
+        self.tx_keying = Duration::ZERO;
+        let faults = self.faults;
         // On success the radio has been seen back on receive after the last piece;
         // on failure force it there.
         let result = self
             .transmit_inner(tx)
             .or_else(|e| self.force_rx().and(Err(e)));
         match &result {
-            // A transmission that went out whole: the faults before it are behind.
-            Ok(()) => self.faults = 0,
+            // A transmission that went out whole, keying for as long as the one that
+            // faulted at least: the faults before it are behind.
+            Ok(()) if self.tx_keying >= self.fault_keying => {
+                (self.faults, self.fault_keying) = (0, Duration::ZERO);
+            }
+            Ok(()) => log::info!(
+                "keyed {:.1} s whole, less than the {:.1} s a transmission had keyed when it \
+                 faulted: {} fault(s) still counted",
+                self.tx_keying.as_secs_f32(),
+                self.fault_keying.as_secs_f32(),
+                self.faults
+            ),
             // Back on receive now, but the next transmission may stick too.
             Err(TxError::Stuck) => {
                 log::error!("radio stuck on transmit: silent until the next tune");
                 self.fault("the radio stayed on transmit and had to be forced to receive");
             }
+            // Stopped from outside: nothing wrong with the radio or the load.
+            Err(TxError::Inhibited | TxError::Storm(_)) => {}
+            // Anything else once a piece has gone to the keyer, counted like the
+            // faults above unless one of them was: a reply lost to RF on the USB
+            // cable from a bad load fails the same way at every transmission.
+            Err(e) if self.tx_keying > Duration::ZERO && self.faults == faults => {
+                log::error!("transmission failed while keying ({e}): silent until the next tune");
+                self.fault(&format!("a transmission failed while keying ({e})"));
+            }
             Err(_) => {}
         }
+        self.tx_keying = Duration::ZERO;
         // The highest SWR measured, once per transmission (a high one was logged
         // as it stopped it).
         if let Some(worst) = self.swr_worst.take() {
@@ -1633,8 +1759,9 @@ impl<R: Rig + 'static> Station<R> {
     /// watchdog, which only starts timing once the piece is sent.
     fn rest_before_keying(&self, run: Run) -> Result<(), TxError> {
         loop {
-            // A storm may have come on during the rest.
+            // A storm, or an inhibit, may have come on during the rest.
             self.check_storm()?;
+            self.check_inhibit()?;
             let rest = self.rest_needed(run)?;
             if rest.is_zero() {
                 return Ok(());
@@ -1731,11 +1858,13 @@ impl<R: Rig + 'static> Station<R> {
     }
 
     /// Lock out until the next tune for a fault (high SWR, no output or too much,
-    /// keying not heard, a radio left on transmit, no tuner match, a failed tune),
-    /// and latch the inhibit at the [`FAULTS_TO_LATCH`]th in a row.
+    /// keying not heard, a radio left on transmit, a transmission that failed
+    /// while keying, no tuner match, a failed tune), and latch the inhibit at the
+    /// [`FAULTS_TO_LATCH`]th in a row.
     fn fault(&mut self, what: &str) {
         self.swr_lockout = true;
         self.faults += 1;
+        self.fault_keying = self.fault_keying.max(self.tx_keying);
         if self.faults >= FAULTS_TO_LATCH {
             self.health("faults", &self.faults.to_string());
             self.latch(&format!(
@@ -1822,6 +1951,8 @@ impl<R: Rig + 'static> Station<R> {
         let keying = dot * cw::units(piece);
         let carrier = dot * cw::mark_units(piece);
         let hang = dot.mul_f32(self.cfg.break_in_delay_dots);
+        // An inhibit latched while this transmission was under way (the watchdog,
+        // a stop signal) stops it before the next piece: the rest checks it last.
         self.rest_before_keying(Run { keying, carrier })?;
         // A rig without meters (a handheld, or any radio on the keyer box) cannot
         // measure SWR or output: it has its own limits instead (a handheld's waited
@@ -1834,6 +1965,11 @@ impl<R: Rig + 'static> Station<R> {
         };
         *lock(&self.keying_since) = Some(Instant::now());
         let sent = self.with_rig(|r| r.send_cw(piece));
+        // Refused (NG): the keyer took nothing. Anything else may have keyed it, a
+        // lost reply included.
+        if !matches!(sent, Err(RigError::Rejected)) {
+            self.tx_keying += keying;
+        }
         let at = Instant::now();
         let stuck_at = at + keying + hang + self.cfg.stuck_margin.max(settle);
         let watched = match sent {
@@ -1994,14 +2130,15 @@ impl<R: Rig + 'static> Station<R> {
         TxError::NoOutput
     }
 
-    /// Sleep until `t`, stopping early if the watchdog fires or the storm
-    /// stand-down comes on.
+    /// Sleep until `t`, stopping early if the watchdog fires, the storm stand-down
+    /// comes on or transmitting is inhibited.
     fn sleep_until(&self, t: Instant) -> Result<(), TxError> {
         loop {
             if self.watchdog_fired.load(Ordering::SeqCst) {
                 return Err(TxError::Stuck);
             }
             self.check_storm()?;
+            self.check_inhibit()?;
             let now = Instant::now();
             if now >= t {
                 return Ok(());
@@ -2982,6 +3119,10 @@ mod tests {
         poll_idle: bool,
         /// The transmitter jams on with the next piece.
         jam_on_send: bool,
+        /// The next tuner read (1C 01) takes this long: a call that does not return.
+        tuner_read_hang: Option<Duration>,
+        /// The next this many SWR reads fail (a reply lost to RF on the USB cable).
+        swr_read_fails: u32,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -3026,6 +3167,8 @@ mod tests {
                 false_tuner_done: 0,
                 poll_idle: false,
                 jam_on_send: false,
+                tuner_read_hang: None,
+                swr_read_fails: 0,
             }
         }
 
@@ -3075,6 +3218,9 @@ mod tests {
             Ok(())
         }
         fn tuner_busy(&mut self) -> civ::Result<bool> {
+            if let Some(d) = self.tuner_read_hang.take() {
+                thread::sleep(d);
+            }
             if self.tuner_unreadable_after_stop && self.stopped_since_tune {
                 return Err(RigError::Timeout);
             }
@@ -3098,6 +3244,10 @@ mod tests {
             self.sim.split_or_delta_tx()
         }
         fn read_swr(&mut self) -> civ::Result<f32> {
+            if self.swr_read_fails > 0 {
+                self.swr_read_fails -= 1;
+                return Err(RigError::Timeout);
+            }
             if let Some(d) = self.hold_up_in_hang {
                 if !self.sim.keyer_busy() && self.sim.is_transmitting()? {
                     self.hold_up_in_hang = None;
@@ -4063,13 +4213,185 @@ mod tests {
             .expect("latched while the radio is held")
             .reason;
         assert!(why.contains("could not be reached"), "{why}");
-        // Once the call returns, receive is forced and the watchdog stops.
+        // Once the call returns, receive is forced and the watchdog stops; the
+        // radio's own TX Inhibit goes on (S2 of the safety audit's pre-review).
         drop(held);
         assert!(eventually(Duration::from_secs(3), || st
             .keying_since
             .lock()
             .unwrap()
             .is_none()));
+        assert!(eventually(Duration::from_secs(2), || rig
+            .lock()
+            .unwrap()
+            .tx_inhibit));
+    }
+
+    /// B1 (the safety audit's pre-review): a call to the radio that failed while a
+    /// piece was keyed was not counted, so a bad load that puts RF on the USB cable
+    /// (every reply lost while keying) was keyed into at every reply.
+    #[test]
+    fn a_call_that_fails_while_keying_is_a_fault() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        st.rig().lock().unwrap().swr_read_fails = 1;
+        assert!(matches!(st.transmit(&four_pieces()), Err(TxError::Rig(_))));
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::SwrLockout));
+        st.start_window().unwrap();
+        st.rig().lock().unwrap().swr_read_fails = 1;
+        assert!(matches!(st.transmit(&four_pieces()), Err(TxError::Rig(_))));
+        assert!(st.tx_inhibited());
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert!(r.sim.tx_inhibit && !r.sim.break_in, "and at the radio");
+    }
+
+    /// B2 (the safety audit's pre-review): an inhibit latched while a transmission
+    /// was under way (the watchdog, a stop signal) did not stop it: the next piece
+    /// was keyed after the rest.
+    #[test]
+    fn an_inhibit_latched_mid_transmission_stops_it_before_the_next_piece() {
+        let mut rig = Radio::new(fast_rig());
+        rig.rests = Some(Rests {
+            every: 1,
+            id: Duration::ZERO,
+            rest: Duration::from_secs(3),
+            pieces: 0,
+            until: None,
+        });
+        let mut st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        let inhibit = st.tx_inhibit.clone();
+        let latcher = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1500));
+            inhibit.latch("a stop signal");
+        });
+        let t0 = Instant::now();
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::Inhibited));
+        latcher.join().unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(2500),
+            "{:?}",
+            t0.elapsed()
+        );
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        assert_eq!(r.sim.sent.len(), 1, "{:?}", r.sim.sent);
+        assert!(!r.is_transmitting().unwrap());
+    }
+
+    /// B2: the settings read the inhibit before taking the radio, so a latch made
+    /// with the radio held in between (the watchdog's, which turns break-in off)
+    /// was undone: break-in went back on.
+    #[test]
+    fn the_settings_read_the_inhibit_with_the_radio_held() {
+        let st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        let rig = st.rig();
+        thread::scope(|sc| {
+            let mut held = rig.lock().unwrap();
+            let settings = sc.spawn(|| st.apply_settings());
+            thread::sleep(Duration::from_millis(300));
+            latch_at_radio(&mut *held, &st.tx_inhibit, "the watchdog");
+            drop(held);
+            settings.join().unwrap().unwrap();
+        });
+        let r = rig.lock().unwrap();
+        assert!(r.sim.tx_inhibit && !r.sim.break_in);
+    }
+
+    /// S1 (the safety audit's pre-review): the idle watch stopped once
+    /// transmitting was inhibited, so a radio keyed by something else then went
+    /// unseen. It keeps reading, forces receive whenever the radio is on
+    /// transmit, and tells the owner once.
+    #[test]
+    fn the_idle_watch_keeps_forcing_receive_while_inhibited() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(INHIBIT_FILE), "1791120363 earlier\n").unwrap();
+        let mut rig = Radio::new(fast_rig());
+        rig.poll_idle = true;
+        let st = Station::new(rig, cfg(), Some(dir.path().join("health.csv")));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        assert!(notices.try_recv().unwrap().from_file);
+        st.rig().lock().unwrap().sim.tx_jammed = true;
+        let why = notices
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the owner is told")
+            .reason;
+        assert!(why.contains("while transmitting was inhibited"), "{why}");
+        let stops = st.rig().lock().unwrap().stops;
+        assert!(stops > 0);
+        assert!(eventually(Duration::from_secs(5), || st
+            .rig()
+            .lock()
+            .unwrap()
+            .stops
+            > stops));
+        assert!(notices.try_recv().is_err(), "told once");
+    }
+
+    /// S2 (the safety audit's pre-review): an inhibit from before the node started
+    /// (its file) never reached the radio's own TX Inhibit.
+    #[test]
+    fn an_inhibit_from_before_the_start_reaches_the_radio() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(INHIBIT_FILE), "1791120363 earlier\n").unwrap();
+        let st = Station::new(fast_rig(), cfg(), Some(dir.path().join("health.csv")));
+        assert!(eventually(Duration::from_secs(2), || st
+            .rig()
+            .lock()
+            .unwrap()
+            .tx_inhibit));
+    }
+
+    /// S3 (the safety audit's pre-review): any transmission that went out whole
+    /// started the fault count again, the ID after a tune included, so a load that
+    /// fails a few seconds into every reply never latched.
+    #[test]
+    fn a_short_transmission_does_not_clear_a_longer_ones_fault() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        let fail_second_piece = |st: &Station<Radio>| {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.swr_after = Some((r.sim.sent.len() + 1, 3.5));
+        };
+        st.start_window().unwrap();
+        fail_second_piece(&st);
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::HighSwr(3.5)));
+        {
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            (r.swr_after, r.sim.swr) = (None, 1.2);
+        }
+        st.open_window().unwrap();
+        assert!(!st.tx_inhibited());
+        fail_second_piece(&st);
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::HighSwr(3.5)));
+        assert!(st.tx_inhibited());
+    }
+
+    /// S5 (the safety audit's pre-review): a tune was not weighed against the duty
+    /// budget before it keyed.
+    #[test]
+    fn a_tune_waits_for_room_in_the_duty_budget() {
+        let mut c = cfg();
+        (c.duty, c.duty_window, c.tune_timeout) =
+            (0.5, Duration::from_secs(4), Duration::from_secs(1));
+        let mut st = Station::new(Radio::new(fast_rig()), c, None);
+        st.configure().unwrap();
+        // 1.5 s of the 2 s budget used just now: the longest tune (1 s) fits once
+        // it has left the window.
+        st.record_carrier(Duration::from_millis(1500));
+        let t0 = Instant::now();
+        st.start_window().unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(3400),
+            "{:?}",
+            t0.elapsed()
+        );
     }
 
     /// K9: nothing watched the IC-7300 while the node was not keying, so a key held
@@ -4395,22 +4717,45 @@ mod tests {
         assert!(st.tx_inhibited(), "still tuning");
     }
 
-    /// K16: the watchdog did not time tunes, and the storm hold was not checked
-    /// while one ran.
+    /// K16: the watchdog did not time tunes. It times one against the tune's own
+    /// limit and the stuck margin: a call during a tune that does not return is
+    /// met as one while keying is.
     #[test]
     fn the_watchdog_times_a_tune() {
         let mut rig = Radio::new(fast_rig());
         (rig.tuner_stuck, rig.tune_ends_on_stop) = (true, true);
+        rig.tuner_read_hang = Some(Duration::from_secs(3));
         let mut c = cfg();
-        c.max_key = Duration::from_millis(300);
+        c.tune_timeout = Duration::from_millis(600);
         let mut st = Station::new(rig, c, None);
         st.configure().unwrap();
         let t0 = Instant::now();
-        let e = st.start_window().unwrap_err().to_string();
-        assert!(e.contains("max_key_seconds"), "{e}");
-        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
-        assert!(!st.tx_inhibited());
-        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::SwrLockout));
+        assert!(st.start_window().is_err());
+        assert!(t0.elapsed() >= Duration::from_secs(3), "{:?}", t0.elapsed());
+        // Fired at 0.9 s, and could not reach the radio for its 1 s wait.
+        assert!(st.tx_inhibited());
+        assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
+    }
+
+    /// S4 (the safety audit's pre-review): a tune is not timed against
+    /// `max_key_seconds`, which `run` allows down to one character; a tune may
+    /// take 15 s (p. 16-3; manual text lines 8118-8119).
+    #[test]
+    fn a_tune_longer_than_max_key_is_not_cut_off() {
+        // SimRig's tune takes 1.5 s.
+        let mut c = cfg();
+        c.max_key = Duration::from_millis(300);
+        let mut st = Station::new(Radio::new(SimRig::new()), c, None);
+        st.configure().unwrap();
+        let t0 = Instant::now();
+        st.start_window().unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(1400),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(st.tuned() && st.can_transmit());
+        assert_eq!(st.rig().lock().unwrap().stops, 0);
     }
 
     #[test]

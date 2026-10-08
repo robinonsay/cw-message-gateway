@@ -221,6 +221,15 @@ pub enum Purpose {
 /// `purpose`. Stops after the first check if nothing answers at the configured
 /// address, since every other read would only time out too.
 pub fn preflight<P: Port>(r: &mut Ic7300<P>, purpose: Purpose) -> Report {
+    preflight_for(r, purpose, false)
+}
+
+/// [`preflight`], for a node whose own transmit inhibit is latched
+/// (`node_inhibited`: its tx-inhibited file is there). It transmits nothing until
+/// the file is removed with it stopped, and the radio's TX Inhibit being ON is
+/// then what the node left it as: only a warning, so that `run` still starts and
+/// tells the owner, instead of failing at every restart and telling nobody.
+pub fn preflight_for<P: Port>(r: &mut Ic7300<P>, purpose: Purpose, node_inhibited: bool) -> Report {
     let mut rep = Report::default();
 
     rep.required("transceiver ID", "19 00", r.transceiver_id(), |&id| {
@@ -363,8 +372,8 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, purpose: Purpose) -> Report {
     // dealt with. `radio check` and `radio setup` transmit nothing, so for them it
     // is only a warning.
     let inhibit_level = match purpose {
-        Purpose::Transmit => Level::Fail,
-        Purpose::Check | Purpose::Setup => Level::Warn,
+        Purpose::Transmit if !node_inhibited => Level::Fail,
+        Purpose::Transmit | Purpose::Check | Purpose::Setup => Level::Warn,
     };
     match r.tx_inhibit() {
         Ok(false) => rep.add("TX Inhibit", "16 66", "OFF", Level::Pass, ""),
@@ -917,6 +926,22 @@ mod tests {
                 assert_eq!(level_of(&rep, "TX Inhibit"), Level::Warn);
             }
         }
+    }
+
+    /// S6 (the safety audit's pre-review): the node turns the radio's TX Inhibit on
+    /// whenever it latches its own, so a restart with its tx-inhibited file there
+    /// failed here, before `run` could tell the owner it is inhibited.
+    #[test]
+    fn tx_inhibit_only_warns_a_node_inhibited_itself() {
+        let mut t = good();
+        t.answers.insert(vec![0x16, 0x66], vec![0x01]);
+        let rep = preflight_for(&mut rig(t), Purpose::Transmit, true);
+        assert!(rep.passed(), "{rep}");
+        assert_eq!(level_of(&rep, "TX Inhibit"), Level::Warn);
+        // Anything else still fails.
+        let mut t = good();
+        t.answers.insert(vec![0x16, 0x46], vec![0x01]);
+        assert!(!preflight_for(&mut rig(t), Purpose::Transmit, true).passed());
     }
 
     #[test]
