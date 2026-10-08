@@ -253,8 +253,8 @@ impl KeyerRig {
         }
         if s.output == Output::Ptt && !st.line {
             log::warn!(
-                "keyer box: the PTT line reads low: the radio is off, the cable is out, or \
-                 the PTT is held; nothing is keyed until it reads high"
+                "keyer box: the PTT line reads low: the PTT is held, or the radio is off; \
+                 nothing is keyed until it reads high"
             );
         }
         let link = Arc::new(Mutex::new(link));
@@ -430,9 +430,12 @@ impl KeyerRig {
         // own to end. Its `STATUS` below is the first line it hears after that.
         let run = lock(&self.shared).run.take();
         thread::sleep(wait);
+        // The box's link timeout runs from the last line it took before this
+        // `STATUS`, which then becomes the last.
+        let last = lock(&self.link).sent().unwrap_or_else(Instant::now);
         let st = self.status()?;
         if let Some(a) = run {
-            let opened = lock(&self.link).sent().unwrap_or(Instant::now()) + self.link_timeout();
+            let opened = last + self.link_timeout();
             lock(&self.shared).cut(opened);
             lock(&self.monitor).key_opened(a.id, opened);
         }

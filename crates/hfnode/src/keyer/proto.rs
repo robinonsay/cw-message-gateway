@@ -129,8 +129,8 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
         }
         ("CW", "LINE") => "the PTT line has not yet been checked since the PTT last moved",
         ("MCW", "LINE") => {
-            "the PTT line reads low: the radio off, the cable out, or the PTT already \
-             held; or it has not yet been checked since the PTT last moved"
+            "the PTT line reads low: the PTT already held, or the radio off; or it has \
+             not yet been checked since the PTT last moved"
         }
         ("CW" | "MCW", "REST") => "the box rests 1 s after each run",
         ("CW" | "MCW", "DUTY") => {

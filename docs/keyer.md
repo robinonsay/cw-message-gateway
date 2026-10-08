@@ -101,10 +101,20 @@ with nothing running and nothing in the key jack, and with a multimeter:
    direction means the output is shorted or the part is in backwards: do not plug it
    into the radio.
 
-A resistance range is not enough for step 2 on its own: a PC817's output reads
-open-circuit in both directions when it is working *and* when its LED is wired
-backwards, so do the LED's own test too — with the box unplugged, the diode test
-from GP16's pad to ground must conduct one way and not the other.
+Step 2 cannot tell a working PC817 from one whose LED is wired backwards: both
+read open. No meter test on the wired box can tell either. From GP16's pad to
+ground the 4.7 kΩ, the LED and the pad's own protection diodes conduct in parallel,
+whichever way round the meter is (the safety audit's report, "Meter checks, box
+only"). So check the LED's wiring against the diagram above instead:
+
+3. **By eye and by continuity, box unplugged:** PC817 pin 1 through the 470 Ω to
+   GP16 (pin 21), pin 2 to GND (pin 23), pin 4 to the tip, pin 3 to the sleeve.
+4. **Volts across the 470 Ω, box plugged into the computer, nothing running: 0 V.**
+   Anything else means the LED is lit with nothing asking, wired to a supply pin,
+   and would key the radio.
+
+An LED wired backwards keys nothing, safely: the first keying test shows it, with
+the node reporting the radio not heard keying.
 
 ## Flashing the firmware
 
@@ -124,7 +134,8 @@ the safety audit names, not simply the latest one. Download that run's
 4. Copy `pico2-keyer.uf2` onto that drive. The Pico 2 restarts as the keyer box.
 5. **Unplug it and plug it in again.** The first boot after flashing reports
    `OTHER`, not `POWER`, and the node will not key a box that reports `OTHER`: the
-   replug makes it `POWER`. `hfnode keyer check` prints what the box reports.
+   replug makes it `POWER`. `hfnode keyer --config C check` prints what the box
+   reports (C is your `hfnode.toml`).
 
 `hfnode devices` then marks it (`<- the keyer box`). Its USB name is `PICO2-KEYER`,
 and the node opens no port that does not carry that name.
@@ -600,6 +611,8 @@ from GP19 to ground.
   voltage at most 240 mV at 0.1 mA, Nexperia BAT85 data sheet), which is under the
   RP2350's 0.8 V input-low level.
 - **PTT open, radio on:** the diode is reverse biased and GP19 reads high.
+- **Cable out, or the sense wire open:** nothing is on the diode's cathode, and
+  GP19 reads high on its pull-up, as if the PTT were open.
 - **Radio off:** the reading means nothing, and nothing relies on it. The node
   checks the receive noise before keying.
 
@@ -608,14 +621,22 @@ near 2.2 V, which could read high with the PTT held: the unsafe way. The diode c
 only ever pull the contact up, by at most about 0.1 mA, and never down, so it
 cannot key the radio.
 
-The box uses the line two ways. It refuses `MCW` while the line is low (radio off,
-cable out, or PTT held). And 100 ms after it lets the PTT go, the line must read
-high, or the box trips: something else is holding the PTT.
+The box uses the line three ways. It refuses `MCW` while the line reads low: the
+PTT already held (or the radio off, if its contact then reads low). 100 ms after it
+closes the PTT, the line must read low, or the box ends the run `LINE` with nothing
+keyed: the cable is out, the sense wire is open, or the radio is off. And 100 ms
+after it lets the PTT go, the line must read high, or the box trips: something else
+is holding the PTT. A cable that is out does not stop `MCW` from starting, since
+the line reads high; the node refuses first anyway, as no receive noise reaches it,
+and the box's 100 ms check ends the run if it does start.
 
 ### Setting up the radio, every session
 
 The node cannot read any of this. Go through the list each time before the node
-keys, and check the antenna before every session the node runs on its own.
+keys, and check the antenna before every session the node runs on its own. Lock the
+keypad last: unlocking it for any change means going through the list again. Each
+item below that names something the radio can transmit by itself is one the box's
+limits do not cover.
 
 - **Battery only.** No USB-C cable and no charging base while keying: the manual
   forbids transmitting while charging (K1_EN.txt:108). The blue light, which is on
@@ -639,10 +660,34 @@ keys, and check the antenna before every session the node runs on its own.
 - **BCL OFF** (menu 12, K1_EN.txt:278). With the squelch open the channel always
   looks busy, and busy-channel lock would then refuse every transmission.
 - **Squelch 0** (open). The node listens to the receive noise.
-- **Dual watch (TDR, menu 17) off**, no repeater offset, and the agreed frequency
-  in 144.1-148 MHz, the same as `station.frequency_hz`.
-- **Hands off the side keys.** A long press of side key 1 transmits a 1750 Hz tone,
-  and a long press of side key 2 sounds the alarm (K1_EN.txt:212-215).
+- **The agreed frequency** in 144.1-148 MHz, the same as `station.frequency_hz`, in
+  frequency mode (F+3), with **no repeater offset** (SFT-D, menu 8, OFF,
+  K1_EN.txt:265-269) and **not reversed** (no R on the display; F+8,
+  K1_EN.txt:283).
+- **TDR (menu 17) OFF and WX (menu 18) OFF**: no "DW" on the display. With WX at
+  CHAN_A or CHAN_B, every transmission goes out on that channel, whatever the main
+  channel shows (K1_EN.txt:299-302, :345-351). With dual watch, the channel that
+  last heard a call becomes the transmit channel for a while, shown as ">"
+  (K1_EN.txt:240-242, :353-355, :356-361). Set channel B to the same frequency as A
+  as well (F+2, enter it, F+2 back), so that a ">" can never send anywhere else.
+- **Not scanning, and not in NOAA or FM-radio mode**; **NOAA_S (menu 49) OFF**
+  (K1_EN.txt:325). A long press of * starts a scan (K1_EN.txt:429), F+5 the NOAA
+  mode (K1_EN.txt:464) and F+0 the FM radio (K1_EN.txt:287). In each, pressing the
+  PTT answers the call it found, or leaves the mode for a call on the channel
+  (K1_EN.txt:432-436, :459-461): not the agreed frequency for certain.
+- **D-DCD OFF (menu 43) and D-RSP NULL (menu 39)** (K1_EN.txt:304, :311). With DTMF
+  decoding on and the response at REPLY or BOTH, the radio answers a DTMF call with
+  an automatic callback, transmitting by itself (K1_EN.txt:411-419).
+- **SCR (menu 11), R-DCS, R-CTCS, T-DCS and T-CTCS (menus 4-7) and SAVE (menu 14)
+  OFF** (K1_EN.txt:255-263, :275-277, :282-284). Not for safety: the node listens
+  to the receive noise, which a tone squelch or the battery saver would cut up, and
+  scrambling alters the audio that goes out.
+- **Hands off the side keys: the keypad lock does not cover them**
+  (K1_EN.txt:467-469). A long press of side key 1 transmits a 1750 Hz tone, and a
+  long press of side key 2 sounds the alarm (K1_EN.txt:212-215). Side key 2 pressed
+  while the PTT is held enters Air Copy, from which MENU sends the radio's settings
+  on 410.0125 MHz (K1_EN.txt:461-470). So while anything can hold the PTT, lay the
+  radio on its back with nothing pressing on its sides.
 - **MIC sensitivity** (menu 29, K1_EN.txt:326): leave it as set during the bring-up.
 
 ### Configuration for a handheld
@@ -661,9 +706,19 @@ pitch_hz = 700                 # the other station's MCW tone, for the decoder
 
 [keyer]
 output = "ptt"                 # MCW on the handheld's PTT ("key": the key jack)
-ptt_contact_volts = 3.3        # what you measured on the PTT contact, radio on
 commissioned = "none"
+firmware_build = "a1b2c3d4"    # the build id CI printed for the UF2 you flashed
+# ptt_contact_volts =          # your own measurement of the PTT contact, below
 ```
+
+Leave `ptt_contact_volts` out until you have measured the PTT contact yourself
+("The cable" above, steps 2 and 3): with it missing the node keys nothing, which is
+the point. Then put in the DC volts step 2 gave on the contact step 3 showed is the
+PTT.
+
+`firmware_build` is the eight-character build id of the UF2 you flashed, from the
+CI run the safety audit names ("Flashing the firmware"). The node refuses a box
+that reports another.
 
 `min_level_dbfs` is the receive noise's level here: with the squelch open it is
 always there.
@@ -677,41 +732,45 @@ out unkeys the radio.
 **Stage zero** (no computer): the contact table above, then the box's own meter
 checks on its PTT output, as for the key output (0 V, and open both ways, between
 its PTT and ground wires, with the box plugged into the computer and nothing
-running). Then **the time-out timer** (the audit's C4), with no box at all: TOT set
-to 1 min, the dummy load on, hold the PTT contact to ground with the clip lead and
-watch the red light. It must go out by itself after about a minute. If it does not,
-the radio's own limit does not cover the jack: write that down, because the box's
-and the node's limits are then all there is.
+running; PC817 #2's wiring checked by eye and continuity against the diagram above,
+and 0 V across GP17's 470 Ω). Then **the time-out timer** (the audit's C4), with no
+box at all: TOT set to 1 min, the dummy load on, hold the PTT contact to ground with
+the clip lead and watch the red light. It must go out by itself after about a
+minute. If it does not, the radio's own limit does not cover the jack: write that
+down, because the box's and the node's limits are then all there is.
 
-**Stage none:** `hfnode keyer check`. The box answers with its PTT limit (60 s),
-its PTT up and its PTT line high, and the receive noise is at band level (squelch
-0).
+C is your `hfnode.toml`, as above.
+
+**Stage none:** `hfnode keyer --config C check`. The box answers with its PTT limit
+(60 s), its PTT up and its PTT line high, and the receive noise is at band level
+(squelch 0).
 
 **Stage listen:**
 
-1. `hfnode keyer key "TEST"`: the node reports that the radio went quiet while the
-   box held the PTT and came back on receive after. Listen on the second receiver.
+1. `hfnode keyer --config C key "TEST"`: the node reports that the radio went quiet
+   while the box held the PTT and came back on receive after. Listen on the second
+   receiver.
 2. **Tone level** (C7). On the second receiver, turn the trimmer up from its lowest
    until the tone is clean and plainly readable, and no further. It must not be
    distorted or over-deviated: the radio's rating is 5 kHz wide and 2.5 kHz narrow
    (K1_EN.txt:492-493).
 3. **The PTT contact under the box** (C9). Put the meter on the PTT contact to
-   ground while `hfnode keyer key "TTTTTTTTTT"` runs. It must read under 0.4 V while
-   the red light is on, and what you measured before once it is off.
+   ground while `hfnode keyer --config C key "TTTTTTTTTT"` runs. It must read under
+   0.4 V while the red light is on, and what you measured before once it is off.
 4. **RF** (C10). At the highest power you will use, with the whole cable connected,
-   run `hfnode keyer key` several times. Every run must end with the node saying
-   the radio is back on receive, and the red light out. Fit the ferrites before you
-   blame anything else.
+   run `hfnode keyer --config C key "TEST"` several times. Every run must end with
+   the node saying the radio is back on receive, and the red light out. Fit the
+   ferrites before you blame anything else.
 5. **Heat** (C8). Send one full-length piece (30 characters) at that power, then
    feel the radio. The manual gives no duty cycle. The box allows a steady carrier
    for at most half of any stretch of time plus 30 s. If the radio is more than
    warm, use power L and shorter pieces.
 
-`hfnode keyer sidetone` is refused: a handheld has no sidetone.
+`hfnode keyer --config C sidetone` is refused: a handheld has no sidetone.
 
-**Stage keying:** `hangtest`, `stucktest` and `linktest`, as above. Each closes the
-PTT on purpose. The limits they check allow for the 500 ms lead and for the radio
-switching to transmit and back.
+**Stage keying:** `hfnode keyer --config C hangtest`, `stucktest` and `linktest`,
+as above. Each closes the PTT on purpose. The limits they check allow for the 500 ms
+lead and for the radio switching to transmit and back.
 
 ### What stops a stuck PTT
 

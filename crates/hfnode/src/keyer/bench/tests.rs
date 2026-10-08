@@ -96,6 +96,30 @@ fn a_test_that_never_hears_the_key_down_does_not_pass() {
 }
 
 #[test]
+fn a_handheld_is_never_told_to_run_the_sidetone_check() {
+    // `hfnode keyer sidetone` refuses a handheld, so a box test's failure on one
+    // must point to what it can run: `check`, and `key "TEST"`, which reports the
+    // receive noise going quiet. The key line keeps the sidetone check.
+    for (output, wants, never) in [
+        (Output::Ptt, "keyer key \"TEST\"", "keyer sidetone"),
+        (Output::Key, "keyer sidetone", "keyer key"),
+    ] {
+        let mut notes = Vec::new();
+        assert!(!check_measured(
+            Duration::ZERO,
+            Duration::ZERO,
+            output,
+            &mut notes
+        ));
+        let first = not_heard_first(output, "not heard");
+        for text in [&notes[0], &first] {
+            assert!(text.contains(wants), "{output:?}: {text}");
+            assert!(!text.contains(never), "{output:?}: {text}");
+        }
+    }
+}
+
+#[test]
 fn hangtest_sees_the_watchdog_open_the_key() {
     let mut b = bench(|_| {});
     let rep = hangtest(&mut b.station, "DE N0DE", SCALE).unwrap();
@@ -154,6 +178,39 @@ fn a_box_that_never_resets_fails_the_hang_test() {
     let at = b.now() + 0.5;
     b.radio.set(|r| r.stuck_from = Some(at));
     assert!(hangtest(&mut b.station, "DE N0DE", SCALE).map_or(true, |r| !r.passed));
+}
+
+#[test]
+fn linktest_identifies_once_the_radio_is_back_on_receive() {
+    // `hfnode keyer linktest` as a whole, on a radio's key line and on a handheld's
+    // PTT: the box opens its key by itself, and the node then identifies, since the
+    // test text carries no call. It used to identify at once, before the audio
+    // showed the radio back on receive: the station refused that as "on transmit
+    // without the node keying it", the command failed after printing `passed`, the
+    // test went out with no call sign, and on the key line the inhibit latched.
+    for (what, mut b) in [("key line", bench(|_| {})), ("handheld", handheld(|_| {}))] {
+        let dir = b.dir.path().to_path_buf();
+        let waited =
+            linktest(&mut b.station, "DE N0DE", &dir).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+        assert!(waited >= radio_secs(2.0), "{what}: {waited:?}");
+        let st = b.keyer_box.now();
+        let runs: Vec<&String> = st
+            .lines
+            .iter()
+            .filter(|l| l.contains(" CW ") || l.contains(" MCW "))
+            .collect();
+        assert_eq!(runs.len(), 2, "{what}: {runs:?}");
+        assert!(runs[0].contains(LINK_TEST_TEXT), "{what}: {runs:?}");
+        assert!(runs[1].contains("DE N0DE"), "{what}: {runs:?}");
+        assert_eq!(
+            st.ended(),
+            keyer_core::keyer::Ended::Done,
+            "{what}: the ID ran to its end"
+        );
+        drop(st);
+        assert!(!b.inhibit_file().exists(), "{what}: the inhibit latched");
+        assert!(b.station.can_transmit(), "{what}");
+    }
 }
 
 #[test]
