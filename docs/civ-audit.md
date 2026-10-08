@@ -152,11 +152,11 @@ passing self-test proves nothing. These are measured on the radio instead:
 
 - **The node does not change the radio's menu settings over CI-V.** It refuses to
   go on instead, so the radio stays in the state the operator set and photographed.
-- **TX Inhibit (`16 66`) is set only as a last resort.** The preflight refuses a
-  command that can transmit while it is ON. The node turns it ON (with semi
-  break-in OFF, `16 47 00`) only when it cannot confirm the radio back on receive,
-  as the inhibit file latches, and only `hfnode radio setup` turns it OFF again,
-  once the file is gone. The manual does not say what it covers (the keyer, the
+- **TX Inhibit (`16 66`) is set only with the inhibit file.** The preflight
+  refuses a command that can transmit while it is ON. The node turns it ON (with
+  semi break-in OFF, `16 47 00`) whenever it latches the inhibit file while it can
+  reach the radio, and only `hfnode radio setup` turns it OFF again, once the file
+  is gone. The manual does not say what it covers (the keyer, the
   tuner) or whether it survives a power cycle, so it is never the only stop. Worth
   a bench look.
 - **Break-in is left ON between transmissions**, unless transmitting is inhibited.
@@ -333,8 +333,8 @@ keying). What changed:
 
 The second half of the independent safety audit's IC-7300 findings, for `run` and
 unattended use. Two CI-V commands are now sent that were not before, each only
-when receive cannot be confirmed (`16 47 00` break-in OFF, line 8776, and `16 66
-01` TX Inhibit ON, lines 8788-8789) or by `radio setup` once the inhibit file is
+as the node latches the inhibit file (`16 47 00` break-in OFF, line 8776, and `16
+66 01` TX Inhibit ON, lines 8788-8789) or by `radio setup` once the inhibit file is
 gone (`16 66 00`); `1A 05 00 29` (Time-Out Timer, lines 8861-8863), `14 0A` (RF
 power, line 8677) and `1C 00` are read at new moments. Nothing here has been run on
 a radio.
@@ -350,7 +350,10 @@ a radio.
   high SWR does.
 - **K8, break-in on last.** The status is read twice after the settings, which
   turn semi break-in on last; when receive cannot be confirmed the node turns
-  break-in OFF and TX Inhibit ON, and keeps break-in off while inhibited.
+  break-in OFF and TX Inhibit ON, and keeps break-in off while inhibited. Every
+  other inhibit the node latches while it can reach the radio does the same, so
+  the radio itself refuses to transmit, whichever state directory a later run
+  uses.
 - **K9, idle watch and the Time-Out Timer.** `1C 00` every second while idle: two
   readings of transmit in a row force receive and latch the inhibit. The
   Time-Out Timer must read 3 min before every tune and transmission, not only at

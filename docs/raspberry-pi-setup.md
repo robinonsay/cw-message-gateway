@@ -225,7 +225,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it, and refuses to write to the radio unless it is OFF. |
 | Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `radio tune`, `radio cw` and `hfnode run` refuse to start unless it is 3 min. |
 | VOX (VOX/BK-IN key) | **OFF** | With VOX ON, sound at the microphone transmits (p. 4-10). The node refuses to write to the radio unless it is off. |
-| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it. `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON; `radio check` and `radio setup` warn. |
+| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it, and so does the node when it stops transmitting (see "If it stops transmitting"). `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON; `radio check` and `radio setup` warn. |
 
 **Display** (MENU > SET > Display, p. 12-12):
 
@@ -390,9 +390,9 @@ gone out whole (high SWR, no output or too much, a radio stuck on transmit, no
 tuner match, a failed tune: each locks the node out until its next tune, and two
 in a row mean the next tune would only key into the same fault), it stops
 transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
-reason. When it could not confirm receive it also turns the radio's semi break-in
-off and its TX Inhibit on (16 66 01): the radio's screen shows TX Inhibit when
-anything tries to transmit. It keeps running and decoding, but it does not tune or key, so the field
+reason. It also turns the radio's semi break-in off and its TX Inhibit on (16 66
+01), unless the radio could not be reached: the radio's screen shows TX Inhibit
+when anything tries to transmit. It keeps running and decoding, but it does not tune or key, so the field
 operator hears nothing, and this lasts across restarts. With `[email] alert_to`
 set it emails that address once when this happens (subject `N0CALL: node stopped
 transmitting (tx-inhibited)`), and once more each time the service starts while the
