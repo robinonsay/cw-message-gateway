@@ -36,7 +36,7 @@ never `CW` or `TEST`, which could act twice.
 | `TEST HANG` | `OK TEST HANG` (bring-up only, armed) |
 | `TEST STUCK` | `OK TEST STUCK` (bring-up only, armed) |
 
-- `HELLO`: protocol version 2; the box's limits (below); time since it started;
+- `HELLO`: protocol version 3; the box's limits (below); time since it started;
   why it started (`POWER`, `WATCHDOG` or `OTHER`); `<build>`, the eight characters
   of the commit CI built the firmware from, or `-` for a build from a working tree
   (`[keyer] firmware_build` is checked against it); its name, `PICO2-KEYER`. hfnode
@@ -45,7 +45,9 @@ never `CW` or `TEST`, which could act twice.
   how the last run ended (`NONE` if none yet, `DONE`, `STOP`, `LINK` for the link
   timeout, `LIMIT` for the run limit, `DOWN` for the key-down limit, `USB` when USB
   went away); `<trip>` `NONE`, `DOWN` (the key-down limit), `PIN` (the loop's own
-  watch on the key pin) or `SLOW` (a pass of the loop too late with the key down);
+  watch on the key pin), `SLOW` (a pass of the loop too late with the key down),
+  `CLOCK` (the box's clock stopped or slowed against the processor's own count) or
+  `WATCHDOG` (the box restarted because its watchdog fired);
   `<rest left ms>` of the rest after the last run still to go; `<budget ms>` of
   key-down time the duty budget would allow now.
 - `CW`: 1 to 30 characters at 5 to 50 wpm: A-Z, 0-9, `. , ? ' / ( ) : = + - " @`
@@ -57,10 +59,10 @@ never `CW` or `TEST`, which could act twice.
   `TEST STUCK` that does not follow one is refused, so that a stray or replayed
   line cannot hold the key down.
 - `TEST HANG`: during a run, armed. At its next key-down the box's control loop
-  stops, so that its watchdog resets it (`hfnode keyer hangtest`). The reply goes
-  out before the loop stops. If the watchdog does not reset the chip within
-  1000 ms of the hang, the loop opens the key itself and holds it open, still
-  without feeding the watchdog.
+  stops, so that its watchdog resets it (`hfnode keyer hangtest`), and it comes
+  back tripped (`WATCHDOG`). The reply goes out before the loop stops. If the
+  watchdog does not reset the chip within 1000 ms of the hang, the loop opens the
+  key itself and holds it open, still without feeding the watchdog.
 - `TEST STUCK`: during a run, armed. Its next key-down is held, so that the
   key-down limit trips it (`hfnode keyer stucktest`).
 
@@ -68,7 +70,7 @@ Errors are `ERR <command> <code>`:
 
 | Reply | Meaning |
 |---|---|
-| `ERR CW TRIP` | the box has tripped; unplug it and plug it in again |
+| `ERR CW TRIP` | the box has tripped (also after its watchdog fired); unplug it and plug it in again |
 | `ERR CW RUN` | a run is already under way |
 | `ERR CW WPM` | speed outside 5-50 wpm |
 | `ERR CW LEN` | not 1-30 characters |
@@ -87,10 +89,31 @@ Errors are `ERR <command> <code>`:
 | Key-down | 1000 ms | Past it (by at most one pass of the loop, under 11 ms) the key opens and the box trips: every `CW` is refused until it is power-cycled. No element is longer than a dash at 5 wpm (720 ms). |
 | Run | 60 s | `CW` text longer than this is refused; a run is ended at it. |
 | Link timeout | 2000 ms | A run ends when no valid line has arrived for this long, and at once when USB goes away: the cable comes out, or the computer resets or suspends the box's USB. |
-| Watchdog | 500 ms | The RP2350's hardware watchdog, fed once at the end of each pass of the control loop (a pass takes microseconds; nothing in it waits). If the loop stalls, the chip resets and the key opens. |
+| Watchdog | 500 ms | The RP2350's hardware watchdog, fed once at the end of each pass of the control loop (a pass takes microseconds; nothing in it waits). If the loop stalls, the chip resets and the key opens, and the box comes back tripped (`WATCHDOG`). |
 | Rest | 1000 ms | `CW` is refused until the key has been up this long after the last run, so that runs sent back to back cannot hold the key down past its limit. |
-| Duty budget | 60 s of key-down, refilled over 10 min | `CW` whose key-down time is more than the budget left is refused: the key is down at most half of any stretch of time plus 30 s, so at most 55% of any 10 minutes, and half in the long run. A box that did not start from power-up begins with the budget empty. |
+| Duty budget | 60 s of key-down, refilled over 10 min | `CW` whose key-down time is more than the budget left is refused: the key is down at most half of any stretch of time plus 30 s, so at most 55% of any 10 minutes, and half in the long run. A box that did not start from power-up begins with the budget empty, or owing what it owed before the restart (see "Across a restart"). |
 | Key pin | 1000 ms | The loop times the key pin by its own clock readings, apart from the Morse timeline: high for the key-down limit (bridging gaps under 24 ms, a dot at 50 wpm) trips the box, as does a pass more than 10 ms after the last with the key down. |
+| Clock | every 50 ms | The loop checks its clock (TIMER0, on the crystal's microsecond tick) against the processor's own cycle count (SysTick on `clk_sys`). If the clock advanced less than half as far as the processor's count, or the processor's count less than a quarter as far as the clock (the check itself is not running), the key opens, the box trips (`CLOCK`) and it stops feeding its watchdog, which resets it. No debugger can pause the clock: the firmware clears TIMER0's `DBGPAUSE`. |
+
+### Across a restart
+
+Every pass of the loop saves the box's trip, whether its key is down and its duty
+budget in two of the RP2350's watchdog scratch registers, with a check byte. A
+watchdog reset or any other restart that keeps the chip powered keeps them;
+unplugging the box clears them. At start the box reads them back:
+
+- A trip it saved is kept: a restart never clears one. A box whose watchdog fired
+  comes up tripped (`WATCHDOG`) whatever it saved.
+- It starts with its duty budget empty, as any start other than from power-up
+  does, or owing what it owed when it saved, if it owed key-down time; a further
+  1000 ms is owed if it saved its key down (the most the key could have stayed
+  down after that pass: the watchdog's 500 ms, with margin). A host that makes the
+  box restart over and over gets no more key-down time from it than from one that
+  never restarts.
+- It rests 1000 ms from its start before its first run.
+
+Saved words that do not check are ignored, and the box starts as from its boot
+reason alone.
 
 The key is open at power-up, at every reset and while USB connects, and whenever
 no run is under way. The box never reads the serial port's DTR and RTS lines
@@ -108,10 +131,11 @@ it. `hfnode keyer linktest` is the check that it does.
   that hfnode cannot open a radio's own serial port by a stale device name (opening
   a port pulses DTR on Linux).
 - At start: `HELLO` (checked as above, and the boot reason logged), `STOP`, then
-  `STATUS`, which must show the key open, no run and no trip. A `WATCHDOG` boot
-  outside `hangtest` latches hfnode's transmit inhibit; an `OTHER` boot refuses
-  keying until the box is unplugged and plugged in again (the first boot after
-  flashing is `OTHER`).
+  `STATUS`, which must show the key open and no run. A box that is tripped, or
+  whose watchdog fired, outside `hangtest`, is opened all the same, but hfnode keys
+  nothing on it and its first receive check latches the transmit inhibit and emails
+  the owner; an `OTHER` boot refuses keying until the box is unplugged and plugged
+  in again (the first boot after flashing is `OTHER`).
 - Each piece of a transmission (at most 30 characters) is one `CW` run. Before it:
   `STATUS` (no run, no trip), and the radio's audio arriving at band level with no
   steady tone at the sidetone pitch (a carrier, or the key held at the radio). A
