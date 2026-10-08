@@ -1,5 +1,6 @@
 use super::*;
-use crate::keyer::testbench::{bench, radio_secs, SCALE};
+use crate::keyer::mock::RadioSettings;
+use crate::keyer::testbench::{bench, radio_secs, tx, SCALE};
 
 #[test]
 fn check_passes_on_a_working_station_and_keys_nothing() {
@@ -42,13 +43,66 @@ fn sidetone_measures_the_delay_and_the_pitch() {
 }
 
 #[test]
+fn a_sidetone_too_close_to_the_band_fails_the_check() {
+    // The node takes a tone within 10 dB of the measured sidetone for the sidetone,
+    // so a sidetone only 6 or 9 dB over the band noise cannot tell a key held at
+    // the radio from the band (the safety audit's KB-2(ii)); nor 13, short of the
+    // 15 dB the check asks for, which a gate at 10 dB would pass.
+    for margin in [6.0f32, 9.0, 13.0] {
+        let mut b = bench(move |r| {
+            // Band noise is a standard deviation, the sidetone an amplitude: a sine
+            // of amplitude a has the power of noise of standard deviation a/sqrt 2.
+            r.noise = r.sidetone / 2.0f32.sqrt() / 10.0f32.powf(margin / 20.0);
+        });
+        let rep = sidetone(&mut b.station, "DE N0DE").unwrap();
+        let (text, ok) = rep.explain(600.0);
+        assert!(!ok, "a {margin} dB margin passed: {text}");
+        assert!(text.contains("dB over it, under the 15 dB"), "{text}");
+    }
+}
+
+#[test]
+fn a_test_that_never_hears_the_key_down_does_not_pass() {
+    // The identification is heard, then the key cable comes out: the box still
+    // hangs and its watchdog still resets it, but the audio shows no key-down, so
+    // the test measured nothing and must not pass (the safety audit's KB-3, which
+    // saw "longest: 0ns ... passed: true").
+    let mut b = bench(|_| {});
+    let kb = b.keyer_box.clone();
+    let radio = &b.radio;
+    let station = &mut b.station;
+    let rep = thread::scope(|sc| {
+        sc.spawn(move || {
+            // Once the identification is keyed and over, the cable comes out.
+            let deadline = Instant::now() + radio_secs(30.0);
+            while Instant::now() < deadline {
+                if kb.now().lines.iter().any(|l| l.contains("CW 20 DE N0DE"))
+                    && kb.now().ended() == keyer_core::keyer::Ended::Done
+                {
+                    radio.set(|r| r.cable_out = true);
+                    return;
+                }
+                thread::sleep(radio_secs(0.02));
+            }
+        });
+        hangtest(station, "DE N0DE", SCALE)
+    });
+    let rep = rep.expect("the test itself ran");
+    assert!(!rep.passed, "{rep:?}");
+    assert!(
+        rep.notes.iter().any(|n| n.contains("nothing measured")),
+        "{rep:?}"
+    );
+}
+
+#[test]
 fn hangtest_sees_the_watchdog_open_the_key() {
     let mut b = bench(|_| {});
     let rep = hangtest(&mut b.station, "DE N0DE", SCALE).unwrap();
     assert!(rep.passed, "{rep:?}");
     assert!(rep.longest >= Duration::from_millis(300), "{rep:?}");
     assert_eq!(b.keyer_box.now().resets, 1);
-    // It identified afterwards.
+    // It identified first, before holding the key down.
     assert!(b.keyer_box.now().lines.last().is_some());
     assert!(b
         .keyer_box
@@ -77,4 +131,64 @@ fn a_box_that_never_resets_fails_the_hang_test() {
     let at = b.now() + 0.5;
     b.radio.set(|r| r.stuck_from = Some(at));
     assert!(hangtest(&mut b.station, "DE N0DE", SCALE).map_or(true, |r| !r.passed));
+}
+
+#[test]
+fn rx_confirms_the_key_open_and_latches_nothing() {
+    let b = bench(|_| {});
+    let dir = tempfile::tempdir().unwrap();
+    rx(
+        &mut lock(&b.station.rig()),
+        dir.path(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(!InhibitLatch::in_dir(dir.path()).is_set());
+}
+
+#[test]
+fn rx_latches_the_inhibit_when_the_key_is_not_confirmed_open() {
+    // Each way `keyer rx` can fail to confirm the key open stops the node keying
+    // after it, until someone has looked at the radio (the safety audit's KB-2, in
+    // its review of PR #13). `rx` gets a state directory of its own, so that the
+    // inhibit found there is the one it latched.
+    type Fault = (&'static str, &'static str, fn(&mut RadioSettings));
+    let faults: [Fault; 3] = [
+        ("no audio", "no audio from the radio", |r| {
+            r.unplugged = true
+        }),
+        (
+            "a key closed at the radio",
+            "a steady tone at the sidetone pitch",
+            |r| r.stuck_from = Some(0.0),
+        ),
+        (
+            "a key held at the radio after a run",
+            "not confirmed on receive",
+            |_| {},
+        ),
+    ];
+    for (name, why, fault) in faults {
+        let mut b = bench(fault);
+        if name.ends_with("after a run") {
+            let at = b.now() + 1.0;
+            b.radio.set(|r| r.stuck_from = Some(at));
+            assert!(b.station.transmit(&tx(&["DE N0DE N0DE K"])).is_err());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let e = rx(
+            &mut lock(&b.station.rig()),
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .expect_err(name);
+        assert!(
+            format!("{e:#}").contains("not confirmed open"),
+            "{name}: {e:#}"
+        );
+        let file = dir.path().join(crate::station::INHIBIT_FILE);
+        let latched =
+            std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("{name}: no inhibit latched"));
+        assert!(latched.contains(why), "{name}: {latched}");
+    }
 }

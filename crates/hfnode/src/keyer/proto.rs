@@ -16,6 +16,9 @@ pub enum Command {
         wpm: u32,
         text: String,
     },
+    /// Bring-up only: the box takes `TEST HANG` or `TEST STUCK` only within 2 s of
+    /// this, and once.
+    TestArm,
     /// Bring-up only: stop the box's control loop at the next key-down, so that
     /// only its watchdog can open the key.
     TestHang,
@@ -32,6 +35,7 @@ impl Command {
             Self::Status => "STATUS".into(),
             Self::Stop => "STOP".into(),
             Self::Cw { wpm, text } => format!("CW {wpm} {text}"),
+            Self::TestArm => "TEST ARM".into(),
             Self::TestHang => "TEST HANG".into(),
             Self::TestStuck => "TEST STUCK".into(),
         }
@@ -44,22 +48,26 @@ impl Command {
             Self::Status => "STATUS",
             Self::Stop => "STOP",
             Self::Cw { .. } => "CW",
-            Self::TestHang | Self::TestStuck => "TEST",
+            Self::TestArm | Self::TestHang | Self::TestStuck => "TEST",
         }
     }
 
     /// Whether sending it twice does no harm, so that it may be sent again when
-    /// its reply is lost. `CW` and the tests start something.
+    /// its reply is lost. `CW` and the tests start something; `TEST ARM` only
+    /// renews itself.
     pub fn repeatable(&self) -> bool {
-        matches!(self, Self::Hello | Self::Status | Self::Stop)
+        matches!(
+            self,
+            Self::Hello | Self::Status | Self::Stop | Self::TestArm
+        )
     }
 }
 
 /// The box's answer: `OK <command> <fields>` or `ERR <command> <code>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
-    /// The fields after `OK <command>` (for `TEST`, after `OK TEST HANG` or
-    /// `OK TEST STUCK`).
+    /// The fields after `OK <command>` (for `TEST`, after `OK TEST ARM`, `OK TEST
+    /// HANG` or `OK TEST STUCK`).
     Ok(Vec<String>),
     Err(String),
 }
@@ -72,6 +80,7 @@ pub fn answers(cmd: &Command, body: &str) -> bool {
         return false;
     };
     match (kind, cmd) {
+        ("OK", Command::TestArm) => body == "OK TEST ARM",
         ("OK", Command::TestHang) => body == "OK TEST HANG",
         ("OK", Command::TestStuck) => body == "OK TEST STUCK",
         ("OK" | "ERR", _) => name == cmd.name(),
@@ -102,7 +111,12 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
         ("CW", "LEN") => "1 to 30 characters per run",
         ("CW", "CHAR") => "a character the box cannot key",
         ("CW", "LIMIT") => "longer than the box's run limit at this speed",
+        ("CW", "REST") => "the box keeps its key up for 1 s after each run",
+        ("CW", "DUTY") => {
+            "the box's duty budget is spent: its key must stay up as long as it was down"
+        }
         ("TEST", "RUN") => "only during a run",
+        ("TEST", "ARM") => "a test is taken only just after TEST ARM",
         (_, "UNKNOWN") => "the box does not know this command (older firmware?)",
         _ => return None,
     })
@@ -118,18 +132,28 @@ pub struct Hello {
     pub link_timeout: Duration,
     /// Longest the key may stay down at once before the box trips.
     pub key_down_limit: Duration,
+    /// How long the key stays up after a run before the box takes another.
+    pub rest: Duration,
+    /// The most key-down time the box keeps in its duty budget.
+    pub duty_budget: Duration,
     /// Time since the box started.
     pub uptime: Duration,
     /// Why it last started.
     pub boot: Boot,
+    /// The firmware build (a git commit, or `-` for a build without one).
+    pub build: String,
     pub name: String,
 }
 
 impl Hello {
-    /// From the fields of `OK HELLO`.
+    /// From the fields of `OK HELLO`. A box of protocol version 1 is refused here,
+    /// by its field count: it has no rest and no duty budget.
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [version, run, link, down, uptime, boot, name] = f else {
-            return Err(format!("HELLO has {} fields, not 7", f.len()));
+        let [version, run, link, down, rest, budget, uptime, boot, build, name] = f else {
+            return Err(format!(
+                "HELLO has {} fields, not 10 (older firmware? flash this hfnode's)",
+                f.len()
+            ));
         };
         let num = |s: &str, what: &str| {
             s.parse::<u64>()
@@ -140,8 +164,11 @@ impl Hello {
             run_limit: Duration::from_secs(num(run, "run limit")?),
             link_timeout: Duration::from_millis(num(link, "link timeout")?),
             key_down_limit: Duration::from_millis(num(down, "key-down limit")?),
+            rest: Duration::from_millis(num(rest, "rest")?),
+            duty_budget: Duration::from_secs(num(budget, "duty budget")?),
             uptime: Duration::from_millis(num(uptime, "uptime")?),
             boot: Boot::parse(boot).ok_or_else(|| format!("HELLO boot {boot:?} unknown"))?,
+            build: build.clone(),
             name: name.clone(),
         })
     }
@@ -157,13 +184,22 @@ pub struct Status {
     /// How the last run ended.
     pub ended: Ended,
     pub trip: Trip,
+    /// How long until the rest after the last run is over.
+    pub rest_left: Duration,
+    /// The duty budget: the key-down time the box would take now.
+    pub budget: Duration,
 }
 
 impl Status {
     /// From the fields of `OK STATUS`.
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [key, run, ended, trip] = f else {
-            return Err(format!("STATUS has {} fields, not 4", f.len()));
+        let [key, run, ended, trip, rest, budget] = f else {
+            return Err(format!("STATUS has {} fields, not 6", f.len()));
+        };
+        let ms = |s: &str, what: &str| {
+            s.parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| format!("STATUS {what} {s:?} is not a number"))
         };
         let bit = |s: &str, what: &str| match s {
             "0" => Ok(false),
@@ -175,6 +211,8 @@ impl Status {
             run: bit(run, "run")?,
             ended: Ended::parse(ended).ok_or_else(|| format!("STATUS ended {ended:?} unknown"))?,
             trip: Trip::parse(trip).ok_or_else(|| format!("STATUS trip {trip:?} unknown"))?,
+            rest_left: ms(rest, "rest")?,
+            budget: ms(budget, "budget")?,
         })
     }
 
@@ -218,9 +256,27 @@ mod tests {
         assert_eq!(h.run_limit, Duration::from_secs(60));
         assert_eq!(h.link_timeout, Duration::from_secs(2));
         assert_eq!(h.key_down_limit, Duration::from_secs(1));
+        assert_eq!(h.rest, Duration::from_secs(1));
+        assert_eq!(h.duty_budget, Duration::from_secs(60));
         assert_eq!(h.uptime, Duration::from_millis(1500));
         assert_eq!(h.boot, Boot::Watchdog);
+        assert_eq!(h.build, "-");
         assert_eq!(h.name, "PICO2-KEYER");
+        // The budget starts empty after a watchdog reset: earn some first.
+        let cw = Command::Cw {
+            wpm: 20,
+            text: "TEST".into(),
+        };
+        assert_eq!(ask(2, &cw), Reply::Err("DUTY".into()));
+        let mut k = Keyer::new(Limits::BOX, Boot::Power, 1234);
+        let mut ask = |id: u8, cmd: &Command| {
+            let line = encode(id, cmd).unwrap();
+            let reply = k.handle_line(1500, line.as_bytes()).unwrap();
+            let (rid, body) = keyer_core::frame::decode(reply.as_bytes()).unwrap();
+            assert_eq!(rid, id);
+            assert!(answers(cmd, body), "{body}");
+            parse_reply(cmd, body).unwrap()
+        };
         let cw = Command::Cw {
             wpm: 20,
             text: "TEST".into(),
@@ -232,7 +288,10 @@ mod tests {
         let s = Status::parse(&f).unwrap();
         assert!(s.key && s.run && s.busy());
         assert_eq!((s.ended, s.trip), (Ended::None, Trip::None));
+        assert_eq!(s.budget, Duration::from_secs(60));
         assert_eq!(ask(4, &cw), Reply::Err("RUN".into()));
+        assert_eq!(ask(5, &Command::TestStuck), Reply::Err("ARM".into()));
+        assert_eq!(ask(5, &Command::TestArm), Reply::Ok(Vec::new()));
         assert_eq!(ask(5, &Command::TestStuck), Reply::Ok(Vec::new()));
         assert_eq!(ask(6, &Command::Stop), Reply::Ok(Vec::new()));
         assert_eq!(ask(7, &Command::TestHang), Reply::Err("RUN".into()));
@@ -245,7 +304,9 @@ mod tests {
                 key: false,
                 run: false,
                 ended: Ended::Stop,
-                trip: Trip::None
+                trip: Trip::None,
+                rest_left: Duration::from_secs(1),
+                budget: Duration::from_secs(60),
             }
         );
     }
@@ -268,11 +329,22 @@ mod tests {
 
     #[test]
     fn bad_fields_are_errors() {
-        assert!(Status::parse(&strings(&["1", "0", "DONE"])).is_err());
-        assert!(Status::parse(&strings(&["2", "0", "DONE", "NONE"])).is_err());
-        assert!(Status::parse(&strings(&["0", "0", "MAYBE", "NONE"])).is_err());
-        assert!(Hello::parse(&strings(&["1", "60", "2000", "1000", "5", "LUNCH", "X"])).is_err());
-        assert!(Hello::parse(&strings(&["1", "60", "2s", "1000", "5", "POWER", "X"])).is_err());
+        assert!(Status::parse(&strings(&["1", "0", "DONE", "NONE"])).is_err());
+        assert!(Status::parse(&strings(&["2", "0", "DONE", "NONE", "0", "0"])).is_err());
+        assert!(Status::parse(&strings(&["0", "0", "MAYBE", "NONE", "0", "0"])).is_err());
+        assert!(Status::parse(&strings(&["0", "0", "DONE", "NONE", "-1", "0"])).is_err());
+        let hello = [
+            "2", "60", "2000", "1000", "1000", "60", "5", "POWER", "-", "X",
+        ];
+        assert!(Hello::parse(&strings(&hello)).is_ok());
+        let mut h = hello;
+        h[7] = "LUNCH";
+        assert!(Hello::parse(&strings(&h)).is_err());
+        let mut h = hello;
+        h[2] = "2s";
+        assert!(Hello::parse(&strings(&h)).is_err());
+        // Version 1's HELLO.
+        assert!(Hello::parse(&strings(&["1", "60", "2000", "1000", "5", "POWER", "X"])).is_err());
         assert!(parse_reply(&Command::Stop, "OK").is_err());
     }
 

@@ -26,6 +26,10 @@ pub trait Transport: Send {
 /// Linux and macOS raise both lines when a port is opened; dropping DTR first never
 /// passes through the state where only it is up.
 ///
+/// Before the port is opened, every time, the system's list of ports must show it
+/// as the box's: a USB device whose product name is [`keyer_core::NAME`]. A port
+/// that is anything else (an IC-7300's, which opening may key) is never opened.
+///
 /// If the port goes away (the box was unplugged, or reset by its watchdog and came
 /// back as a new USB device), the next line written opens it again by name.
 pub struct SerialTransport {
@@ -64,8 +68,54 @@ impl SerialTransport {
     }
 }
 
+/// Whether `path` names the keyer box among `ports` (the system's list): by its
+/// name there, its stable name, or the device it links to; macOS's dial-in name
+/// for its callout device counts too, and Windows's names in any case.
+pub fn check_identity(path: &str, ports: &[civ::ports::PortInfo]) -> anyhow::Result<()> {
+    let same = |a: &str, b: &str| {
+        let callout = |p: &str| p.replacen("/dev/tty.", "/dev/cu.", 1);
+        a == b
+            || callout(a) == callout(b)
+            || (cfg!(windows) && a.eq_ignore_ascii_case(b))
+            || std::fs::canonicalize(a)
+                .ok()
+                .is_some_and(|ca| std::fs::canonicalize(b).ok() == Some(ca))
+    };
+    let port = ports
+        .iter()
+        .find(|p| same(path, &p.path) || p.stable_path.as_deref().is_some_and(|s| same(path, s)));
+    let Some(port) = port else {
+        anyhow::bail!(
+            "station.serial_port {path} is not among this computer's serial ports: is the \
+             keyer box plugged in? (`hfnode devices` lists them)"
+        );
+    };
+    match port.usb.as_ref().and_then(|u| u.product.as_deref()) {
+        Some(p) if super::is_keyer_box(p) => Ok(()),
+        other => anyhow::bail!(
+            "station.serial_port {path} is not the keyer box: its USB product is {}, not {}; \
+             not opening it, in case it is a radio's own port (`hfnode devices` shows which \
+             port is the box)",
+            other.map_or("unknown".to_string(), |p| format!("{p:?}")),
+            keyer_core::NAME
+        ),
+    }
+}
+
 fn open_port(path: &str) -> anyhow::Result<Box<dyn serialport::SerialPort>> {
     use anyhow::Context;
+    let ports = civ::ports::list().context("listing serial ports to find the keyer box")?;
+    open_port_among(path, &ports)
+}
+
+/// Open `path`, once `ports` (the system's list) shows it is the keyer box: opening
+/// a port pulses DTR on Linux, which keys some radios.
+fn open_port_among(
+    path: &str,
+    ports: &[civ::ports::PortInfo],
+) -> anyhow::Result<Box<dyn serialport::SerialPort>> {
+    use anyhow::Context;
+    check_identity(path, ports)?;
     let builder = serialport::new(path, 115_200)
         .flow_control(serialport::FlowControl::None)
         .dtr_on_open(false)
@@ -293,21 +343,83 @@ mod tests {
     }
 
     #[test]
+    fn only_a_port_that_is_the_box_is_opened() {
+        use civ::ports::{PortInfo, UsbInfo};
+        let usb = |product: Option<&str>| UsbInfo {
+            vid: 0x2e8a,
+            pid: 0x0009,
+            serial_number: Some("1".into()),
+            manufacturer: Some("hfnode".into()),
+            product: product.map(str::to_string),
+        };
+        let ports = vec![
+            PortInfo {
+                path: "/dev/ttyACM0".into(),
+                stable_path: Some("/dev/serial/by-id/usb-hfnode_PICO2-KEYER_1-if00".into()),
+                usb: Some(usb(Some("PICO2-KEYER"))),
+            },
+            PortInfo {
+                path: "/dev/ttyUSB0".into(),
+                stable_path: None,
+                usb: Some(UsbInfo {
+                    vid: 0x10c4,
+                    pid: 0xea60,
+                    serial_number: Some("IC-7300 03001234".into()),
+                    manufacturer: Some("Silicon Labs".into()),
+                    product: Some("CP2102 USB to UART Bridge Controller".into()),
+                }),
+            },
+            PortInfo {
+                path: "/dev/ttyACM1".into(),
+                stable_path: None,
+                usb: Some(usb(None)),
+            },
+            PortInfo {
+                path: "/dev/ttyS0".into(),
+                stable_path: None,
+                usb: None,
+            },
+            PortInfo {
+                path: "/dev/cu.usbmodem1101".into(),
+                stable_path: None,
+                usb: Some(usb(Some("PICO2-KEYER"))),
+            },
+        ];
+        for ok in [
+            "/dev/ttyACM0",
+            "/dev/serial/by-id/usb-hfnode_PICO2-KEYER_1-if00",
+            "/dev/cu.usbmodem1101",
+            "/dev/tty.usbmodem1101",
+        ] {
+            check_identity(ok, &ports).unwrap();
+        }
+        for (bad, says) in [
+            ("/dev/ttyUSB0", "CP2102"),
+            ("/dev/ttyACM1", "unknown"),
+            ("/dev/ttyS0", "unknown"),
+            ("/dev/ttyACM9", "not among"),
+        ] {
+            let e = check_identity(bad, &ports).unwrap_err().to_string();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+    }
+
+    #[test]
     fn stale_and_damaged_lines_are_skipped_for_the_matching_reply() {
         let s = Script::default();
         s.then(vec![
-            Box::new(|id| line(id.wrapping_sub(1), "OK STATUS 1 1 NONE NONE")),
+            Box::new(|id| line(id.wrapping_sub(1), "OK STATUS 1 1 NONE NONE 0 60000")),
             // Damaged on the way: one character changed, the checksum not.
-            Box::new(|id| line(id, "OK STATUS 1 1 NONE NONE").replace("S 1", "S 0")),
+            Box::new(|id| line(id, "OK STATUS 1 1 NONE NONE 0 60000").replace("S 1", "S 0")),
             // Its id, to another command: left from before this link was opened.
             reply("OK STOP"),
-            reply("OK STATUS 0 0 DONE NONE"),
+            reply("OK STATUS 0 0 DONE NONE 0 60000"),
         ]);
         let mut link = Link::new(Box::new(s.clone()), Duration::from_millis(50));
         assert!(link.answered().is_none());
         assert_eq!(
             link.request(&Command::Status).unwrap(),
-            ["0", "0", "DONE", "NONE"]
+            ["0", "0", "DONE", "NONE", "0", "60000"]
         );
         assert!(link.answered().is_some());
     }
@@ -335,6 +447,31 @@ mod tests {
             Err(RigError::Timeout)
         ));
         assert_eq!(s.sent.lock().unwrap().len(), 4, "TEST sent once only");
+    }
+
+    #[test]
+    fn a_port_that_is_not_the_box_is_never_opened() {
+        // A radio's own port, listed with its USB product: refused before it is
+        // opened, not after (the safety audit's KB-8, in its review of PR #13). The
+        // path does not exist, so opening it would fail with another error.
+        use civ::ports::{PortInfo, UsbInfo};
+        let path = "/dev/hfnode-test-radio";
+        let ports = [PortInfo {
+            path: path.into(),
+            stable_path: None,
+            usb: Some(UsbInfo {
+                vid: 0x10c4,
+                pid: 0xea60,
+                serial_number: None,
+                manufacturer: Some("Silicon Labs".into()),
+                product: Some("CP2102 USB to UART Bridge Controller".into()),
+            }),
+        }];
+        let e = match open_port_among(path, &ports) {
+            Ok(_) => panic!("opened"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("is not the keyer box"), "{e}");
     }
 
     #[test]
