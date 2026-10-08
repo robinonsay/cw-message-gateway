@@ -279,12 +279,15 @@ impl BoxState {
 
     /// The watchdog reset the chip at `at`: its pins go low and USB re-enumerates.
     fn watchdog_reset(&mut self, at: u64) {
+        // As the firmware: what the last pass before the hang saved comes back, and
+        // a watchdog restart comes up tripped.
+        let saved = self.keyer.saved(self.hung_at.unwrap_or(at));
         self.changes.all_off(&self.keyer, at);
         if let Some(run) = self.runs.last_mut().filter(|r| r.end.is_none()) {
             run.end = Some(at);
             run.ended = Ended::None;
         }
-        self.keyer = Keyer::new(Limits::BOX, Boot::Watchdog, at);
+        self.keyer = Keyer::restore(Limits::BOX, Boot::Watchdog, at, Some(saved));
         self.at = at;
         self.hung_at = None;
         self.resets += 1;
@@ -355,6 +358,11 @@ impl BoxState {
 
     pub fn trip(&self) -> keyer_core::keyer::Trip {
         self.keyer.trip()
+    }
+
+    /// Plugged in and enumerated: the node can talk to it.
+    pub fn connected(&self) -> bool {
+        self.usb == Usb::Up
     }
 
     /// The key-down stretches that overlap `from..to` (box ms); one still down

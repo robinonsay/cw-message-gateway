@@ -296,12 +296,22 @@ mod tests {
         assert_eq!(h.boot, Boot::Watchdog);
         assert_eq!(h.build, "-");
         assert_eq!(h.name, "PICO2-KEYER");
-        // The budget starts empty after a watchdog reset: earn some first.
+        // A watchdog reset comes up tripped.
         let cw = Command::Cw {
             wpm: 20,
             text: "TEST".into(),
         };
-        assert_eq!(ask(2, &cw), Reply::Err("DUTY".into()));
+        assert_eq!(ask(2, &cw), Reply::Err("TRIP".into()));
+        let Reply::Ok(f) = ask(3, &Command::Status) else {
+            panic!()
+        };
+        assert_eq!(Status::parse(&f).unwrap().trip, Trip::Watchdog);
+        // The budget starts empty after another restart: earn some first.
+        let mut k = Keyer::new(Limits::BOX, Boot::Other, 1234);
+        let line = encode(4, &cw).unwrap();
+        let reply = k.handle_line(1500, line.as_bytes()).unwrap();
+        let (_, body) = keyer_core::frame::decode(reply.as_bytes()).unwrap();
+        assert_eq!(parse_reply(&cw, body).unwrap(), Reply::Err("DUTY".into()));
         let mut k = Keyer::new(Limits::BOX, Boot::Power, 1234);
         let mut ask = |id: u8, cmd: &Command| {
             let line = encode(id, cmd).unwrap();

@@ -209,7 +209,7 @@ fn hello_reports_the_limits_and_uptime() {
     let mut b = Bench::new();
     assert_eq!(
         b.send(5230, "HELLO").unwrap(),
-        "OK HELLO 3 60 2000 1000 1000 60 60 5230 POWER - PICO2-KEYER"
+        "OK HELLO 4 60 2000 1000 1000 60 60 5230 POWER - PICO2-KEYER"
     );
     let mut w = Keyer::new(Limits::BOX, Boot::Watchdog, 0).with_build("1a2b3c4d");
     let line = encode(9, format_args!("HELLO")).unwrap();
@@ -674,22 +674,125 @@ fn the_duty_budget_holds_the_key_to_half_the_time() {
 
 #[test]
 fn the_budget_starts_empty_after_a_restart_that_was_not_a_power_up() {
-    for boot in [Boot::Watchdog, Boot::Other] {
-        let mut b = Bench::new();
-        b.k = Keyer::new(Limits::BOX, boot, 0);
-        assert_eq!(
-            b.send(0, "STATUS").unwrap(),
-            "OK STATUS 0 0 NONE NONE 0 0 0 1"
-        );
-        // One dot at 20 wpm needs 60 ms of budget, earned with the key up.
-        assert_eq!(b.send(0, "CW 20 E").unwrap(), "ERR CW DUTY");
-        assert_eq!(b.send(59, "CW 20 E").unwrap(), "ERR CW DUTY");
-        assert_eq!(b.send(60, "CW 20 E").unwrap(), "OK CW");
-        assert_eq!(
-            b.send(120, "STATUS").unwrap(),
-            "OK STATUS 0 0 DONE NONE 1000 0 0 1"
-        );
+    let mut b = Bench::new();
+    b.k = Keyer::new(Limits::BOX, Boot::Other, 0);
+    assert_eq!(
+        b.send(0, "STATUS").unwrap(),
+        "OK STATUS 0 0 NONE NONE 0 0 0 1"
+    );
+    // One dot at 20 wpm needs 60 ms of budget, earned with the key up.
+    assert_eq!(b.send(0, "CW 20 E").unwrap(), "ERR CW DUTY");
+    assert_eq!(b.send(59, "CW 20 E").unwrap(), "ERR CW DUTY");
+    assert_eq!(b.send(60, "CW 20 E").unwrap(), "OK CW");
+    assert_eq!(
+        b.send(120, "STATUS").unwrap(),
+        "OK STATUS 0 0 DONE NONE 1000 0 0 1"
+    );
+}
+
+/// The audit's KB-7: after its watchdog fired, the box keys nothing until it is
+/// unplugged, whatever stopped its loop.
+#[test]
+fn a_box_restarted_by_its_watchdog_comes_up_tripped() {
+    let mut b = Bench::new();
+    b.k = Keyer::new(Limits::BOX, Boot::Watchdog, 0);
+    assert_eq!(
+        b.send(0, "STATUS").unwrap(),
+        "OK STATUS 0 0 NONE WATCHDOG 0 0 0 1"
+    );
+    assert_eq!(b.send(5000, "CW 20 E").unwrap(), "ERR CW TRIP");
+    // A trip it saved before the reset is the reason it gives.
+    let saved = Saved {
+        trip: Trip::Clock,
+        key: false,
+        budget: 0,
+    };
+    b.k = Keyer::restore(Limits::BOX, Boot::Watchdog, 0, Some(saved));
+    assert_eq!(b.k.trip(), Trip::Clock);
+}
+
+/// Every trip, the key and any budget in range come back from the two words; zero
+/// words (a power-up) and any one bit changed in either word come back as nothing.
+#[test]
+fn the_saved_state_round_trips_and_nothing_else_decodes() {
+    assert_eq!(Saved::decode([0, 0]), None);
+    assert_eq!(Saved::decode([u32::MAX, u32::MAX]), None);
+    for trip in Trip::ALL {
+        for key in [false, true] {
+            for budget in [i32::MIN, -1000, -1, 0, 1, 59_999, 60_000, i32::MAX] {
+                let s = Saved { trip, key, budget };
+                let w = s.encode();
+                assert_eq!(Saved::decode(w), Some(s));
+                for bit in 0..64 {
+                    let mut x = w;
+                    x[bit / 32] ^= 1 << (bit % 32);
+                    assert_eq!(Saved::decode(x), None, "{s:?} bit {bit}");
+                }
+            }
+        }
     }
+}
+
+/// A restart that kept the saved state: the trip stays; the budget is the saved
+/// one, never more than a fresh start of that kind gives, less the key-down
+/// nobody saw if the key was down; and the box rests before its first run.
+#[test]
+fn a_restart_keeps_the_trip_and_the_spent_budget() {
+    let tripped = Saved {
+        trip: Trip::Pin,
+        key: false,
+        budget: 60_000,
+    };
+    for boot in [Boot::Power, Boot::Other, Boot::Watchdog] {
+        let k = Keyer::restore(Limits::BOX, boot, 0, Some(tripped));
+        assert_eq!(k.trip(), Trip::Pin, "{boot:?}");
+    }
+    // A power-up whose saved state survived (a debugger's reset): the budget saved.
+    let mut b = Bench::new();
+    let spent = Saved {
+        trip: Trip::None,
+        key: false,
+        budget: 20_000,
+    };
+    b.k = Keyer::restore(Limits::BOX, Boot::Power, 0, Some(spent));
+    assert_eq!(
+        b.send(0, "STATUS").unwrap(),
+        "OK STATUS 0 0 NONE NONE 1000 20000 0 1"
+    );
+    assert_eq!(b.send(999, "CW 20 E").unwrap(), "ERR CW REST");
+    assert_eq!(b.send(1000, "CW 20 E").unwrap(), "OK CW");
+    // The key was down: 1 s more of key-down taken off.
+    let down = Saved {
+        trip: Trip::None,
+        key: true,
+        budget: 20_000,
+    };
+    let k = Keyer::restore(Limits::BOX, Boot::Power, 0, Some(down));
+    assert_eq!(k.saved(0).budget, 20_000 - 1000);
+    // Not a power-up: never more than the empty start, and a debt carries over.
+    let k = Keyer::restore(Limits::BOX, Boot::Other, 0, Some(spent));
+    assert_eq!(k.saved(0).budget, 0);
+    let k = Keyer::restore(Limits::BOX, Boot::Other, 0, Some(down));
+    assert_eq!(k.saved(0).budget, 0);
+    let owed = Saved {
+        trip: Trip::None,
+        key: true,
+        budget: -500,
+    };
+    let mut b = Bench::new();
+    b.k = Keyer::restore(Limits::BOX, Boot::Other, 0, Some(owed));
+    assert_eq!(b.k.saved(0).budget, -1500);
+    // A dot at 20 wpm (60 ms) needs the 1.5 s debt earned back first.
+    assert_eq!(b.send(1000, "CW 20 E").unwrap(), "ERR CW DUTY");
+    assert_eq!(b.send(1559, "CW 20 E").unwrap(), "ERR CW DUTY");
+    assert_eq!(
+        b.send(1559, "STATUS").unwrap(),
+        "OK STATUS 0 0 NONE NONE 0 59 0 1"
+    );
+    assert_eq!(b.send(1560, "CW 20 E").unwrap(), "OK CW");
+    // Nothing saved: as `new`.
+    let k = Keyer::restore(Limits::BOX, Boot::Power, 0, None);
+    assert_eq!((k.trip(), k.saved(0).budget), (Trip::None, 60_000));
 }
 
 #[test]
@@ -912,6 +1015,23 @@ fn mcw_waits_out_the_rest_after_any_run() {
     assert_eq!(b.send(end + 999, "MCW 20 E").unwrap(), "ERR MCW REST");
     assert_eq!(b.send(end + 999, "CW 20 E").unwrap(), "ERR CW REST");
     assert_eq!(b.send(end + 1000, "MCW 20 E").unwrap(), "OK MCW");
+}
+
+/// The PTT down is the transmitter keyed, as the key down is: a restart in an
+/// `MCW` run's lead (tone off) still takes the unseen time off the duty budget.
+#[test]
+fn the_saved_state_counts_the_ptt_as_keyed() {
+    let mut b = Bench::ptt();
+    b.send(0, "MCW 20 E");
+    b.to(100);
+    assert!(b.k.ptt() && !b.k.key_down());
+    let s = b.k.saved(100);
+    assert!(s.key, "{s:?}");
+    let k = Keyer::restore(Limits::BOX, Boot::Power, 0, Some(s));
+    assert_eq!(
+        k.saved(0).budget,
+        s.budget - i32::try_from(limits::RESTART_CHARGE_MS).unwrap()
+    );
 }
 
 #[test]
@@ -1191,7 +1311,7 @@ fn hello_and_status_report_the_ptt() {
     let h = b.send(10, "HELLO").unwrap();
     let f: Vec<&str> = h.split(' ').collect();
     // version, run s, link ms, key-down ms, rest ms, budget s, PTT s.
-    assert_eq!(&f[2..9], ["3", "60", "2000", "1000", "1000", "60", "60"]);
+    assert_eq!(&f[2..9], ["4", "60", "2000", "1000", "1000", "60", "60"]);
     let mut c = Bench::ptt_with(Limits {
         ptt_ms: 30_000,
         ..Limits::BOX

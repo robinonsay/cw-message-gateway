@@ -79,8 +79,10 @@ GP16 ──4.7 kΩ── GND                                       (ring: not co
 - The Pico 2's own LED (GP25) lights while the key is closed, and flashes if the box
   has tripped.
 - **Never attach an SWD probe or debugger while the box is plugged into the radio.**
-  Halting the chip stops the clock the limits and the watchdog run on, and the key
-  can stay closed with nothing left to open it.
+  The firmware keeps its clock and its watchdog running while a debugger halts the
+  chip, so a halt with the key closed ends in a watchdog reset half a second later,
+  but a debugger can also rewrite any register, the watchdog's included, and then
+  nothing is left to open the key.
 
 Check the box before it goes anywhere near a radio. Plug the box into the computer,
 with nothing running and nothing in the key jack, and with a multimeter:
@@ -263,9 +265,12 @@ the key down on purpose). Into the dummy load, at minimum power:
 8. `hfnode keyer --config C hangtest`: the node identifies, then makes the box's
    control loop hang during a short transmission. Its hardware watchdog must reset
    it and open the key within half a second, without the node's help. The box comes
-   back by itself; **unplug it and plug it in again afterwards**, so that it reports
-   `POWER` rather than `WATCHDOG`. The test fails if the node did not measure the
-   key down at all, so a passing run means something was really keyed.
+   back by itself, tripped (`WATCHDOG`): it keys nothing more until it is
+   **unplugged and plugged in again**, which you do afterwards. The test fails if
+   the box did not come back tripped, or if the node did not measure the key down at
+   all, so a passing run means something was really keyed. As after `stucktest`,
+   expect `state_dir/tx-inhibited` afterwards: read it, check it says the watchdog
+   fired, then remove it with the node stopped.
 9. `hfnode keyer --config C stucktest`: the node identifies, then makes the box hold
    its key down. Its 1 s key-down limit must open the key and trip the box. Unplug
    the box and plug it in again afterwards. A tripped box makes the node latch its
@@ -303,19 +308,29 @@ Fastest first:
    max_duty_percent`, `duty_window_secs`).
 3. **The box's hardware watchdog.** Its control loop feeds the watchdog once per
    pass and nothing in a pass waits. If the loop stalls for 0.5 s the chip resets and
-   its key pin goes back to open. After a `TEST HANG` the loop stops feeding it on
-   purpose; if the reset has not happened 1 s later, the loop opens the key itself.
-4. **The box's link timeout.** A run stops when no valid line has come from the node
+   its key pin goes back to open, and the box comes back tripped: a restart never
+   clears a trip or refills the duty budget (the box keeps both in registers a reset
+   leaves alone and unplugging clears). After a `TEST HANG` the loop stops feeding it
+   on purpose; if the reset has not happened 1 s later, the loop opens the key
+   itself. A panic or a processor fault opens the key first, then stops, for the
+   watchdog to reset the box.
+4. **The box's clock check.** Every 50 ms the loop compares its clock, which every
+   limit above is timed on, with the processor's own count of its cycles. A clock
+   that stops or slows while the processor runs on (or a loop that stops checking)
+   opens the key, trips the box and stops it feeding its watchdog. If the processor
+   clock itself stops, no software runs to see it: the watchdog, on the other
+   clock, resets the chip.
+5. **The box's link timeout.** A run stops when no valid line has come from the node
    for 2 s (the node checks in every 0.25 s while keying): hfnode was killed or
    hung, the computer crashed. It stops at once when USB goes away: the cable
    pulled, the computer's USB reset or suspended. Closing the port is not itself a
    stop — the box is told nothing about it — so what ends the run is one of those
    two. `hfnode keyer linktest` checks it.
-5. **The box's run limit.** No run longer than 60 s.
-6. **No keying over a tone.** Before every piece, a steady tone at the sidetone
+6. **The box's run limit.** No run longer than 60 s.
+7. **No keying over a tone.** Before every piece, a steady tone at the sidetone
    pitch over the last second (a station's carrier, or the key already closed at
    the radio) stops the node keying.
-7. **The node's sidetone check after every piece.** It must hear the sidetone
+8. **The node's sidetone check after every piece.** It must hear the sidetone
    follow the box's elements (or it stops and keys nothing more until its next
    retune: the cable is out, the radio is off or not in straight key, the sidetone
    is off). Then it must hear the sidetone stop: a tone that goes on after the box
@@ -329,13 +344,14 @@ Fastest first:
    refuses to key again for as long as the node runs, whether or not the key then
    lets go. If the audio stops before it can tell, it takes the key as held, and
    does the same.
-8. **A steady tone for 30 s** at the sidetone pitch latches the inhibit too. The
+9. **A steady tone for 30 s** at the sidetone pitch latches the inhibit too. The
    node looks for one before every transmission and every quarter second while
    idle.
-9. **The station's watchdog** (`max_key_seconds`) and the inhibit file in
-   `state_dir`, as for the IC-7300. A stop that cannot confirm the radio back on
-   receive — including Ctrl-C and a stop from systemd — writes that file, so a node
-   stopped with a stuck key does not start up keying.
+10. **The station's watchdog** (`max_key_seconds`) and the inhibit file in
+    `state_dir`, as for the IC-7300. A stop that cannot confirm the radio back on
+    receive — including Ctrl-C and a stop from systemd — writes that file, so a node
+    stopped with a stuck key does not start up keying. A node started on a box that
+    is already tripped keys nothing, latches that file and emails `alert_to`.
 
 What the node cannot see:
 
@@ -392,7 +408,15 @@ The box, the sound card and a Raspberry Pi can sit with the radio, away from the
 house. The node's [Raspberry Pi guide](raspberry-pi-setup.md) applies as written,
 with this page's configuration. The box needs nothing but its USB cable.
 
-`hfnode run` and the `deploy/` scripts are written for the IC-7300 and have not been
-through this page's bring-up: with `rig = "keyer"` the service's own stop and restart
-paths are not right yet, so run the node in the foreground for now, where Ctrl-C is
-the stop and you can read what it says.
+`hfnode run` works under the `deploy/` service and supervise scripts with
+`rig = "keyer"`: the systemd unit lets the node open the box (a `ttyACM` device) and
+the sound card, and after every stop or crash the unit and the scripts run `hfnode
+radio rx`, which with this rig is `hfnode keyer rx`: the box stopped, its key
+confirmed open and no sidetone heard, or the transmit inhibit latched. When `run`
+stops, its last receive check still hears the radio: the node closes the sound card
+after it, not before.
+
+Run it in the foreground, where Ctrl-C is the stop and you can read what it says,
+until the whole bring-up above has passed on your radio. Running it unattended is a
+separate question: see the safety audit's verdict for your setup, and the control
+operator rules for automatic CW, before leaving it on its own.

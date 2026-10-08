@@ -343,6 +343,30 @@ pub fn validate(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Why a box tripped, for people: what each `STATUS` trip means.
+pub fn trip_text(t: keyer_core::keyer::Trip) -> &'static str {
+    use keyer_core::keyer::Trip;
+    match t {
+        Trip::None => "not tripped",
+        Trip::Down => "its key (or tone) stayed on past its key-down limit",
+        Trip::Pin => {
+            "its own watch on its pins saw the key or tone pin on for the key-down limit, or \
+             the PTT pin down for the PTT limit"
+        }
+        Trip::Slow => "a pass of its control loop came too late with the key or tone on",
+        Trip::Clock => {
+            "its clock stopped or slowed against the processor's own count, so none of its \
+             time limits could be trusted"
+        }
+        Trip::Watchdog => "it restarted because its watchdog fired: its control loop had stopped",
+        Trip::Ptt => "its PTT stayed down past its PTT limit",
+        Trip::Line => {
+            "the PTT line stayed low after it let the PTT up: something else holds the \
+             radio's PTT, and the radio may still be transmitting"
+        }
+    }
+}
+
 /// Whether a serial port's USB product string is the keyer box's: its firmware
 /// reports [`keyer_core::NAME`] (firmware/pico2-keyer).
 pub fn is_keyer_box(usb_product: &str) -> bool {

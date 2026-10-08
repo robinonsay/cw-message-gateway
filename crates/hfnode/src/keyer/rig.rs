@@ -12,9 +12,10 @@
 //! audio cannot yet show its key (or PTT) open after a run.
 //!
 //! Once the audio has shown the radio's key held with the box's open, or the box
-//! has come back from its watchdog firing (outside `hfnode keyer hangtest`), the
-//! rig never again reads the radio as on receive: every status read is an error,
-//! and the station latches its transmit inhibit, which only the owner clears.
+//! has come back from its watchdog firing (outside `hfnode keyer hangtest`), or
+//! was tripped when the rig opened it, the rig never again reads the radio as on
+//! receive: every status read is an error, and the station latches its transmit
+//! inhibit, which only the owner clears, and emails the owner.
 //!
 //! Before each run the rig waits ([`Rig::rest_needed`]) for the box's rest after
 //! its last run and its duty budget, and for `[keyer] max_duty_percent` of the
@@ -25,7 +26,7 @@
 use super::link::{refused, Link, Transport};
 use super::monitor::{KeyState, Monitor, MAX_LAG, RX_BACK, STUCK_AFTER_RUN};
 use super::proto::{Command, Hello, Reply, Status};
-use super::{check_hello, Output, REPLY_TIMEOUT};
+use super::{check_hello, trip_text, Output, REPLY_TIMEOUT};
 use anyhow::{anyhow, bail};
 use civ::{Result, Rig, RigError};
 use keyer_core::keyer::{Boot, Ended, Trip};
@@ -65,24 +66,6 @@ pub fn ptt_time(morse: Duration) -> Duration {
         + Duration::from_millis(u64::from(
             keyer_core::mcw::LEAD_MS + keyer_core::mcw::TAIL_MS,
         ))
-}
-
-/// What a box's trip means.
-pub fn trip_note(trip: Trip) -> &'static str {
-    match trip {
-        Trip::None => "not tripped",
-        Trip::Down => "its key (or tone) stayed on past its key-down limit",
-        Trip::Pin => {
-            "its own watch on its pins: the key or tone pin on past the key-down limit, or \
-             the PTT pin down past the PTT limit"
-        }
-        Trip::Slow => "its control loop ran slow with the key or tone on",
-        Trip::Ptt => "its PTT stayed down past its PTT limit",
-        Trip::Line => {
-            "the PTT line stayed low after it let the PTT up: something else holds the \
-             radio's PTT, and the radio may still be transmitting"
-        }
-    }
 }
 
 /// What the rig needs from the configuration.
@@ -250,11 +233,20 @@ impl KeyerRig {
         link.request(&Command::Stop)
             .map_err(|e| anyhow!("keyer box: STOP: {e}"))?;
         let st = status(&mut link).map_err(|e| anyhow!("keyer box: STATUS: {e}"))?;
-        if st.trip != Trip::None {
-            bail!(
-                "the keyer box has tripped ({}): unplug it and plug it in again",
-                trip_note(st.trip)
+        if st.trip != Trip::None && fault.is_none() {
+            // Its key is open, but something went wrong that only a person can look
+            // into: the rig keys nothing and reads every status as an error, so that
+            // a station on it latches its inhibit and tells the owner (as when the box
+            // trips while the node runs), rather than the node failing to start
+            // without a word. A box back from its watchdog is tripped too; the fault
+            // above already says why.
+            let msg = format!(
+                "the keyer box is tripped ({}): look at the radio and the box, then unplug \
+                 the box and plug it in again",
+                trip_text(st.trip)
             );
+            log::error!("{msg}");
+            fault = Some(msg);
         }
         if st.busy() {
             bail!("the keyer box still reads its key or PTT down after STOP");
@@ -810,7 +802,7 @@ impl Rig for KeyerRig {
                 return Err(RigError::Protocol(format!(
                     "the keyer box has tripped ({}): check it and the radio, then unplug the \
                      box and plug it in again",
-                    trip_note(st.trip)
+                    trip_text(st.trip)
                 )))
             }
             // Its PTT is up, but the line reads it held (or the radio is off): until

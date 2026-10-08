@@ -1,12 +1,13 @@
 use super::*;
 use crate::frame::{decode, encode};
-use crate::keyer::{Boot, Ended, Limits};
+use crate::keyer::{Boot, Ended, Limits, Saved};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Call {
     Poll,
     Now,
+    Cycles,
     Epoch,
     Read,
     Write,
@@ -15,13 +16,22 @@ enum Call {
     Ptt(bool),
     Line,
     Led(bool),
+    Save,
     Feed,
 }
+
+/// The test board's processor count: a thousand a millisecond.
+const PER_MS: u32 = 1000;
 
 /// A board in memory: a clock the test moves on, a USB port, the pins, and a
 /// record of every call the loop makes.
 struct Board {
     t: u64,
+    /// The processor's time, ms, if not the clock's (`t`): set it to make the two
+    /// disagree.
+    cpu: Option<u64>,
+    /// What the loop last saved for the next boot.
+    saved: [u32; 2],
     epoch: u32,
     rx: VecDeque<u8>,
     tx: Vec<u8>,
@@ -43,6 +53,8 @@ impl Board {
     fn new() -> Self {
         Self {
             t: 0,
+            cpu: None,
+            saved: [0; 2],
             epoch: 1,
             rx: VecDeque::new(),
             tx: Vec::new(),
@@ -83,9 +95,19 @@ impl Board {
 }
 
 impl Hardware for Board {
+    const CPU_CYCLES_PER_MS: u32 = PER_MS;
+
     fn now_ms(&self) -> u64 {
         self.call(Call::Now);
         self.t
+    }
+    fn cpu_cycles(&self) -> u32 {
+        self.call(Call::Cycles);
+        (self.cpu.unwrap_or(self.t) * u64::from(PER_MS)) as u32 & CPU_CYCLES_MASK
+    }
+    fn save(&mut self, words: [u32; 2]) {
+        self.call(Call::Save);
+        self.saved = words;
     }
     fn usb_poll(&mut self) {
         self.call(Call::Poll);
@@ -266,8 +288,9 @@ fn a_slow_pass_with_the_key_down_trips_the_box() {
     assert_eq!(c.keyer().trip(), Trip::None);
 }
 
-/// Each pass: USB serviced, then the clock read; the pin driven after the keyer
-/// is brought up to that time, then the LED; the watchdog fed exactly once, last.
+/// Each pass: USB serviced, then the clock read, then the processor's count; the
+/// pin driven after the keyer is brought up to that time, then the LED; the state
+/// saved for the next boot, then the watchdog fed exactly once, last.
 #[test]
 fn each_pass_feeds_the_watchdog_once_after_driving_the_pin() {
     let (mut c, mut b) = rig();
@@ -279,8 +302,11 @@ fn each_pass_feeds_the_watchdog_once_after_driving_the_pin() {
         let calls = b.take_calls();
         assert_eq!(calls.first(), Some(&Call::Poll), "{calls:?}");
         assert_eq!(calls.get(1), Some(&Call::Now), "{calls:?}");
+        assert_eq!(calls.get(2), Some(&Call::Cycles), "{calls:?}");
         assert_eq!(calls.last(), Some(&Call::Feed), "{calls:?}");
+        assert_eq!(calls[calls.len() - 2], Call::Save, "{calls:?}");
         assert_eq!(calls.iter().filter(|&&c| c == Call::Feed).count(), 1);
+        assert_eq!(calls.iter().filter(|&&c| c == Call::Save).count(), 1);
         let key = calls
             .iter()
             .position(|c| matches!(c, Call::Key(_)))
@@ -418,7 +444,7 @@ fn replies_wait_for_room_in_the_usb_buffer() {
     }
     let r = b.replies();
     assert_eq!(r.len(), 1);
-    assert!(r[0].starts_with("OK HELLO 3 "), "{r:?}");
+    assert!(r[0].starts_with("OK HELLO 4 "), "{r:?}");
 }
 
 /// A tripped box flashes its LED; one keying shows the key.
@@ -670,11 +696,258 @@ fn whatever_the_host_sends_the_pins_stay_within_their_limits() {
             "round {round}: element {} ms",
             elem.longest
         );
-        // The duty budget bounds the carrier over the whole 150 s.
+        // The duty budget bounds the carrier over the whole 150 s: with K of it
+        // keyed, 60 s + (150 s - K) earned >= K, so K <= 150 s / 2 + 30 s.
         assert!(
-            ptt.total <= 150_000 / 2 + 60_000,
+            ptt.total <= 150_000 / 2 + 30_000,
             "round {round}: {}",
             ptt.total
         );
     }
+}
+
+/// `check` every `step` ms over `from..to` of both clocks, `per_ms` cycles a ms;
+/// the first trip, if any, and when.
+fn run_check(
+    c: &mut ClockCheck,
+    per_ms: u64,
+    clock: impl Fn(u64) -> u64,
+    cpu: impl Fn(u64) -> u64,
+    from: u64,
+    to: u64,
+    step: u64,
+) -> Option<(u64, Trip)> {
+    let mut t = from;
+    while t < to {
+        t += step;
+        let cycles = (cpu(t) * per_ms) as u32;
+        if let Some(why) = c.check(clock(t), cycles) {
+            return Some((t, why));
+        }
+    }
+    None
+}
+
+/// The clock and the processor's count agreeing: no trip, over many wraps of the
+/// count (2^24 cycles is about 112 ms at the Pico 2's 150 MHz), with passes 1 ms
+/// apart and one 100 ms pass; nor a 200 ms pass with the key up, which the count's
+/// wrap undercounts.
+#[test]
+fn the_clock_check_passes_clocks_that_agree() {
+    let per_ms = 150_000;
+    let mut c = ClockCheck::new(0, 0, per_ms as u32);
+    assert_eq!(run_check(&mut c, per_ms, |t| t, |t| t, 0, 10_000, 1), None);
+    assert_eq!(
+        run_check(&mut c, per_ms, |t| t, |t| t, 10_000, 10_100, 100),
+        None
+    );
+    assert_eq!(
+        run_check(&mut c, per_ms, |t| t, |t| t, 10_100, 10_300, 200),
+        None
+    );
+    assert_eq!(
+        run_check(&mut c, per_ms, |t| t, |t| t, 10_300, 20_000, 1),
+        None
+    );
+    // The clock a little slow (60% of the processor's rate) is not a stop.
+    let mut c = ClockCheck::new(0, 0, per_ms as u32);
+    assert_eq!(
+        run_check(&mut c, per_ms, |t| t * 6 / 10, |t| t, 0, 10_000, 1),
+        None
+    );
+}
+
+/// The clock stopped, or running at under half the processor's rate: a trip within
+/// two check windows of processor time. The processor's count stopped: a trip
+/// within two windows of the clock.
+#[test]
+fn the_clock_check_trips_when_either_clock_stops() {
+    let w = u64::from(limits::CLOCK_CHECK_MS);
+    for per_ms in [1000u64, 150_000] {
+        let mut c = ClockCheck::new(0, 0, per_ms as u32);
+        let r = run_check(&mut c, per_ms, |t| t.min(900), |t| t, 0, 10_000, 1);
+        let (at, why) = r.expect("a stopped clock trips");
+        assert_eq!(why, Trip::Clock);
+        assert!(at <= 900 + 2 * w, "tripped at {at}");
+        let mut c = ClockCheck::new(0, 0, per_ms as u32);
+        let r = run_check(&mut c, per_ms, |t| t * 4 / 10, |t| t, 0, 10_000, 1);
+        assert!(r.is_some_and(|(at, _)| at <= 2 * w), "{r:?}");
+        let mut c = ClockCheck::new(0, 0, per_ms as u32);
+        let r = run_check(&mut c, per_ms, |t| t, |t| t.min(700), 0, 10_000, 1);
+        assert!(
+            r.is_some_and(|(at, why)| why == Trip::Clock && at <= 700 + 2 * w),
+            "{r:?}"
+        );
+    }
+}
+
+/// The audit's KB-5: the loop's clock stops (its tick, or a debugger pausing it)
+/// with the key down, while the processor runs on. Every time limit has stopped
+/// with it; the clock check opens the key within two check windows of processor
+/// time, trips the box (`CLOCK`) and stops feeding the watchdog, so that the
+/// watchdog resets the chip if its own clock still runs.
+#[test]
+fn a_stopped_clock_opens_the_key_and_starves_the_watchdog() {
+    let (mut c, mut b) = rig();
+    b.send(1, "CW 5 TTTT");
+    for t in 0..=300 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    assert!(b.key);
+    b.take_calls();
+    // The clock stays at 300; the processor runs on, a millisecond a pass.
+    let w = u64::from(limits::CLOCK_CHECK_MS);
+    let mut opened = None;
+    for cpu in 301..=5000u64 {
+        b.cpu = Some(cpu);
+        if cpu % 250 == 0 {
+            b.send(2, "STATUS");
+        }
+        c.pass(&mut b);
+        if !b.key && opened.is_none() {
+            opened = Some(cpu);
+        }
+    }
+    let opened = opened.expect("the key opened");
+    assert!(opened <= 300 + 2 * w, "the key opened only at {opened}");
+    assert_eq!(c.keyer().trip(), Trip::Clock);
+    assert!(c.starved());
+    let calls = b.take_calls();
+    let fed: Vec<_> = calls.iter().filter(|&&c| c == Call::Feed).collect();
+    assert!(
+        fed.len() < 2 * w as usize,
+        "fed {} times after the clock stopped",
+        fed.len()
+    );
+    // It still answers, and says why, until the watchdog resets it; and it saved
+    // the trip, so that the restart keeps it.
+    assert!(b
+        .replies()
+        .iter()
+        .any(|r| r.starts_with("OK STATUS 0 0 DOWN CLOCK")));
+    assert_eq!(Saved::decode(b.saved).map(|s| s.trip), Some(Trip::Clock));
+    // Nothing more is fed, whatever the clocks do now.
+    b.cpu = None;
+    for t in 300..2000 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    assert!(!b.take_calls().contains(&Call::Feed));
+}
+
+/// The processor's count not running (a board that never started it): the check
+/// cannot work, so the box trips rather than key without it.
+#[test]
+fn a_box_whose_second_clock_does_not_run_trips() {
+    let (mut c, mut b) = rig();
+    b.cpu = Some(0);
+    b.send(1, "CW 20 E");
+    for t in 0..200 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    assert_eq!(c.keyer().trip(), Trip::Clock);
+    assert!(!b.key);
+}
+
+/// Every pass saves the trip, the key and the duty budget as of that pass.
+#[test]
+fn each_pass_saves_the_state_for_the_next_boot() {
+    let (mut c, mut b) = rig();
+    c.pass(&mut b);
+    assert_eq!(
+        Saved::decode(b.saved),
+        Some(Saved {
+            trip: Trip::None,
+            key: false,
+            budget: 60_000
+        })
+    );
+    b.send(1, "CW 5 T");
+    for t in 1..=300 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    // Keyed at 1, so 299 ms of key-down by 300.
+    assert_eq!(
+        Saved::decode(b.saved),
+        Some(Saved {
+            trip: Trip::None,
+            key: true,
+            budget: 60_000 - 299
+        })
+    );
+}
+
+/// One boot of a box on `b` at `b.t`, from what the last one saved: the restart
+/// as the firmware does it.
+fn boot(b: &mut Board, boot: Boot) -> Control {
+    b.key = false;
+    b.epoch += 1;
+    let saved = Saved::decode(b.saved);
+    Control::new(Keyer::restore(Limits::BOX, boot, b.t, saved), b)
+}
+
+/// A host that makes the box restart, round after round, for ten minutes: `CW`,
+/// then `TEST ARM` and `TEST HANG` with the key down, so that the watchdog resets
+/// the box with its key down. Returns how long the pin was high in all, ms, and
+/// how many runs the box took. `restart` is the boot each reset reports.
+fn restart_loop(restart: Boot) -> (u64, u32) {
+    let mut b = Board::new();
+    let mut c = boot(&mut b, Boot::Power);
+    let mut high = 0;
+    let mut taken = 0;
+    let mut last_fed = 0;
+    let mut id = 1u8;
+    while b.t < 600_000 {
+        b.t += 1;
+        // Every 20 ms the host tries again.
+        if !c.hung() && b.t.is_multiple_of(20) {
+            id = id % 200 + 1;
+            b.send(id, "CW 50 E");
+            b.send(id + 1, "TEST ARM");
+            b.send(id + 2, "TEST HANG");
+        }
+        b.take_calls();
+        c.pass(&mut b);
+        let calls = b.take_calls();
+        if calls.contains(&Call::Feed) {
+            last_fed = b.t;
+        }
+        taken += b.replies().iter().filter(|r| *r == "OK CW").count() as u32;
+        if b.key {
+            high += 1;
+        }
+        if b.t >= last_fed + u64::from(limits::WATCHDOG_MS) {
+            // The watchdog: the chip resets, its pin goes low; it boots 50 ms later.
+            b.t += 50;
+            c = boot(&mut b, restart);
+            last_fed = b.t;
+        }
+    }
+    (high, taken)
+}
+
+/// The audit's KB-7: a host looping `CW`, `TEST ARM` and `TEST HANG` used to get
+/// 62-83% duty, each watchdog restart giving the box a fresh start. Now the first
+/// restart comes up tripped, and nothing more is keyed.
+#[test]
+fn a_host_that_makes_the_box_restart_gets_one_run() {
+    let (high, taken) = restart_loop(Boot::Watchdog);
+    assert_eq!(taken, 1, "runs taken");
+    assert!(
+        high <= u64::from(limits::WATCHDOG_MS) + 1,
+        "pin high {high} ms"
+    );
+}
+
+/// The same, as if each restart were not reported as the watchdog's (the boot
+/// reason misread): the duty budget, carried over with the unseen key-down
+/// charged, still holds the key down at most 55% of the ten minutes.
+#[test]
+fn restarts_do_not_refill_the_duty_budget() {
+    let (high, taken) = restart_loop(Boot::Other);
+    assert!(taken > 10, "{taken} runs taken");
+    assert!(high * 100 / 600_000 <= 55, "pin high {high} ms of 600 s");
 }

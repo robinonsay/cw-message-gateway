@@ -87,17 +87,23 @@ pub fn bench(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
 /// [`bench`] with radio time running `scale` times faster than real time: 1 for
 /// what depends on real-time waits.
 pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
-    bench_with(scale, Output::Key, tweak)
+    bench_with(scale, Output::Key, tweak, |_| {})
 }
 
 /// [`bench`] for an FM handheld on the box's PTT (`[keyer] output = "ptt"`), on 2 m.
 pub fn handheld(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
-    bench_with(SCALE, Output::Ptt, tweak)
+    bench_with(SCALE, Output::Ptt, tweak, |_| {})
 }
 
-/// [`bench_at`] for the box's `output`: a radio on its key line, or a handheld on
-/// its PTT.
-pub fn bench_with(scale: f32, output: Output, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+/// [`bench_at`] for the box's `output` (a radio on its key line, or a handheld on
+/// its PTT), with `before_open` done to the box, the radio already listening to
+/// it, before the node's rig opens it.
+pub fn bench_with(
+    scale: f32,
+    output: Output,
+    tweak: impl FnOnce(&mut RadioSettings),
+    before_open: impl FnOnce(&MockBox),
+) -> Bench {
     let ptt = output == Output::Ptt;
     let frequency_hz = if ptt { 144_150_000 } else { 7_030_000 };
     let clock = Clock::new(scale);
@@ -123,6 +129,7 @@ pub fn bench_with(scale: f32, output: Output, tweak: impl FnOnce(&mut RadioSetti
     };
     tweak(&mut rs);
     let radio = MockRadio::start(rs, keyer_box.clone(), monitor.clone(), None, None);
+    before_open(&keyer_box);
     let rig = KeyerRig::open(
         keyer_box.transport(),
         monitor,

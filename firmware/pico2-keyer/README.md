@@ -10,11 +10,21 @@ takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
   `hfnode selftest` run as a mock box; this file moves USB bytes, the key, PTT and
   tone pins, and the PTT line.
 - It runs on [rustos](https://github.com/robinonsay/rustos), a bare-metal Rust
-  runtime for the Pico 2 with no outside crates: its clocks, timer, watchdog, GPIO,
-  USB serial and PWM drivers. The PWM driver is rustos PR #2, pinned in
-  `Cargo.toml` at its head commit until it merges, then at its merge commit.
+  runtime for the Pico 2 with no outside crates: its clocks, timer, SysTick,
+  watchdog, GPIO, PWM and USB serial drivers, and the fault handlers, which call
+  this firmware's `safe_state` (the key and the PTT open first) before they stop.
+  It is pinned in `Cargo.toml` at a commit on a rustos branch until its PRs
+  merge, then at their merge commits.
 - `uf2.py`: turns the built ELF file into `pico2-keyer.uf2`, the file you copy onto
   the Pico 2, after checking that the RP2350 would boot it.
+- `check_faults.py`: reads the built ELF's HardFault, default exception and panic
+  handlers and checks that the first store each makes opens the key (GP16). No
+  computer can run those handlers, so CI checks the machine code instead. It needs
+  `llvm-objdump`, which `rust-toolchain.toml` installs (`llvm-tools`):
+
+  ```sh
+  python3 check_faults.py target/thumbv8m.main-none-eabihf/release/pico2-keyer
+  ```
 
 ## Getting it
 

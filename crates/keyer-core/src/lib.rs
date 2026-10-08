@@ -21,9 +21,9 @@ pub mod frame;
 pub mod keyer;
 pub mod morse;
 
-/// Protocol version, reported by `HELLO`. 3 added `MCW`, the PTT output, the PTT
-/// line and `TEST HOLD`.
-pub const VERSION: u32 = 3;
+/// Protocol version, reported by `HELLO`. 3: `STATUS` reports the `CLOCK` and
+/// `WATCHDOG` trips. 4: `MCW`, the PTT output, the PTT line and `TEST HOLD`.
+pub const VERSION: u32 = 4;
 
 /// The box's name, the last field of `HELLO`.
 pub const NAME: &str = "PICO2-KEYER";
@@ -86,6 +86,18 @@ pub mod limits {
     /// its control loop, the loop opens the key and the PTT and stops the tone
     /// itself ([`crate::control`]).
     pub const HANG_OPEN_MS: u32 = WATCHDOG_MS + 500;
+    /// The control loop checks its clock against a second one, the processor's
+    /// own count, every time either has run this long ([`crate::control`]): the
+    /// clock must have run at least half as long as the processor, and the
+    /// processor's count at least a quarter as long as the clock, or the box
+    /// trips (`CLOCK`) and stops feeding its watchdog.
+    pub const CLOCK_CHECK_MS: u32 = 50;
+    /// After a restart that kept the box's saved state ([`crate::keyer::Saved`]),
+    /// a key that was down when the state was last saved counts as having stayed
+    /// down this much longer: as long as the key can stay down after the control
+    /// loop stops, before the watchdog resets the chip or the loop opens the key
+    /// itself ([`HANG_OPEN_MS`]). It is taken from the duty budget.
+    pub const RESTART_CHARGE_MS: u32 = HANG_OPEN_MS;
 }
 
 /// The timing of an `MCW` run, around the Morse.
