@@ -908,7 +908,7 @@ fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
         cfg.station.commissioned,
         action,
         commissioning::Limits::of(&cfg.station),
-        action == Action::Run && InhibitLatch::in_dir(&cfg.state_dir).is_set(),
+        &cfg.state_dir,
         || open_radio(cfg),
     )
 }
@@ -1036,13 +1036,18 @@ fn release_tx_inhibit<P: civ::ic7300::Port>(
     rig: &mut civ::ic7300::Ic7300<P>,
     state_dir: &Path,
 ) -> Result<()> {
+    release_tx_inhibit_unless(rig, &inhibit_dirs(state_dir))
+}
+
+/// `state_dir`, then the [`STANDARD_STATE_DIRS`] this user's home expands them to.
+fn inhibit_dirs(state_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![state_dir.to_path_buf()];
     dirs.extend(
         STANDARD_STATE_DIRS
             .iter()
             .filter_map(|d| hfnode::config::expand_home(Path::new(d)).ok()),
     );
-    release_tx_inhibit_unless(rig, &dirs)
+    dirs
 }
 
 /// [`release_tx_inhibit`], with the state directories to look in.
@@ -2226,10 +2231,8 @@ key_file = '{}'
     fn radio_setup_looks_in_the_standard_state_directories() {
         let home = hfnode::config::expand_home(Path::new("~")).unwrap();
         let mac = home.join("Library/Application Support/hfnode/state");
-        let found: Vec<PathBuf> = STANDARD_STATE_DIRS
-            .iter()
-            .map(|d| hfnode::config::expand_home(Path::new(d)).unwrap())
-            .collect();
+        let found = inhibit_dirs(Path::new("/srv/bench"));
+        assert_eq!(found[0], Path::new("/srv/bench"));
         assert!(found.contains(&PathBuf::from("/var/lib/hfnode")));
         assert!(found.contains(&mac), "{found:?}");
         let example: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();

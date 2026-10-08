@@ -1965,9 +1965,10 @@ impl<R: Rig + 'static> Station<R> {
         };
         *lock(&self.keying_since) = Some(Instant::now());
         let sent = self.with_rig(|r| r.send_cw(piece));
-        // Refused (NG): the keyer took nothing. Anything else may have keyed it, a
-        // lost reply included.
-        if !matches!(sent, Err(RigError::Rejected)) {
+        // Refused (NG), or refused by the rig before anything went out (the keyer
+        // box will not key over a carrier on the frequency): nothing keyed. A lost
+        // reply, or a write or read that failed, may have keyed it.
+        if matches!(sent, Ok(()) | Err(RigError::Timeout | RigError::Io(_))) {
             self.tx_keying += keying;
         }
         let at = Instant::now();

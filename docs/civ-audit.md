@@ -95,7 +95,7 @@ named test-plan step measures it.
 | `15 12` | SWR: 0 = 1.0, 48 = 1.5, 80 = 2.0, 120 = 3.0 | 8736 | Yes |
 | `16 46` | VOX: `00` OFF required | 8766 | Yes |
 | `16 47` | `01` (semi) required after setup | 8767 | Yes |
-| `16 66` | TX Inhibit: `00` OFF required by `tune`, `cw` and `run`; `01` warns for `check` and `setup` | 8788-8789 | Yes |
+| `16 66` | TX Inhibit: `00` OFF required by `tune`, `cw` and `run`; `01` warns for `check`, `setup`, and `run` while tx-inhibited is there | 8788-8789 | Yes |
 | `19 00` | `94`, or nothing is written | 8793 | Yes |
 | `1C 00` | `00` receive, `01` transmit, anything else an error | 9319-9323 | Yes; keyer behaviour bench (step 6) |
 | `1C 01` | `00` OFF (bypassed after a tune), `01` ON, `02` tuning | 9327, 5917 | Yes; timing bench (step 5) |
@@ -153,7 +153,8 @@ passing self-test proves nothing. These are measured on the radio instead:
 - **The node does not change the radio's menu settings over CI-V.** It refuses to
   go on instead, so the radio stays in the state the operator set and photographed.
 - **TX Inhibit (`16 66`) is set only with the inhibit file.** The preflight
-  refuses a command that can transmit while it is ON. The node turns it ON (with
+  refuses a command that can transmit while it is ON (`run` only warns while the
+  node's own inhibit file is there, since it then transmits nothing). The node turns it ON (with
   semi break-in OFF, `16 47 00`) whenever it latches the inhibit file while it can
   reach the radio, and only `hfnode radio setup` turns it OFF again, once the file
   is gone. The manual does not say what it covers (the keyer, the
@@ -378,5 +379,31 @@ a radio.
 - **K15, no checksum.** Receive, and a tuner that has stopped, are confirmed by two
   readings in a row everywhere: forced receive, the end of each piece, before
   keying, after a tune, while idle.
-- **K16, tunes.** The watchdog times a tune as it times keying, and the storm hold
-  stops waiting for one.
+- **K16, tunes.** The watchdog times a tune as it times keying, against the
+  tune's own limit and the stuck margin (a tune may take 15 s, lines 8118-8119),
+  not `max_key_seconds`; the storm hold stops waiting for one. A tune waits for
+  room in the key-down budget first.
+
+The audit's pre-review of these fixes found more, also fixed here:
+
+- **B1.** A call to the radio that fails once a piece has gone to the keyer (a
+  lost or late reply, a read that fails while keying) counts as a fault, like high
+  SWR: RF on the USB cable from a bad load fails the same way at every
+  transmission. NG to `17` keyed nothing and does not count.
+- **B2.** An inhibit latched while a transmission is under way (the watchdog, a
+  stop signal) stops it before the next piece; the settings read the inhibit with
+  the radio held, so they never turn break-in back on after a latch turned it off.
+- **S1.** The idle watch keeps reading `1C 00` while inhibited: transmit read twice
+  forces receive again, sends `16 66 01` again, and tells the owner once.
+- **S2.** An inhibit latched without the radio, or found at start-up, sends `16 47
+  00` and `16 66 01` as soon as the watchdog has the radio.
+- **S3.** Only a transmission that keyed at least as long as the one that faulted
+  starts the fault count again: the short ID after a tune does not.
+- **S6.** `run` starts with the radio's TX Inhibit ON when the node's own
+  tx-inhibited file is there (a warning: it transmits nothing until the file is
+  removed with it stopped), so the start-up alert goes out; a stop signal waits up
+  to 30 s for an alert still being sent before it exits.
+- **S7.** `radio setup` leaves TX Inhibit ON while tx-inhibited is in the state
+  directory of its config or in any the setup guides give (`/var/lib/hfnode`,
+  `~/Library/Application Support/hfnode/state`, `~\AppData\Local\hfnode\state`),
+  so a bench config does not turn it off behind the node's back.

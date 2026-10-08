@@ -1626,8 +1626,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     // written.
     inhibit_at_start(s, &cfg)?;
     let limits = commissioning::Limits::of(&cfg.station);
-    let inhibited = crate::station::InhibitLatch::in_dir(&cfg.state_dir).is_set();
-    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, inhibited, || {
+    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, &cfg.state_dir, || {
         Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
     });
     let inner = match (opened, s.expect.refused) {

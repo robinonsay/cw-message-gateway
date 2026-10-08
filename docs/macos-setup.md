@@ -273,7 +273,7 @@ It keeps running and logging but transmits nothing, also after a restart, until
 that file is removed. Check the radio first, then run `hfnode radio --config <config> setup`: the
 node also turns the radio's TX Inhibit on (and its semi break-in off) when it
 stops transmitting, `setup` turns TX Inhibit off once the file is gone, and `run`
-refuses to start while it is on. With `[email] alert_to` set, the node
+refuses to start while it is on, unless the file is still there. With `[email] alert_to` set, the node
 emails you the reason and the steps to clear it when this happens, and at each
 start while the file is there.
 

@@ -225,7 +225,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it, and refuses to write to the radio unless it is OFF. |
 | Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `radio tune`, `radio cw` and `hfnode run` refuse to start unless it is 3 min. |
 | VOX (VOX/BK-IN key) | **OFF** | With VOX ON, sound at the microphone transmits (p. 4-10). The node refuses to write to the radio unless it is off. |
-| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it, and so does the node when it stops transmitting (see "If it stops transmitting"). `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON; `radio check` and `radio setup` warn. |
+| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it, and so does the node when it stops transmitting (see "If it stops transmitting"). `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON (`run` only warns while `tx-inhibited` is there); `radio check` and `radio setup` warn. |
 
 **Display** (MENU > SET > Display, p. 12-12):
 
@@ -388,7 +388,8 @@ before using the radio by hand), its status cannot be read for 5 s while idle an
 receive then cannot be confirmed, or a second fault comes before a transmission has
 gone out whole (high SWR, no output or too much, a radio stuck on transmit, no
 tuner match, a failed tune: each locks the node out until its next tune, and two
-in a row mean the next tune would only key into the same fault), it stops
+in a row mean the next tune would only key into the same fault; so does a reply
+from the radio lost while it keys), it stops
 transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
 reason. It also turns the radio's semi break-in off and its TX Inhibit on (16 66
 01), unless the radio could not be reached: the radio's screen shows TX Inhibit
@@ -409,8 +410,9 @@ sudo systemctl reset-failed hfnode                                   # only if s
 sudo systemctl start hfnode
 ```
 
-`radio setup` turns the radio's TX Inhibit off only once the file is gone; `run`
-refuses to start while it is on. Check the radio before deleting the file. Deleting it while the node runs changes
+`radio setup` turns the radio's TX Inhibit off only once the file is gone (from
+`/var/lib/hfnode` too when it runs with another config); `run` refuses to start
+while it is on, unless the file is still there. Check the radio before deleting the file. Deleting it while the node runs changes
 nothing: the node reads it only when it starts.
 
 **Check the alert.** Make the node start inhibited and see the email arrive.
