@@ -1,2 +1,5 @@
 /target
 *.uf2
+# build.sh writes these next to the UF2.
+/pico2-keyer.uf2.sha256
+/pico2-keyer.elf

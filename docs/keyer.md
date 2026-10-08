@@ -131,12 +131,14 @@ and stamps the commit into the firmware, which the box reports in `HELLO`. Set
 commit; the CI log and summary print it) and the node refuses to talk to a box
 running anything else.
 
-The build is reproducible: built from the same commit with the same build id, as in
+The build is reproducible: built from the same commit with
+`firmware/pico2-keyer/build.sh`, as in
 [firmware/pico2-keyer/README.md](../firmware/pico2-keyer/README.md), "Building it
-yourself", a UF2 comes out byte for byte the same as CI's, with the same SHA-256.
-So you can check CI's file independently, or flash your own. A build without the
-build id reports `-` and has another checksum: fine for development, not for
-operating.
+yourself", a UF2 comes out byte for byte the same as CI's, with the same SHA-256,
+wherever the checkout is. So you can check CI's file independently, or flash your
+own. A plain `cargo build` is not that build: it can lay the code out differently
+depending on where the checkout is, and without the build id the box reports `-`.
+Fine for development, not for operating.
 
 ## Setting up the radio
 
