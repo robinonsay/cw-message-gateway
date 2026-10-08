@@ -5,7 +5,9 @@
 //!
 //! The scenarios run time-scaled ([`selftest::DEFAULT_SCALE`] times real time).
 //! On a slow machine, such as a Raspberry Pi, set `HFNODE_E2E_SCALE` lower, for
-//! example `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
+//! example `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`. A run the
+//! machine paused the test in for longer than the scenario's timing allows is not
+//! judged and runs again (its `machine` check, `selftest::run`).
 
 use hfnode::selftest::{self, Outcome};
 
@@ -20,6 +22,13 @@ fn run(name: &str) -> Outcome {
     let s = selftest::scenario(name).unwrap_or_else(|| panic!("no scenario {name}"));
     let out = selftest::run(&s, scale());
     assert!(out.passed(), "\n{}", out.render());
+    // Every scenario that runs the node measures the machine's pauses; one the
+    // preflight refused never starts it.
+    assert!(
+        s.expect.refused.is_some() || out.checks.iter().any(|c| c.name == "machine"),
+        "no pause meter:\n{}",
+        out.render()
+    );
     out
 }
 

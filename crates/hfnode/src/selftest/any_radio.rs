@@ -54,32 +54,33 @@ pub const PAUSE_LIMIT: Duration = Duration::from_secs(1);
 const PAUSE_TICK: Duration = Duration::from_millis(5);
 
 /// Measures how long the whole process stops running: a thread that looks at the
-/// clock every [`PAUSE_TICK`] and keeps the longest gap past that. Nothing the node
-/// does holds it up; only the machine can.
-struct PauseMeter {
+/// clock every [`PAUSE_TICK`] and keeps the gaps past that. Nothing the node does
+/// holds it up; only the machine can. The mock IC-7300's scenarios use it too.
+pub(super) struct PauseMeter {
     stop: Arc<AtomicBool>,
-    /// The longest pause (real time), and the radio time it ended.
-    thread: Option<JoinHandle<(Duration, f64)>>,
+    /// Every pause of [`PAUSE_TICK`] or more: how long (real time), and the radio
+    /// time it ended.
+    thread: Option<JoinHandle<Vec<(Duration, f64)>>>,
 }
 
 impl PauseMeter {
-    fn start(clock: Clock) -> Self {
+    pub(super) fn start(clock: Clock) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
             thread::spawn(move || {
-                let mut longest = (Duration::ZERO, 0.0);
+                let mut pauses = Vec::new();
                 let mut last = Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     thread::sleep(PAUSE_TICK);
                     let now = Instant::now();
                     let gap = (now - last).saturating_sub(PAUSE_TICK);
-                    if gap > longest.0 {
-                        longest = (gap, clock.secs());
+                    if gap >= PAUSE_TICK {
+                        pauses.push((gap, clock.secs()));
                     }
                     last = now;
                 }
-                longest
+                pauses
             })
         };
         Self {
@@ -88,23 +89,42 @@ impl PauseMeter {
         }
     }
 
-    /// The `machine` check: whether the process ran without a pause too long for
-    /// the scenario's timing at `scale`.
-    fn check(mut self, scale: f32) -> Check {
+    /// Stop measuring: every pause of [`PAUSE_TICK`] or more, as (real time, the
+    /// radio time it ended).
+    pub(super) fn pauses(mut self) -> Vec<(Duration, f64)> {
         self.stop.store(true, Ordering::Relaxed);
-        let (pause, at) = self
-            .thread
+        self.thread
             .take()
             .and_then(|h| h.join().ok())
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// The `machine` check: whether the process ran without a pause too long for
+    /// the scenario's timing at `scale`.
+    fn check(self, scale: f32) -> Check {
+        let (pause, at) = longest(&self.pauses());
         machine_check(pause, at, scale)
     }
+}
+
+/// The longest of `pauses`, and the radio time it ended; none is zero.
+pub(super) fn longest(pauses: &[(Duration, f64)]) -> (Duration, f64) {
+    pauses
+        .iter()
+        .copied()
+        .max_by_key(|p| p.0)
+        .unwrap_or((Duration::ZERO, 0.0))
 }
 
 /// The `machine` check for a run whose longest pause was `pause` (real time),
 /// ending at radio time `at`.
 pub(super) fn machine_check(pause: Duration, at: f64, scale: f32) -> Check {
-    let limit = PAUSE_LIMIT.div_f32(scale);
+    machine_check_within(pause, at, scale, PAUSE_LIMIT.div_f32(scale))
+}
+
+/// The `machine` check for a run whose longest pause was `pause` (real time),
+/// ending at radio time `at`, against `limit` (real time).
+pub(super) fn machine_check_within(pause: Duration, at: f64, scale: f32, limit: Duration) -> Check {
     let detail = format!(
         "longest pause of the test process {:.2} s ({:.1} s radio time, at {at:.0} s); \
          limit {:.2} s",

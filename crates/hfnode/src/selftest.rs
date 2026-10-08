@@ -121,6 +121,23 @@ const NUDGE_BLOCKS: u64 = 10;
 /// safety check does not move with it: a radio left on transmit after its last
 /// element is forced back to receive within the break-in delay plus this.
 const STUCK_MARGIN: Duration = Duration::from_secs(3);
+/// What the safety check allows on top of the break-in delay and the stuck margin
+/// for the station to see a radio left on transmit and stop it: radio time, and
+/// real time for its polling and CI-V round trips (which take `scale` times longer
+/// in radio time).
+const OVERHANG_SLACK: Duration = Duration::from_millis(500);
+const OVERHANG_SLACK_REAL: Duration = Duration::from_millis(20);
+
+/// The longest pause of the whole test process (real time) that a mock IC-7300
+/// scenario is judged through at `scale`: the least slack its timing leaves, the
+/// safety check's for a radio left on transmit. A busy machine that stops the
+/// process for longer while the radio is on transmit makes the station look slow
+/// to force receive (a CI runner once stopped it for about 0.7 s at 20x: 14 s of
+/// radio time). Such a run is not judged and runs again ([`run`]); the check's own limit
+/// stays as it is.
+fn pause_limit(scale: f32) -> Duration {
+    OVERHANG_SLACK.div_f32(scale) + OVERHANG_SLACK_REAL
+}
 /// The station's semi break-in delay in dots, copied likewise.
 const BREAK_IN_DOTS: f32 = 10.0;
 /// Seconds of radio time [`Step::WaitReceive`] waits at most, and real time: the
@@ -1622,12 +1639,24 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
 
     let (tx, rx) = audio::queue(usize::MAX);
     let clock_radio = radio.clone();
+    let pauses = any_radio::PauseMeter::start(crate::keyer::mock::Clock {
+        epoch: radio.epoch(),
+        scale,
+    });
     // The listening schedule runs in radio time.
     let done = spawn_node(&cfg, station, session, svc, rx, move || {
         CLOCK_START + clock_radio.now().as_secs()
     });
     let mut air = air(s, AirRadio::Ic7300(radio.clone()), Some(tx), book, scale);
-    let Some((station, session, svc)) = operate(s, &mut air, &done, out) else {
+    let ran = operate(s, &mut air, &done, out);
+    let (pause, at) = any_radio::longest(&pauses.pauses());
+    out.checks.push(any_radio::machine_check_within(
+        pause,
+        at,
+        scale,
+        pause_limit(scale),
+    ));
+    let Some((station, session, svc)) = ran else {
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
@@ -2151,7 +2180,10 @@ fn safety(
     // which take `scale` times longer in radio time.
     let dot = 1.2 / (6.0 + s.key_speed_level as f32 * 42.0 / 255.0);
     let hang = dot * (2.0 + s.break_in_delay_level as f32 * 11.0 / 255.0);
-    let overhang_limit = Duration::from_secs_f32(hang + 0.5 + 0.02 * scale) + STUCK_MARGIN;
+    let overhang_limit = Duration::from_secs_f32(hang)
+        + OVERHANG_SLACK
+        + OVERHANG_SLACK_REAL.mul_f32(scale)
+        + STUCK_MARGIN;
     let mut overhang = Duration::ZERO;
     for t in &r.transmissions {
         let end = t.end.unwrap_or(r.now);
@@ -4913,7 +4945,7 @@ mod tests {
     fn a_failure_without_a_pause_stands() {
         for checks in [
             &[("keyed", false), ("machine", true)][..],
-            // An IC-7300 scenario, which has no pause meter.
+            // A run whose outcome has no pause meter.
             &[("keyed", false)][..],
         ] {
             let mut runs = 0;
@@ -4949,6 +4981,20 @@ mod tests {
         assert!(!any_radio::machine_check(ms(350), 10.0, 5.0).pass);
         assert!(any_radio::machine_check(ms(999), 10.0, 1.0).pass);
         assert!(!any_radio::machine_check(ms(1001), 10.0, 1.0).pass);
+    }
+
+    #[test]
+    fn an_ic7300_scenario_is_judged_through_a_pause_under_the_safety_checks_slack() {
+        let ms = Duration::from_millis;
+        // 0.5 s of radio time and 20 ms of real time: at 20x, 45 ms.
+        assert!(any_radio::machine_check_within(ms(44), 1.0, 20.0, pause_limit(20.0)).pass);
+        assert!(!any_radio::machine_check_within(ms(46), 1.0, 20.0, pause_limit(20.0)).pass);
+        // What failed fault-stuck-tx on a Windows runner: about 0.7 s at 20x.
+        assert!(!any_radio::machine_check_within(ms(700), 1.0, 20.0, pause_limit(20.0)).pass);
+        // At 100x, 25 ms; at real time, 0.52 s.
+        assert!(any_radio::machine_check_within(ms(24), 1.0, 100.0, pause_limit(100.0)).pass);
+        assert!(!any_radio::machine_check_within(ms(26), 1.0, 100.0, pause_limit(100.0)).pass);
+        assert_eq!(pause_limit(1.0), ms(520));
     }
 
     const CELL: Cell = Cell {
