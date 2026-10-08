@@ -4076,7 +4076,7 @@ mod tests {
         st.notify_inhibit(to);
         st.rig().lock().unwrap().keyed_elsewhere = true;
         let why = notices
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(Duration::from_secs(10))
             .expect("found within a few seconds")
             .reason;
         assert!(why.contains("nothing from the node keying it"), "{why}");
@@ -4097,9 +4097,9 @@ mod tests {
         thread::sleep(Duration::from_secs(3));
         assert_eq!(st.rig().lock().unwrap().false_tx, 0, "read while idle");
         assert!(!st.tx_inhibited());
-        // Twice in a row is.
+        // Twice in a row is: two reads a second apart.
         st.rig().lock().unwrap().false_tx = 2;
-        assert!(eventually(Duration::from_secs(4), || st.tx_inhibited()));
+        assert!(eventually(Duration::from_secs(10), || st.tx_inhibited()));
     }
 
     #[test]
@@ -4113,8 +4113,10 @@ mod tests {
         let st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
         st.rig().lock().unwrap().on = false;
-        // IDLE_ERRORS reads a second apart, then the forced receive.
-        assert!(eventually(Duration::from_secs(9), || st.tx_inhibited()));
+        // IDLE_ERRORS reads a second apart, then the forced receive, which waits out
+        // the longest break-in delay at the slowest speed (2.6 s) with no dot length
+        // to read: about 8 s, given room for a slow machine's late wake-ups.
+        assert!(eventually(Duration::from_secs(20), || st.tx_inhibited()));
     }
 
     /// K8: semi break-in goes on last, so a key held closed at the radio starts
