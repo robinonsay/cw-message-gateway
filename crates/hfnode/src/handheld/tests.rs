@@ -6,6 +6,7 @@ use crate::station::{
     MAX_TRANSMISSION,
 };
 use crate::storm::StormHold;
+use std::io::Write as _;
 
 /// Morse goes this many times faster than real time, in the firmware and the rig.
 const SCALE: f32 = 50.0;
@@ -749,6 +750,11 @@ const PAUSE_LIMIT: Duration = Duration::from_millis(50);
 const PAUSE_WINDOW: Duration = Duration::from_secs(2);
 /// How often the pause meter looks at the clock.
 const PAUSE_TICK: Duration = Duration::from_millis(5);
+/// The shortest pause the meter keeps: shorter ones are a busy machine waking its
+/// thread a little late, which would otherwise add up to [`PAUSE_LIMIT`] in a
+/// window on a CI runner running the other tests alongside, and leave no run
+/// judged before the last.
+const PAUSE_FLOOR: Duration = Duration::from_millis(20);
 /// Times the ID test runs a transmission again after one the machine paused in.
 /// The last run is judged, paused or not.
 const NOT_JUDGED_RERUNS: usize = 2;
@@ -757,10 +763,11 @@ const NOT_JUDGED_RERUNS: usize = 2;
 /// pause meter does (`selftest::any_radio::PauseMeter`): a thread that looks at the
 /// clock every [`PAUSE_TICK`] and keeps the gaps past that. Nothing the node does
 /// holds it up; only the machine can (a CI runner stops the whole process for
-/// tens to hundreds of milliseconds now and then).
+/// tens to hundreds of milliseconds now and then). It cannot see a stop that holds
+/// up only the node's threads: a failure with no pause measured may be one.
 struct PauseMeter {
     stop: Arc<AtomicBool>,
-    /// Every pause of [`PAUSE_TICK`] or more: when it ended, and how long.
+    /// Every pause of [`PAUSE_FLOOR`] or more: when it ended, and how long.
     thread: Option<JoinHandle<Vec<(Instant, Duration)>>>,
 }
 
@@ -776,7 +783,7 @@ impl PauseMeter {
                     thread::sleep(PAUSE_TICK);
                     let now = Instant::now();
                     let gap = (now - last).saturating_sub(PAUSE_TICK);
-                    if gap >= PAUSE_TICK {
+                    if gap >= PAUSE_FLOOR {
                         pauses.push((now, gap));
                     }
                     last = now;
@@ -790,7 +797,7 @@ impl PauseMeter {
         }
     }
 
-    /// Stop measuring: every pause of [`PAUSE_TICK`] or more, as (when it ended,
+    /// Stop measuring: every pause of [`PAUSE_FLOOR`] or more, as (when it ended,
     /// how long).
     fn pauses(mut self) -> Vec<(Instant, Duration)> {
         self.stop.store(true, Ordering::Relaxed);
@@ -836,9 +843,13 @@ fn most_paused_in(pauses: &[(Instant, Duration)], window: Duration) -> Duration 
 }
 
 /// Runs the ID test's transmission until one is judged: a run the machine paused in
-/// for [`PAUSE_LIMIT`] or more in any [`PAUSE_WINDOW`] is not judged, pass or fail,
-/// and runs again, up to [`NOT_JUDGED_RERUNS`] times; the last run is judged
-/// whatever it measured. Each run's pauses are printed.
+/// for [`PAUSE_LIMIT`] or more in any [`PAUSE_WINDOW`] is not judged and runs
+/// again, up to [`NOT_JUDGED_RERUNS`] times; the last run is judged whatever it
+/// measured. A paused run that passed is not judged either: here a pause can favour
+/// the node as well as hold it up (one just before the station weighs an ID has it
+/// key the ID a piece sooner, and one between the station noting an ID's start and
+/// the radio keying it shortens the next interval as measured). Each run's pauses
+/// are printed; those of a run not judged also when the test passes.
 fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
     for run in 0..=NOT_JUDGED_RERUNS {
         let (result, pauses) = ids_on_time_once(overrun);
@@ -857,7 +868,7 @@ fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
             PAUSE_LIMIT.as_secs_f32()
         );
         let judged = !paused || run == NOT_JUDGED_RERUNS;
-        println!(
+        let line = format!(
             "{measured}: {}, {}",
             match (judged, paused) {
                 (false, _) => "not judged",
@@ -869,12 +880,17 @@ fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
                 Err(e) => format!("failed: {e}"),
             }
         );
-        if judged {
-            if let Err(e) = result {
-                panic!("{e} ({measured})");
-            }
-            return;
+        println!("{line}");
+        if !judged {
+            // Past the test harness's capture, so that a CI log shows runs set aside
+            // even when the test passes.
+            let _ = writeln!(std::io::stderr(), "{line}");
+            continue;
         }
+        if let Err(e) = result {
+            panic!("{e} ({measured})");
+        }
+        return;
     }
 }
 
@@ -900,7 +916,17 @@ fn ids_on_time_once(overrun: Duration) -> (Result<String, String>, Vec<(Instant,
         segments,
         read_ids: Vec::new(),
     });
-    let pauses = meter.pauses();
+    let done = Instant::now();
+    // Only while the transmission was under way.
+    let pauses = meter
+        .pauses()
+        .into_iter()
+        .filter_map(|(end, gap)| {
+            let from = end.checked_sub(gap).unwrap_or(end).max(start);
+            let to = end.min(done);
+            (to > from).then(|| (to, to - from))
+        })
+        .collect();
     (on_time(sent, &fw.runs(), start, interval), pauses)
 }
 
