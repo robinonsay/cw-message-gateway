@@ -382,9 +382,17 @@ so the device allow-list covers it.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive (the radio off or unplugged at the top of a window, or stuck on transmit
-after a fault), or the radio reads receive while its Po meter shows output, it
-stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
-reason. It keeps running and decoding, but it does not tune or key, so the field
+after a fault), the radio reads receive while its Po meter shows output, the radio
+transmits while the node is not keying it (someone at the radio: stop the node
+before using the radio by hand), its status cannot be read for 5 s while idle and
+receive then cannot be confirmed, or a second fault comes before a transmission has
+gone out whole (high SWR, no output or too much, a radio stuck on transmit, no
+tuner match, a failed tune: each locks the node out until its next tune, and two
+in a row mean the next tune would only key into the same fault), it stops
+transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
+reason. When it could not confirm receive it also turns the radio's semi break-in
+off and its TX Inhibit on (16 66 01): the radio's screen shows TX Inhibit when
+anything tries to transmit. It keeps running and decoding, but it does not tune or key, so the field
 operator hears nothing, and this lasts across restarts. With `[email] alert_to`
 set it emails that address once when this happens (subject `N0CALL: node stopped
 transmitting (tx-inhibited)`), and once more each time the service starts while the
@@ -396,11 +404,13 @@ sudo systemctl stop hfnode
 sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check   # read-only; must pass
 sudo cat /var/lib/hfnode/tx-inhibited                                # the time and the reason
 sudo rm /var/lib/hfnode/tx-inhibited
+sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml setup   # TX Inhibit off again
 sudo systemctl reset-failed hfnode                                   # only if systemd gave up
 sudo systemctl start hfnode
 ```
 
-Check the radio before deleting the file. Deleting it while the node runs changes
+`radio setup` turns the radio's TX Inhibit off only once the file is gone; `run`
+refuses to start while it is on. Check the radio before deleting the file. Deleting it while the node runs changes
 nothing: the node reads it only when it starts.
 
 **Check the alert.** Make the node start inhibited and see the email arrive.
@@ -422,7 +432,9 @@ handed to its keyer (at most 30 characters).
 **Using the radio yourself.** Stop the node first, and start it again
 (`sudo systemctl start hfnode`) when you are done. While it runs, it puts its
 frequency, mode, power and keyer settings back every `schedule.check_minutes` (10)
-and before every transmission.
+and before every transmission, and it reads the radio's transmit status every
+second: a transmission it did not start (you keying the radio) stops it
+transmitting until you clear `tx-inhibited` as above.
 
 **Updating.** `sudo systemctl stop hfnode`, install the new binary, `sudo systemctl
 start hfnode`. `last_seq` and the inbox are kept in `/var/lib/hfnode`.

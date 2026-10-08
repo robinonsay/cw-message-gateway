@@ -234,13 +234,18 @@ file it has open, and the node could not add to it meanwhile.
 
 **Using the radio yourself.** Stop the node first, and start it again when you
 are done. While it runs, it puts its frequency, mode, power and keyer settings back
-every `schedule.check_minutes` (10) and before every transmission.
+every `schedule.check_minutes` (10) and before every transmission, and it reads the
+radio's transmit status every second: a transmission it did not start (you keying
+the radio) stops it transmitting until you clear `tx-inhibited` as below.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive, it stops transmitting and writes `tx-inhibited` in
 `%LOCALAPPDATA%\hfnode\state` with the time and reason. It keeps running and
 logging but transmits nothing, also after a restart, until that file is removed.
-Check the radio first. With `[email] alert_to` set, the node emails you the reason
+Check the radio first, then run `hfnode radio --config <config> setup`: when the
+node could not confirm receive it also turns the radio's TX Inhibit on (and its
+semi break-in off), `setup` turns TX Inhibit off once the file is gone, and `run`
+refuses to start while it is on. With `[email] alert_to` set, the node emails you the reason
 and the steps to clear it when this happens, and at each start while the file is
 there.
 

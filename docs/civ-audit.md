@@ -152,16 +152,20 @@ passing self-test proves nothing. These are measured on the radio instead:
 
 - **The node does not change the radio's menu settings over CI-V.** It refuses to
   go on instead, so the radio stays in the state the operator set and photographed.
-- **TX Inhibit (`16 66`) is only read** (the preflight refuses a command that can
-  transmit while it is ON); the node does not set it. The manual does not say what
-  it covers (the keyer, the tuner) or whether it survives a power cycle, and a latch
-  inside the radio that the operator does not know about is its own hazard. Worth a
-  bench look later.
-- **Break-in is left ON between transmissions.** `17` only transmits with break-in
-  on (p. 19-8, footnote 2). With nothing on the KEY jack and no `17` sent, break-in
-  alone does not transmit.
-- **No over-power trip.** The Po meter's calibration against watts is not known yet;
-  step 9 measures it.
+- **TX Inhibit (`16 66`) is set only as a last resort.** The preflight refuses a
+  command that can transmit while it is ON. The node turns it ON (with semi
+  break-in OFF, `16 47 00`) only when it cannot confirm the radio back on receive,
+  as the inhibit file latches, and only `hfnode radio setup` turns it OFF again,
+  once the file is gone. The manual does not say what it covers (the keyer, the
+  tuner) or whether it survives a power cycle, so it is never the only stop. Worth
+  a bench look.
+- **Break-in is left ON between transmissions**, unless transmitting is inhibited.
+  `17` only transmits with break-in on (p. 19-8, footnote 2). With nothing on the
+  KEY jack and no `17` sent, break-in alone does not transmit; the status is read
+  again once it is on, and every second while the node is idle.
+- **The over-power trip is generous.** A piece stops above 1.5 times the set power
+  plus 5 points on the Po meter, since the meter's calibration against watts is not
+  known yet; step 9 measures it.
 - **A tune that never finishes does not lock the window.** Receive is forced, and
   the SWR check on the first transmission catches a bad match.
 
@@ -169,11 +173,10 @@ passing self-test proves nothing. These are measured on the radio instead:
 
 None of these affects the bench steps; all need deciding before stage `done`:
 
-- **Idle transmit monitor.** The node does not watch for the radio transmitting
-  when it is not keying (someone at the KEY jack, VOX, another program). The
-  hardware timer (step 10) is the backstop.
-- **Duty cycle.** There is no limit on total key-down time per hour. A long RX
-  reply (five messages) can be many minutes of keying.
+- **Idle transmit monitor.** Done 2026-10-08 (K9 below): `1C 00` every second
+  while the node is not keying.
+- **Duty cycle.** Done 2026-10-08 (K13 below): a key-down budget per 10 minutes,
+  scaled by power, kept across restarts.
 - **Band edges.** The config accepts any frequency in the radio's transmit coverage,
   including exact band edges, regardless of licence class. The radio's own
   "ON (User) & TX Limit" band-edge setting (line 1531) could enforce the licensed
@@ -190,10 +193,12 @@ None of these affects the bench steps; all need deciding before stage `done`:
   later. Either way the tune is a carrier of 2-3 s and at most 15 s (lines
   8118-8119), sent without first checking the frequency is clear. The bench's
   `hfnode radio tune` does not identify; the operator does (step 12).
-- **`hfnode radio rx` failing in the service's stop hook** does not write the
-  inhibit file.
-- **Radio switched off or USB link lost.** Repeated CI-V timeouts are not treated
-  as a lost radio. Off at a tune or an idle check (every `schedule.check_minutes`),
+- **`hfnode radio rx` failing in the service's stop hook** writes the inhibit file
+  since 2026-10-07 (K5).
+- **Radio switched off or USB link lost.** Since 2026-10-08, five failed status
+  reads in a row while idle force receive, which latches the inhibit if receive
+  cannot be confirmed. Before that, repeated CI-V timeouts were not treated as a
+  lost radio. Off at a tune or an idle check (every `schedule.check_minutes`),
   the node inhibits itself; switched off and on between those, it sets the radio
   up again before its next transmission (every transmission does, since
   2026-10-04). A USB device that re-enumerates leaves the node holding a dead port. The
@@ -323,3 +328,52 @@ keying). What changed:
   the keyer box's and the handheld's ports drop their lines the same way, the mock
   radio answers all 21 preflight reads, and `hfnode selftest` opens the mock as
   `hfnode run` does, preflight first.
+
+## Addendum, 2026-10-08: unattended operation (audit items K4-K16)
+
+The second half of the independent safety audit's IC-7300 findings, for `run` and
+unattended use. Two CI-V commands are now sent that were not before, each only
+when receive cannot be confirmed (`16 47 00` break-in OFF, line 8776, and `16 66
+01` TX Inhibit ON, lines 8788-8789) or by `radio setup` once the inhibit file is
+gone (`16 66 00`); `1A 05 00 29` (Time-Out Timer, lines 8861-8863), `14 0A` (RF
+power, line 8677) and `1C 00` are read at new moments. Nothing here has been run on
+a radio.
+
+- **K4, a call that never returns.** The driver no longer calls `flush()` after a
+  write (on a serial port that is tcdrain, which has no timeout, while the radio's
+  lock is held). The watchdog waits at most 10 s for the radio and latches the
+  inhibit without it; so does the stop signal, which then exits 1.
+- **K6, the inhibit file.** An inhibit file that cannot be checked counts as
+  there; the state directory must take a file before any port opens, and must be
+  a full path.
+- **K7, a radio stuck on transmit** locks the node out until its next tune, as
+  high SWR does.
+- **K8, break-in on last.** The status is read twice after the settings, which
+  turn semi break-in on last; when receive cannot be confirmed the node turns
+  break-in OFF and TX Inhibit ON, and keeps break-in off while inhibited.
+- **K9, idle watch and the Time-Out Timer.** `1C 00` every second while idle: two
+  readings of transmit in a row force receive and latch the inhibit. The
+  Time-Out Timer must read 3 min before every tune and transmission, not only at
+  start-up.
+- **K10, faults latch.** High SWR, no output, too much output, a radio stuck on
+  transmit, a tuner that cannot match or a failed tune: each locks the node out
+  until its next tune; the second with no transmission going out whole between
+  them latches the inhibit and alerts the owner.
+- **K11, preflight gaps.** VOX, PTT Start, TX Inhibit, the Time-Out Timer at 3 min
+  for every command that can transmit, and others (the reads table above).
+- **K12, output bounded from above.** A piece stops when the Po meter reads above
+  1.5 times the set power plus 5 points; the power setting must read back within a
+  watt before every tune and transmission.
+- **K13, key-down budget.** At most half of any 10 minutes with the key down up to
+  50 W, a quarter at 100 W (the tune counted whole), kept in `key-down` in the
+  state directory across restarts; one transmission may key for at most 30 min,
+  and `chunk_chars` is 10-60.
+- **K14, the watchdog and the longest piece.** A piece that could outlast
+  `max_key_seconds` is split (30 zeros at 18 wpm take 44 s); `run` refuses
+  `max_key_seconds` above 55 (below the hardware timer) or too short for one
+  character.
+- **K15, no checksum.** Receive, and a tuner that has stopped, are confirmed by two
+  readings in a row everywhere: forced receive, the end of each piece, before
+  keying, after a tune, while idle.
+- **K16, tunes.** The watchdog times a tune as it times keying, and the storm hold
+  stops waiting for one.

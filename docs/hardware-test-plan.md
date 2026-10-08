@@ -923,11 +923,13 @@ keying; the node must not run unattended until it does.
 
 Then set the timer to its operating value (about 60 s) and restore
 `max_key_seconds = 45`, `key_speed_wpm = 18`. `max_key_seconds` must stay below the
-hardware timer. The node keys at most 30 characters per keyer command. Ordinary
-text takes about 20 s at 18 wpm, but 30 zeros, the slowest 30 characters, take
-44 s, which only just fits under 45 s; at 6 wpm they would take 131 s. A piece
-that outlasts `max_key_seconds` is cut off by the watchdog, which counts as a
-fault: it never makes a transmission longer.
+hardware timer: `run` refuses more than 55. The node keys at most 30 characters
+per keyer command. Ordinary text takes about 20 s at 18 wpm, but 30 zeros, the
+slowest 30 characters, take 44 s, and at 6 wpm 131 s: a piece that could keep the
+radio on transmit longer than `max_key_seconds`, with its break-in delay and the
+3 s stuck margin, is split into shorter keyer commands. A piece that outlasts
+`max_key_seconds` all the same is cut off by the watchdog, which counts as a fault:
+it never makes a transmission longer.
 
 **Then**, with steps 9 and 10 passed, set `commissioned = "done"`. This allows
 `hfnode run`, and with it the service.

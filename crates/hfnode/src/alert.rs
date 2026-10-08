@@ -293,6 +293,9 @@ fn message_on(
             "   runs changes nothing):".into(),
             format!("   {cat} {f}"),
             format!("   {rm} {f}"),
+            "   On an IC-7300, then set it up again, which turns its TX Inhibit off".into(),
+            "   if the node turned it on (the node will not start while it is on):".into(),
+            format!("   {check} --config {config} setup"),
         ]),
         None => lines.push("3. There is no file to delete.".into()),
     }
@@ -414,6 +417,7 @@ mod tests {
                 "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check",
                 "sudo cat /var/lib/hfnode/tx-inhibited",
                 "sudo rm /var/lib/hfnode/tx-inhibited",
+                "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml setup",
                 "sudo systemctl start hfnode",
             ],
         );
