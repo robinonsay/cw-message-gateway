@@ -1,31 +1,43 @@
-//! The box itself: commands in, replies out, and the key's state at every moment,
-//! with every limit enforced here so that the firmware only has to move a pin.
+//! The box itself: commands in, replies out, and its outputs' state at every moment,
+//! with every limit enforced here so that the firmware only has to move pins.
+//!
+//! The box has three outputs ([`Pin`]): the key (an optocoupler across a radio's key
+//! jack), the PTT (a second optocoupler across an FM handheld's PTT contact) and the
+//! tone (a square wave, filtered into the handheld's microphone). `CW` keys the text
+//! on the key; `MCW` holds the PTT for the whole run and keys the text on the tone.
+//! One input, the PTT line, reads the handheld's PTT contact: high while it is
+//! open, low while anything holds it.
 //!
 //! Time is milliseconds since the box started, from whoever drives it: the
 //! firmware's clock, or a mock's. [`Keyer::poll_with`] applies everything that came
 //! due up to `now` at the exact time it came due, in order, so a caller may poll
 //! every millisecond (the firmware) or only now and then (hfnode's mock box), and
-//! sees the same key changes at the same times either way.
+//! sees the same output changes at the same times either way. The PTT line is the
+//! exception: it is read, so [`Keyer::set_line`] must be told its level before each
+//! poll, as the firmware does on every pass of its loop, and a caller polling now
+//! and then steps through the time between.
 //!
 //! Commands (body of a line, see [`crate::frame`]):
 //!
 //! | Command | Reply |
 //! |---|---|
-//! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <rest ms> <duty budget s> <uptime ms> <boot> <build> <name>` |
-//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms>` |
+//! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <rest ms> <duty budget s> <ptt limit s> <uptime ms> <boot> <build> <name>` |
+//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms> <ptt> <line>`; `<trip>` is `NONE`, `DOWN`, `PIN`, `SLOW`, `CLOCK`, `WATCHDOG`, `PTT` or `LINE` |
 //! | `CW <wpm> <text>` | `OK CW`, keying from that moment |
+//! | `MCW <wpm> <text>` | `OK MCW`, the PTT closed from that moment |
 //! | `STOP` | `OK STOP` |
-//! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG` or `TEST STUCK` within 2 s is taken |
+//! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG`, `TEST STUCK` or `TEST HOLD` within 2 s is taken |
 //! | `TEST HANG` | `OK TEST HANG` (bring-up only) |
 //! | `TEST STUCK` | `OK TEST STUCK` (bring-up only) |
+//! | `TEST HOLD` | `OK TEST HOLD` (host tests only; an `MCW` run) |
 //!
-//! Errors are `ERR <command> <code>`: `CW` with `TRIP`, `RUN`, `WPM`, `LEN`, `CHAR`,
-//! `LIMIT`, `REST` or `DUTY`; `TEST` with `RUN`, `ARM` or `UNKNOWN`; anything else
-//! `ERR <word> UNKNOWN`.
+//! Errors are `ERR <command> <code>`: `CW` and `MCW` with `TRIP`, `RUN`, `WPM`,
+//! `LEN`, `CHAR`, `LIMIT`, `LINE`, `REST` or `DUTY`; `TEST` with `RUN`, `ARM` or
+//! `UNKNOWN`; anything else `ERR <word> UNKNOWN`.
 
 use crate::frame::{self, Line};
 use crate::morse::{self, Segments, TextError};
-use crate::{limits, MAX_WPM, MIN_WPM, NAME, VERSION};
+use crate::{limits, mcw, MAX_WPM, MIN_WPM, NAME, VERSION};
 use core::fmt;
 
 /// The limits a box keeps.
@@ -36,6 +48,7 @@ pub struct Limits {
     pub link_timeout_ms: u32,
     pub rest_ms: u32,
     pub duty_budget_ms: u32,
+    pub ptt_ms: u32,
 }
 
 impl Limits {
@@ -46,7 +59,19 @@ impl Limits {
         link_timeout_ms: limits::LINK_TIMEOUT_MS,
         rest_ms: limits::REST_MS,
         duty_budget_ms: limits::DUTY_BUDGET_MS,
+        ptt_ms: limits::PTT_MS,
     };
+}
+
+/// The box's outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pin {
+    /// The key line (`CW`).
+    Key,
+    /// The PTT line (`MCW`).
+    Ptt,
+    /// The tone into the microphone (`MCW`): on for each element.
+    Tone,
 }
 
 /// Why the box last started, reported by `HELLO`.
@@ -54,7 +79,9 @@ impl Limits {
 pub enum Boot {
     /// Powered up (plugged in), or reset by its button or the debugger.
     Power,
-    /// Its hardware watchdog reset it: the control loop stalled.
+    /// Its hardware watchdog reset it: the control loop stalled, `TEST HANG`
+    /// stopped it, or it stopped feeding the watchdog on purpose after a `CLOCK`
+    /// trip. The box comes up tripped (`WATCHDOG`, or the trip it saved).
     Watchdog,
     Other,
 }
@@ -75,7 +102,7 @@ impl Boot {
     }
 }
 
-/// How the last `CW` run ended.
+/// How the last `CW` or `MCW` run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
     /// No run since the box started.
@@ -88,16 +115,33 @@ pub enum Ended {
     Link,
     /// The run limit.
     Limit,
-    /// The box tripped: its key-down limit, or the firmware's own watch on the
-    /// key pin ([`Trip`] says which).
+    /// The box tripped: its key-down limit, or the firmware's own watch on its
+    /// pins ([`Trip`] says which).
     Down,
     /// The USB link went away: a bus reset, suspend (which is also how a pulled
     /// cable looks to the box), or the host deconfiguring it. Closing the port on
     /// the computer is none of these: the link timeout ends a run then.
     Usb,
+    /// The PTT limit (and the box tripped).
+    Ptt,
+    /// `MCW`: the PTT line did not read low after the box closed the PTT (the
+    /// cable is out, the radio is off, or the line is not wired).
+    Line,
 }
 
 impl Ended {
+    const ALL: [Self; 9] = [
+        Self::None,
+        Self::Done,
+        Self::Stop,
+        Self::Link,
+        Self::Limit,
+        Self::Down,
+        Self::Usb,
+        Self::Ptt,
+        Self::Line,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "NONE",
@@ -107,56 +151,153 @@ impl Ended {
             Self::Limit => "LIMIT",
             Self::Down => "DOWN",
             Self::Usb => "USB",
+            Self::Ptt => "PTT",
+            Self::Line => "LINE",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [
-            Self::None,
-            Self::Done,
-            Self::Stop,
-            Self::Link,
-            Self::Limit,
-            Self::Down,
-            Self::Usb,
-        ]
-        .into_iter()
-        .find(|e| e.as_str() == s)
+        Self::ALL.into_iter().find(|e| e.as_str() == s)
     }
 }
 
-/// A fault that stops the box keying until it is power-cycled.
+/// A fault that stops the box keying until it is power-cycled. A trip survives
+/// a restart that is not a power-up ([`Saved`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trip {
     None,
-    /// The key stayed down past the key-down limit.
+    /// The key (or the tone) stayed on past the key-down limit.
     Down,
-    /// The firmware saw its key pin high for the key-down limit
-    /// ([`crate::control`]), whatever the box's timeline said.
+    /// The firmware saw its key or tone pin on for the key-down limit, or its PTT
+    /// pin down for the PTT limit ([`crate::control`]), whatever the box's
+    /// timeline said.
     Pin,
     /// A pass of the firmware's control loop took longer than
-    /// [`limits::SLOW_PASS_MS`] with the key pin high.
+    /// [`limits::SLOW_PASS_MS`] with the key or the tone on.
     Slow,
+    /// The control loop's clock stopped or slowed against the processor's own
+    /// count, or that count stopped against the clock ([`crate::control`]):
+    /// no time limit can be trusted.
+    Clock,
+    /// The box restarted because its watchdog fired: its control loop stopped,
+    /// with the key in a state nothing recorded.
+    Watchdog,
+    /// The PTT stayed down past the PTT limit.
+    Ptt,
+    /// The PTT line still read low [`mcw::LINE_MS`] after the box opened the PTT:
+    /// something else is holding it, and the radio may still be transmitting.
+    Line,
 }
 
 impl Trip {
+    const ALL: [Self; 8] = [
+        Self::None,
+        Self::Down,
+        Self::Pin,
+        Self::Slow,
+        Self::Clock,
+        Self::Watchdog,
+        Self::Ptt,
+        Self::Line,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "NONE",
             Self::Down => "DOWN",
             Self::Pin => "PIN",
             Self::Slow => "SLOW",
+            Self::Clock => "CLOCK",
+            Self::Watchdog => "WATCHDOG",
+            Self::Ptt => "PTT",
+            Self::Line => "LINE",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [Self::None, Self::Down, Self::Pin, Self::Slow]
-            .into_iter()
-            .find(|t| t.as_str() == s)
+        Self::ALL.into_iter().find(|t| t.as_str() == s)
     }
 }
 
-/// A `CW` run under way.
+/// What the box leaves for its next boot, in two words that survive a watchdog
+/// reset but not a power-up (the RP2350's watchdog scratch registers): its trip,
+/// whether it was keying the transmitter (its key or its PTT down), and its duty
+/// budget, as of the last pass of its control loop ([`Keyer::saved`],
+/// [`Keyer::restore`]).
+///
+/// So a box that tripped stays tripped until it is unplugged, and a host that
+/// makes the box restart (`TEST HANG`, or a fault) cannot get a fresh duty
+/// budget out of it: a restart carries the budget over, with the key-down that
+/// nobody saw taken off it ([`limits::RESTART_CHARGE_MS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+    pub trip: Trip,
+    /// The transmitter was keyed: the key down, or the PTT.
+    pub key: bool,
+    /// The duty budget, ms; below zero after a run held longer than it planned.
+    pub budget: i32,
+}
+
+impl Saved {
+    /// The top half of the first word: what marks the words as the box's.
+    const MAGIC: u32 = 0x4b59;
+
+    /// The two words: `MAGIC`, the flags (the trip's index, the key in bit 3)
+    /// and a check byte in the first; the budget in the second.
+    pub fn encode(&self) -> [u32; 2] {
+        let trip = Trip::ALL.iter().position(|&t| t == self.trip).unwrap_or(0) as u32;
+        let flags = trip | (u32::from(self.key) << 3);
+        let budget = self.budget as u32;
+        let head = (Self::MAGIC << 16) | (flags << 8);
+        [head | u32::from(Self::check(head, budget)), budget]
+    }
+
+    /// The state in `words`, if they hold one: not if they are zero (as after a
+    /// power-up), left by other firmware, or damaged.
+    pub fn decode(words: [u32; 2]) -> Option<Self> {
+        let [head, budget] = words;
+        if head >> 16 != Self::MAGIC || head & 0xff != u32::from(Self::check(head & !0xff, budget))
+        {
+            return None;
+        }
+        let flags = (head >> 8) & 0xff;
+        if flags & !0xf != 0 {
+            return None;
+        }
+        Some(Self {
+            trip: *Trip::ALL.get((flags & 0x7) as usize)?,
+            key: flags & 0x8 != 0,
+            budget: budget as i32,
+        })
+    }
+
+    /// A byte that changes with any one changed bit of `head`'s top three bytes
+    /// or of `budget`.
+    fn check(head: u32, budget: u32) -> u8 {
+        let mut c: u8 = 0xa5;
+        for b in (head >> 8)
+            .to_be_bytes()
+            .into_iter()
+            .skip(1)
+            .chain(budget.to_be_bytes())
+        {
+            c = c.rotate_left(1) ^ b;
+        }
+        c
+    }
+}
+
+/// Where an `MCW` run is; a `CW` run is all [`Phase::Morse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// PTT down, no tone yet.
+    Lead,
+    Morse,
+    /// PTT still down after the last element.
+    Tail,
+}
+
+/// A `CW` or `MCW` run under way.
 #[derive(Clone)]
 struct Run {
     segs: Segments,
@@ -164,16 +305,21 @@ struct Run {
     idx: usize,
     dot_ms: u32,
     start: u64,
-    /// When the current segment ends.
+    /// When the current segment (or the lead or tail) ends.
     seg_end: u64,
-    /// `TEST STUCK`: the next key-down (or this one) is held.
+    /// `MCW`: the elements are on the tone, under the PTT.
+    mcw: bool,
+    phase: Phase,
+    /// `TEST STUCK`: the next element (or this one) is held.
     stuck: bool,
+    /// `TEST HOLD`: the PTT stays down after the text.
+    hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hang {
     No,
-    /// `TEST HANG` taken: hang at the next key-down.
+    /// `TEST HANG` taken: hang at the next element.
     Pending,
     /// Hung: the firmware stops its control loop, and nothing changes here again.
     Now,
@@ -183,8 +329,11 @@ enum Hang {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Event {
     KeyDownLimit,
+    PttLimit,
     Link,
     RunLimit,
+    /// The PTT line's check after the PTT last moved.
+    LineCheck,
     Segment,
 }
 
@@ -197,15 +346,23 @@ pub struct Keyer {
     build: &'static str,
     run: Option<Run>,
     key: bool,
-    /// When the key went down, not counting key-ups shorter than
+    tone: bool,
+    /// When the key or the tone came on, not counting offs shorter than
     /// [`limits::MIN_GAP_MS`]: what the key-down limit times.
-    key_since: u64,
-    /// When the key last went up; `None` if it has never been down.
-    key_up_at: Option<u64>,
+    elem_since: u64,
+    /// When the key or the tone last went off; `None` if neither has been on.
+    elem_off_at: Option<u64>,
+    ptt: bool,
+    /// When the PTT last went down.
+    ptt_since: u64,
+    /// The PTT line as last read: high (true) while the PTT contact is open.
+    line: bool,
+    /// When the PTT line must show the PTT's last move.
+    line_due: Option<u64>,
     /// When the last run ended.
     run_ended_at: Option<u64>,
     /// The duty budget, ms, as of `budget_at`; below zero after a run that held
-    /// the key longer than it planned (`TEST STUCK`).
+    /// the transmitter longer than it planned (`TEST STUCK`, `TEST HOLD`).
     budget: i64,
     budget_at: u64,
     /// `TEST ARM` taken: a test is accepted until then.
@@ -218,9 +375,11 @@ pub struct Keyer {
 }
 
 impl Keyer {
-    /// A box that started at `now` for `boot`, key up. Its duty budget starts full
-    /// only after a power-up: a box that keeps restarting earns its budget again
-    /// before it keys.
+    /// A box that started at `now` for `boot`, every output off, the PTT line not
+    /// read yet (so low). Its duty budget starts full only after a power-up: a box
+    /// that keeps restarting earns its budget again before it keys. After a
+    /// watchdog reset it starts tripped (`WATCHDOG`): whatever stopped its control
+    /// loop, it keys nothing more until it is unplugged.
     pub fn new(limits: Limits, boot: Boot, now: u64) -> Self {
         Self {
             limits,
@@ -228,8 +387,13 @@ impl Keyer {
             build: "-",
             run: None,
             key: false,
-            key_since: now,
-            key_up_at: None,
+            tone: false,
+            elem_since: now,
+            elem_off_at: None,
+            ptt: false,
+            ptt_since: now,
+            line: false,
+            line_due: None,
             run_ended_at: None,
             budget: match boot {
                 Boot::Power => i64::from(limits.duty_budget_ms),
@@ -239,9 +403,44 @@ impl Keyer {
             armed_until: None,
             last_line: now,
             ended: Ended::None,
-            trip: Trip::None,
+            trip: match boot {
+                Boot::Watchdog => Trip::Watchdog,
+                _ => Trip::None,
+            },
             hang: Hang::No,
             now,
+        }
+    }
+
+    /// [`Keyer::new`], then what the box saved before it restarted, if it did
+    /// ([`Saved`]): its trip, if it had one, stays; its duty budget is the lower
+    /// of the new start's and the saved one, less [`limits::RESTART_CHARGE_MS`]
+    /// if its key was down; and it rests ([`limits::REST_MS`]) before its first
+    /// run, as after any run.
+    pub fn restore(limits: Limits, boot: Boot, now: u64, saved: Option<Saved>) -> Self {
+        let mut k = Self::new(limits, boot, now);
+        if let Some(s) = saved {
+            if s.trip != Trip::None {
+                k.trip = s.trip;
+            }
+            let charge = if s.key {
+                i64::from(limits::RESTART_CHARGE_MS)
+            } else {
+                0
+            };
+            k.budget = k.budget.min(i64::from(s.budget) - charge);
+            k.run_ended_at = Some(now);
+        }
+        k
+    }
+
+    /// What to leave for the next boot at `now` ([`Saved`]).
+    pub fn saved(&self, now: u64) -> Saved {
+        let budget = self.budget_then(now.max(self.budget_at));
+        Saved {
+            trip: self.trip,
+            key: self.keyed(),
+            budget: budget.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
         }
     }
 
@@ -266,6 +465,21 @@ impl Keyer {
         self.key
     }
 
+    /// Whether the PTT should be down, as of the last poll.
+    pub fn ptt(&self) -> bool {
+        self.ptt
+    }
+
+    /// Whether the tone should be on, as of the last poll.
+    pub fn tone(&self) -> bool {
+        self.tone
+    }
+
+    /// The PTT line as last read.
+    pub fn line(&self) -> bool {
+        self.line
+    }
+
     pub fn running(&self) -> bool {
         self.run.is_some()
     }
@@ -279,19 +493,28 @@ impl Keyer {
     }
 
     /// `TEST HANG` has taken effect: the firmware must stop its control loop (and
-    /// so stop feeding the watchdog) with the key as it is.
+    /// so stop feeding the watchdog) with its outputs as they are.
     pub fn hung(&self) -> bool {
         self.hang == Hang::Now
     }
 
-    /// Bring the box up to `now`; whether the key is down.
-    pub fn poll(&mut self, now: u64) -> bool {
-        self.poll_with(now, |_, _| {})
+    /// The PTT line reads `high` now. Call it before each poll with the level read
+    /// just then (the firmware reads it on every pass of its loop): the check
+    /// [`mcw::LINE_MS`] after the PTT moves judges the level last set.
+    pub fn set_line(&mut self, high: bool) {
+        if self.hang != Hang::Now {
+            self.line = high;
+        }
     }
 
-    /// [`Keyer::poll`], calling `on_key(at, down)` for every change of the key,
-    /// with the time it changed.
-    pub fn poll_with(&mut self, now: u64, mut on_key: impl FnMut(u64, bool)) -> bool {
+    /// Bring the box up to `now`; whether the key is down.
+    pub fn poll(&mut self, now: u64) -> bool {
+        self.poll_with(now, |_, _, _| {})
+    }
+
+    /// [`Keyer::poll`], calling `on_change(at, pin, on)` for every change of an
+    /// output, with the time it changed.
+    pub fn poll_with(&mut self, now: u64, mut on_change: impl FnMut(u64, Pin, bool)) -> bool {
         if self.hang == Hang::Now {
             return self.key;
         }
@@ -300,7 +523,7 @@ impl Keyer {
             if at > now {
                 break;
             }
-            self.apply(at, ev, &mut on_key);
+            self.apply(at, ev, &mut on_change);
             if self.hang == Hang::Now {
                 break;
             }
@@ -317,10 +540,16 @@ impl Keyer {
                 next = Some((at, ev));
             }
         };
-        if self.key {
+        if self.key || self.tone {
             consider(
-                self.key_since + u64::from(self.limits.key_down_ms),
+                self.elem_since + u64::from(self.limits.key_down_ms),
                 Event::KeyDownLimit,
+            );
+        }
+        if self.ptt {
+            consider(
+                self.ptt_since + u64::from(self.limits.ptt_ms),
+                Event::PttLimit,
             );
         }
         if let Some(r) = &self.run {
@@ -329,67 +558,139 @@ impl Keyer {
                 Event::Link,
             );
             consider(r.start + u64::from(self.limits.run_ms), Event::RunLimit);
-            if !(r.stuck && self.key) {
+            let held = (r.stuck && (self.key || self.tone)) || (r.hold && r.phase == Phase::Tail);
+            if !held {
                 consider(r.seg_end, Event::Segment);
             }
+        }
+        if let Some(at) = self.line_due {
+            consider(at, Event::LineCheck);
         }
         next
     }
 
-    fn apply(&mut self, at: u64, ev: Event, on_key: &mut impl FnMut(u64, bool)) {
+    fn apply(&mut self, at: u64, ev: Event, on: &mut impl FnMut(u64, Pin, bool)) {
         match ev {
-            Event::KeyDownLimit => self.trip_at(at, Trip::Down, on_key),
-            Event::Link => self.stop_run(at, Ended::Link, on_key),
+            Event::KeyDownLimit => self.trip_at(at, Trip::Down, Ended::Down, on),
+            Event::PttLimit => self.trip_at(at, Trip::Ptt, Ended::Ptt, on),
+            Event::Link => self.stop_run(at, Ended::Link, on),
             Event::RunLimit => {
-                // A run exactly as long as the limit ends with its last element.
-                let done = self
-                    .run
-                    .as_ref()
-                    .is_some_and(|r| r.idx + 1 == r.segs.as_slice().len() && r.seg_end <= at);
+                // A run exactly as long as the limit ends with its last element (an
+                // `MCW` run, with its tail); one held by a test does not.
+                let done = self.run.as_ref().is_some_and(|r| {
+                    let last = if r.mcw {
+                        r.phase == Phase::Tail
+                    } else {
+                        r.idx + 1 == r.segs.as_slice().len()
+                    };
+                    last && r.seg_end <= at && !r.hold && !r.stuck
+                });
                 let why = if done { Ended::Done } else { Ended::Limit };
-                self.stop_run(at, why, on_key)
+                self.stop_run(at, why, on)
             }
-            Event::Segment => {
-                let Some(r) = &mut self.run else { return };
-                r.idx += 1;
-                let Some(seg) = r.segs.as_slice().get(r.idx).copied() else {
-                    self.stop_run(at, Ended::Done, on_key);
-                    return;
-                };
-                r.seg_end = at + u64::from(seg.units) * u64::from(r.dot_ms);
-                self.set_key(at, seg.down, on_key);
+            Event::LineCheck => {
+                self.line_due = None;
+                // Low while the PTT is down, high while it is up.
+                if self.line == self.ptt {
+                    if self.ptt {
+                        // The PTT did not take: nothing is transmitting.
+                        self.stop_run(at, Ended::Line, on);
+                    } else {
+                        // Something else holds it: nothing more is keyed.
+                        self.trip_at(at, Trip::Line, self.ended, on);
+                    }
+                }
             }
+            Event::Segment => self.next_segment(at, on),
         }
     }
 
-    fn set_key(&mut self, at: u64, down: bool, on_key: &mut impl FnMut(u64, bool)) {
-        if down != self.key {
-            self.settle_budget(at);
-            self.key = down;
-            if down {
-                // A key-up too short to be one (at most a pass of the firmware's
+    fn next_segment(&mut self, at: u64, on: &mut impl FnMut(u64, Pin, bool)) {
+        let Some(r) = &mut self.run else { return };
+        let next = match r.phase {
+            Phase::Lead => Some(0),
+            Phase::Morse => Some(r.idx + 1),
+            Phase::Tail => None,
+        };
+        let seg = next.and_then(|i| r.segs.as_slice().get(i).copied().map(|s| (i, s)));
+        match seg {
+            Some((i, seg)) => {
+                r.phase = Phase::Morse;
+                r.idx = i;
+                r.seg_end = at + u64::from(seg.units) * u64::from(r.dot_ms);
+                self.set_elem(at, seg.down, on);
+            }
+            None if r.mcw && r.phase == Phase::Morse => {
+                r.phase = Phase::Tail;
+                r.seg_end = at + u64::from(mcw::TAIL_MS);
+                self.set_elem(at, false, on);
+            }
+            None => self.stop_run(at, Ended::Done, on),
+        }
+    }
+
+    /// The element output of the run under way (the key for `CW`, the tone for
+    /// `MCW`) on or off; with no run, both off.
+    fn set_elem(&mut self, at: u64, active: bool, on: &mut impl FnMut(u64, Pin, bool)) {
+        let mcw = self.run.as_ref().is_some_and(|r| r.mcw);
+        let (key, tone) = match (active, mcw) {
+            (false, _) => (false, false),
+            (true, false) => (true, false),
+            (true, true) => (false, true),
+        };
+        let was = self.key || self.tone;
+        if key || tone {
+            if !was {
+                // An off too short to be one (at most a pass of the firmware's
                 // loop between two runs) does not restart the key-down limit.
                 let short = self
-                    .key_up_at
-                    .is_some_and(|up| at.saturating_sub(up) < u64::from(limits::MIN_GAP_MS));
+                    .elem_off_at
+                    .is_some_and(|off| at.saturating_sub(off) < u64::from(limits::MIN_GAP_MS));
                 if !short {
-                    self.key_since = at;
+                    self.elem_since = at;
                 }
-            } else {
-                self.key_up_at = Some(at);
             }
-            on_key(at, down);
+        } else if was {
+            self.elem_off_at = Some(at);
         }
-        if down && self.hang == Hang::Pending {
+        if key != self.key {
+            // The key keys the transmitter: the duty budget changes with it.
+            self.settle_budget(at);
+            self.key = key;
+            on(at, Pin::Key, key);
+        }
+        if tone != self.tone {
+            self.tone = tone;
+            on(at, Pin::Tone, tone);
+        }
+        if active && self.hang == Hang::Pending {
             self.hang = Hang::Now;
         }
     }
 
-    /// The duty budget at `at`, the key as it has been since it was last settled:
-    /// spent while it was down, earned back while it was up.
+    fn set_ptt(&mut self, at: u64, down: bool, on: &mut impl FnMut(u64, Pin, bool)) {
+        if down == self.ptt {
+            return;
+        }
+        self.settle_budget(at);
+        self.ptt = down;
+        if down {
+            self.ptt_since = at;
+        }
+        self.line_due = Some(at + u64::from(mcw::LINE_MS));
+        on(at, Pin::Ptt, down);
+    }
+
+    /// Whether the transmitter is keyed: the key down, or the PTT down.
+    fn keyed(&self) -> bool {
+        self.key || self.ptt
+    }
+
+    /// The duty budget at `at`, the transmitter as it has been since it was last
+    /// settled: spent while it was keyed, earned back while it was not.
     fn budget_then(&self, at: u64) -> i64 {
         let dt = i64::try_from(at.saturating_sub(self.budget_at)).unwrap_or(i64::MAX);
-        if self.key {
+        if self.keyed() {
             self.budget.saturating_sub(dt)
         } else {
             self.budget
@@ -415,42 +716,44 @@ impl Keyer {
         })
     }
 
-    fn stop_run(&mut self, at: u64, why: Ended, on_key: &mut impl FnMut(u64, bool)) {
-        if self.run.take().is_some() {
+    fn stop_run(&mut self, at: u64, why: Ended, on: &mut impl FnMut(u64, Pin, bool)) {
+        if self.run.is_some() {
             self.ended = why;
             self.run_ended_at = Some(at);
         }
         if self.hang == Hang::Pending {
             self.hang = Hang::No;
         }
-        self.set_key(at, false, on_key);
+        // The element first, then the PTT, as a run ends.
+        self.set_elem(at, false, on);
+        self.run = None;
+        self.set_ptt(at, false, on);
     }
 
-    fn trip_at(&mut self, at: u64, why: Trip, on_key: &mut impl FnMut(u64, bool)) {
+    fn trip_at(&mut self, at: u64, why: Trip, ended: Ended, on: &mut impl FnMut(u64, Pin, bool)) {
         if self.trip == Trip::None {
             self.trip = why;
         }
-        self.stop_run(at, Ended::Down, on_key);
-        self.set_key(at, false, on_key);
+        self.stop_run(at, ended, on);
     }
 
-    /// The firmware saw a fault on its key pin at `now` ([`crate::control`]): open
-    /// the key and trip, as the key-down limit does. Nothing more is keyed until
-    /// the box is power-cycled.
-    pub fn trip_now(&mut self, now: u64, why: Trip, mut on_key: impl FnMut(u64, bool)) {
-        self.poll_with(now, &mut on_key);
+    /// The firmware saw a fault on one of its pins at `now` ([`crate::control`]):
+    /// open everything and trip, as the key-down limit does. Nothing more is keyed
+    /// until the box is power-cycled.
+    pub fn trip_now(&mut self, now: u64, why: Trip, mut on_change: impl FnMut(u64, Pin, bool)) {
+        self.poll_with(now, &mut on_change);
         if self.hang != Hang::Now {
-            self.trip_at(now.max(self.now), why, &mut on_key);
+            self.trip_at(now.max(self.now), why, Ended::Down, &mut on_change);
         }
     }
 
     /// The USB link went away at `now` (bus reset, suspend, deconfigured): stop any
     /// run.
-    pub fn link_lost(&mut self, now: u64, mut on_key: impl FnMut(u64, bool)) {
-        self.poll_with(now, &mut on_key);
+    pub fn link_lost(&mut self, now: u64, mut on_change: impl FnMut(u64, Pin, bool)) {
+        self.poll_with(now, &mut on_change);
         self.armed_until = None;
         if self.hang != Hang::Now && self.run.is_some() {
-            self.stop_run(now.max(self.now), Ended::Usb, &mut on_key);
+            self.stop_run(now.max(self.now), Ended::Usb, &mut on_change);
         }
     }
 
@@ -458,18 +761,18 @@ impl Keyer {
     /// for a line that does not decode (ignored, and not counted for the link
     /// timeout) or a hung box.
     pub fn handle_line(&mut self, now: u64, line: &[u8]) -> Option<Line> {
-        self.handle_line_with(now, line, |_, _| {})
+        self.handle_line_with(now, line, |_, _, _| {})
     }
 
-    /// [`Keyer::handle_line`], calling `on_key` for every key change as
+    /// [`Keyer::handle_line`], calling `on_change` for every output change as
     /// [`Keyer::poll_with`] does.
     pub fn handle_line_with(
         &mut self,
         now: u64,
         line: &[u8],
-        mut on_key: impl FnMut(u64, bool),
+        mut on_change: impl FnMut(u64, Pin, bool),
     ) -> Option<Line> {
-        self.poll_with(now, &mut on_key);
+        self.poll_with(now, &mut on_change);
         if self.hang == Hang::Now {
             return None;
         }
@@ -482,12 +785,13 @@ impl Keyer {
             (_, "HELLO") => frame::encode(
                 id,
                 format_args!(
-                    "OK HELLO {VERSION} {} {} {} {} {} {now} {} {} {NAME}",
+                    "OK HELLO {VERSION} {} {} {} {} {} {} {now} {} {} {NAME}",
                     self.limits.run_ms / 1000,
                     self.limits.link_timeout_ms,
                     self.limits.key_down_ms,
                     self.limits.rest_ms,
                     self.limits.duty_budget_ms / 1000,
+                    self.limits.ptt_ms / 1000,
                     self.boot.as_str(),
                     self.build
                 ),
@@ -495,7 +799,7 @@ impl Keyer {
             (_, "STATUS") => frame::encode(
                 id,
                 format_args!(
-                    "OK STATUS {} {} {} {} {} {}",
+                    "OK STATUS {} {} {} {} {} {} {} {}",
                     u8::from(self.key),
                     u8::from(self.run.is_some()),
                     self.ended.as_str(),
@@ -505,37 +809,42 @@ impl Keyer {
                     } else {
                         self.rest_left(now)
                     },
-                    self.budget_at(now)
+                    self.budget_at(now),
+                    u8::from(self.ptt),
+                    u8::from(self.line)
                 ),
             ),
             (_, "STOP") => {
-                self.stop_run(now, Ended::Stop, &mut on_key);
+                self.stop_run(now, Ended::Stop, &mut on_change);
                 frame::encode(id, format_args!("OK STOP"))
             }
-            ("CW", _) => {
-                let r = self.start_cw(now, &body[2..], &mut on_key);
-                match r {
-                    Ok(()) => frame::encode(id, format_args!("OK CW")),
-                    Err(code) => frame::encode(id, format_args!("ERR CW {code}")),
+            ("CW" | "MCW", _) => {
+                let mcw = word == "MCW";
+                match self.start(now, &body[word.len()..], mcw, &mut on_change) {
+                    Ok(()) => frame::encode(id, format_args!("OK {word}")),
+                    Err(code) => frame::encode(id, format_args!("ERR {word} {code}")),
                 }
             }
             (_, "TEST ARM") => {
                 self.armed_until = Some(now + u64::from(limits::ARM_MS));
                 frame::encode(id, format_args!("OK TEST ARM"))
             }
-            (_, "TEST HANG") | (_, "TEST STUCK") if self.run.is_none() => {
+            (_, "TEST HANG" | "TEST STUCK") if self.run.is_none() => {
+                frame::encode(id, format_args!("ERR TEST RUN"))
+            }
+            (_, "TEST HOLD") if !self.run.as_ref().is_some_and(|r| r.mcw) => {
                 frame::encode(id, format_args!("ERR TEST RUN"))
             }
             // A test is taken only just after `TEST ARM`, and once: a stray line
             // (a terminal on the port, a script) cannot start one.
-            (_, "TEST HANG") | (_, "TEST STUCK")
+            (_, "TEST HANG" | "TEST STUCK" | "TEST HOLD")
                 if self.armed_until.take().is_none_or(|until| now > until) =>
             {
                 frame::encode(id, format_args!("ERR TEST ARM"))
             }
             (_, "TEST HANG") => {
                 self.hang = Hang::Pending;
-                if self.key {
+                if self.key || self.tone {
                     self.hang = Hang::Now;
                 }
                 frame::encode(id, format_args!("OK TEST HANG"))
@@ -545,6 +854,12 @@ impl Keyer {
                     r.stuck = true;
                 }
                 frame::encode(id, format_args!("OK TEST STUCK"))
+            }
+            (_, "TEST HOLD") => {
+                if let Some(r) = &mut self.run {
+                    r.hold = true;
+                }
+                frame::encode(id, format_args!("OK TEST HOLD"))
             }
             ("TEST", _) => frame::encode(id, format_args!("ERR TEST UNKNOWN")),
             _ => {
@@ -557,65 +872,98 @@ impl Keyer {
         }
     }
 
-    /// `CW <wpm> <text>`; `args` is what follows `CW`.
-    fn start_cw(
+    /// `CW <wpm> <text>` or `MCW <wpm> <text>`; `args` is what follows the word.
+    fn start(
         &mut self,
         now: u64,
         args: &str,
-        on_key: &mut impl FnMut(u64, bool),
-    ) -> Result<(), CwError> {
+        mcw: bool,
+        on: &mut impl FnMut(u64, Pin, bool),
+    ) -> Result<(), StartError> {
         if self.trip != Trip::None {
-            return Err(CwError::Trip);
+            return Err(StartError::Trip);
         }
         if self.run.is_some() {
-            return Err(CwError::Run);
+            return Err(StartError::Run);
         }
-        let args = args.strip_prefix(' ').ok_or(CwError::Len)?;
+        let args = args.strip_prefix(' ').ok_or(StartError::Len)?;
         let (wpm, text) = args.split_once(' ').unwrap_or((args, ""));
         if wpm.is_empty() || wpm.len() > 3 || !wpm.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(CwError::Wpm);
+            return Err(StartError::Wpm);
         }
-        let wpm: u32 = wpm.parse().map_err(|_| CwError::Wpm)?;
+        let wpm: u32 = wpm.parse().map_err(|_| StartError::Wpm)?;
         if !(MIN_WPM..=MAX_WPM).contains(&wpm) {
-            return Err(CwError::Wpm);
+            return Err(StartError::Wpm);
         }
-        let dot_ms = morse::dot_ms(wpm).map_err(|_| CwError::Wpm)?;
+        let dot_ms = morse::dot_ms(wpm).map_err(|_| StartError::Wpm)?;
         let segs = Segments::of(text.as_bytes()).map_err(|e| match e {
-            TextError::Len => CwError::Len,
-            TextError::Char => CwError::Char,
+            TextError::Len => StartError::Len,
+            TextError::Char => StartError::Char,
         })?;
-        if segs.units() * dot_ms > self.limits.run_ms {
-            return Err(CwError::Limit);
+        let morse_ms = segs.units() * dot_ms;
+        // How long the run keys the transmitter: the key-down time of `CW`, the
+        // whole PTT time of `MCW` (a steady carrier).
+        let keyed_ms: u64 = if mcw {
+            // The whole PTT time, under both limits, so that a run that goes as
+            // planned never meets either.
+            let ptt_ms = mcw::LEAD_MS + morse_ms + mcw::TAIL_MS;
+            if ptt_ms >= self.limits.ptt_ms.min(self.limits.run_ms) {
+                return Err(StartError::Limit);
+            }
+            u64::from(ptt_ms)
+        } else {
+            if morse_ms > self.limits.run_ms {
+                return Err(StartError::Limit);
+            }
+            segs.as_slice()
+                .iter()
+                .filter(|s| s.down)
+                .map(|s| u64::from(s.units) * u64::from(dot_ms))
+                .sum()
+        };
+        // The PTT line: nothing new while the last move of the PTT is unchecked;
+        // and for `MCW`, the line high (the radio on, the cable in, the PTT open).
+        if self.line_due.is_some() || (mcw && !self.line) {
+            return Err(StartError::Line);
         }
         if self.rest_left(now) > 0 {
-            return Err(CwError::Rest);
+            return Err(StartError::Rest);
         }
-        let down: u64 = segs
-            .as_slice()
-            .iter()
-            .filter(|s| s.down)
-            .map(|s| u64::from(s.units) * u64::from(dot_ms))
-            .sum();
-        if self.budget_at(now) < down {
-            return Err(CwError::Duty);
+        if self.budget_at(now) < keyed_ms {
+            return Err(StartError::Duty);
         }
         let first = segs.as_slice()[0];
+        let (phase, seg_end) = if mcw {
+            (Phase::Lead, now + u64::from(mcw::LEAD_MS))
+        } else {
+            (
+                Phase::Morse,
+                now + u64::from(first.units) * u64::from(dot_ms),
+            )
+        };
         self.run = Some(Run {
             segs,
             idx: 0,
             dot_ms,
             start: now,
-            seg_end: now + u64::from(first.units) * u64::from(dot_ms),
+            seg_end,
+            mcw,
+            phase,
             stuck: false,
+            hold: false,
         });
-        self.set_key(now, true, on_key);
+        if mcw {
+            self.set_ptt(now, true, on);
+        } else {
+            self.set_elem(now, true, on);
+        }
         Ok(())
     }
 }
 
-/// Why `CW` was refused.
+/// Why `CW` or `MCW` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CwError {
+pub enum StartError {
     /// Tripped: unplug the box and plug it in again.
     Trip,
     /// A run is already under way.
@@ -623,15 +971,19 @@ pub enum CwError {
     Wpm,
     Len,
     Char,
-    /// Longer than the run limit at that speed.
+    /// Longer than the run limit at that speed (for `MCW`, with the lead and tail,
+    /// not under the run and PTT limits).
     Limit,
+    /// The PTT line is low (`MCW`), or the PTT's last move has not been checked
+    /// yet.
+    Line,
     /// The last run ended less than the rest ([`limits::REST_MS`]) ago.
     Rest,
-    /// The duty budget holds less than the run's key-down time.
+    /// The duty budget holds less than the time the run keys the transmitter.
     Duty,
 }
 
-impl fmt::Display for CwError {
+impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Trip => "TRIP",
@@ -640,6 +992,7 @@ impl fmt::Display for CwError {
             Self::Len => "LEN",
             Self::Char => "CHAR",
             Self::Limit => "LIMIT",
+            Self::Line => "LINE",
             Self::Rest => "REST",
             Self::Duty => "DUTY",
         })

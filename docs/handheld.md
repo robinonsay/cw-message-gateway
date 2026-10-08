@@ -1,5 +1,12 @@
 # A handheld for testing on 2 m
 
+> **Parked.** This route (custom firmware on the radio, commands over its USB-C
+> port) is parked: nothing here is to be flashed onto a radio. A handheld is now
+> driven with its stock firmware through its headset jack, by the keyer box: see
+> [A handheld through its headset jack](keyer.md#a-handheld-through-its-headset-jack)
+> in keyer.md, which also has the jack's wiring from evidence and the checks to make
+> on your own cable. The code below stays, tested against simulations only.
+
 `hfnode` can drive a Quansheng handheld (a UV-K1 or UV-K5 v3; not the older UV-K5,
 which has a different processor, from memory) instead of the IC-7300, so that the
 whole system can be tried locally on 2 m before going on HF: the code sheet, the
@@ -58,13 +65,13 @@ Different:
   Keep both antennas on before anything keys.
 - **A USB-C cable** from the radio to the computer, for the commands.
 - **An audio cable carrying only the radio's receive audio**, from its speaker output
-  (the tip and sleeve of the 3.5 mm plug of the two-pin jack) to a sound card input
-  on the computer, with nothing on the 2.5 mm plug (microphone and PTT). Not a cable
-  that wires the PTT, such as the AIOC: in CW the radio keys for as long as its PTT
-  is held, and its own time-out timer does not work in CW, so a PTT line stuck on
-  would key it with none of the firmware's limits to stop it. (The jack's wiring is
-  from memory.) Set the level with the radio's volume knob, checking with
-  `hfnode record`.
+  to a sound card input on the computer, with nothing on the microphone and PTT. Not
+  a cable that wires the PTT, such as the AIOC: in CW the radio keys for as long as
+  its PTT is held, and its own time-out timer does not work in CW, so a PTT line
+  stuck on would key it with none of the firmware's limits to stop it. Which contact
+  carries what is not taken from memory: the evidence and the meter checks are in
+  [The cable](keyer.md#the-cable) in keyer.md. Set the level with the radio's volume
+  knob, checking with `hfnode record`.
 - **A config file of its own for the handheld**, so that tests never touch the HF
   node's transmit inhibit, health log or codes. Copy `hfnode.example.toml` to, say,
   `~/handheld.toml`, and in it:
@@ -210,8 +217,9 @@ the log for why it latched, and delete `tx-inhibited` in the handheld's `state_d
   until the start-up code resets it. The patched firmware does that as soon as the
   chip's pins are set up, before the display's start-up, but how long the
   bootloader takes first is not known. `hangtest` checks it.
-- From memory: the UVTools2 steps, the jack's wiring, the AIOC's PTT, the UV-K5
-  models, and the band plan below.
+- From memory: the UVTools2 steps, the UV-K5 models, and the band plan below. The
+  jack's wiring and the AIOC's PTT are now from evidence, in
+  [The cable](keyer.md#the-cable) in keyer.md.
 
 ## Rules
 

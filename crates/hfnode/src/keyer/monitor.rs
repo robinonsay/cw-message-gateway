@@ -25,6 +25,21 @@
 //!   the field station, and whether a steady tone sits at the pitch right now (a
 //!   carrier, or the radio's key closed): the node does not key then.
 //!
+//! An FM handheld on the box's PTT output ([`Mode::Mute`]) has no sidetone. Its
+//! squelch is left open, so its speaker carries receive noise for as long as it
+//! receives, and goes quiet while it transmits; the same checks then listen to
+//! that noise instead (docs/keyer.md, "A handheld through its headset jack"):
+//!
+//! - [`Monitor::judge`]: the noise dropped at least [`MUTE_DB`] under the receive
+//!   level for nearly all of the time the box held the PTT, past the longest audio
+//!   delay: the radio transmitted.
+//! - [`Monitor::key_state`]: after the box let the PTT up, the noise came back
+//!   within [`RX_BACK`]; if not, the PTT is held at the radio. And once noise has
+//!   been heard, [`NOISE_GONE`] with none at all is a PTT held, or the radio
+//!   switched off or its squelch closed under the node.
+//! - [`Monitor::quieted`]: the noise has dropped now with the box idle: a station
+//!   is on the channel.
+//!
 //! Times here are radio time, in seconds since the monitor started: wall-clock
 //! time multiplied by the time scale, which is 1 except in the self-tests, whose
 //! radio and audio run faster than real time.
@@ -117,6 +132,38 @@ const RX_AFTER_S: f64 = 2.5;
 /// a transmission's pieces, which leave no receive audio between them.
 pub const LEVEL_KEEPS: Duration = Duration::from_secs(120);
 
+/// [`Mode::Mute`]: transmitting, the radio's receive noise at least this far under
+/// its level on receive; back on receive, within half of it.
+pub const MUTE_DB: f32 = 15.0;
+/// [`Mode::Mute`]: after the box lets the PTT up (and the audio delay), the noise
+/// must be back within this: the radio's switch back to receive.
+pub const RX_BACK: Duration = Duration::from_millis(1500);
+const RX_BACK_S: f64 = 1.5;
+/// [`Mode::Mute`]: once receive noise has been heard, this long with none (the
+/// share below under `min_level_dbfs`) is a PTT held or the radio switched off.
+pub const NOISE_GONE: Duration = Duration::from_secs(30);
+const NOISE_GONE_S: f64 = 30.0;
+const NOISE_GONE_SHARE: f32 = 0.95;
+/// [`Mode::Mute`]: the receiver quieted now: over the last second (at least this
+/// much of it after the last run) ...
+const QUIET_MIN_S: f64 = 0.3;
+/// ... this share of slices under the receive level by half of [`MUTE_DB`].
+const QUIET_SHARE: f32 = 0.9;
+/// [`Mode::Mute`]: with this share of the last second quieted, the receive level
+/// is not measured again (receive noise hardly ever dips that far in a slice).
+const QUIETING_SHARE: f32 = 0.25;
+
+/// What the node listens for in the radio's audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// The radio's sidetone while its key is closed (`[keyer] output = "key"`).
+    #[default]
+    Sidetone,
+    /// An FM handheld's receive noise, its squelch open, which stops while it
+    /// transmits (`[keyer] output = "ptt"`).
+    Mute,
+}
+
 /// What the monitor needs to know.
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -127,6 +174,7 @@ pub struct Settings {
     pub min_level_dbfs: f32,
     /// Radio seconds per wall-clock second: 1, except in the self-tests.
     pub scale: f32,
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -141,10 +189,13 @@ struct Slice {
     purity: f32,
 }
 
-/// One `CW` run the box keyed, as the node expects it to sound.
+/// One `CW` run the box keyed, as the node expects it to sound; or one `MCW` run,
+/// the PTT held for its whole length (`mute`).
 #[derive(Debug, Clone)]
 struct Run {
     id: u64,
+    /// An `MCW` run: `downs` is the one stretch the PTT was down.
+    mute: bool,
     /// When the box took the run, radio time.
     start: f64,
     /// Key-down stretches, relative to `start`.
@@ -170,8 +221,13 @@ impl Run {
 }
 
 /// Whether a run was heard, and how it sounded at the audio delay that fits best.
+/// For an `MCW` run ([`Mode::Mute`]), `tone_db` is the audio's level while the PTT
+/// was held, `gap_db` the receive level it is compared with, `share_down` the share
+/// of the time it was [`MUTE_DB`] under that, and `lag` how long after the PTT went
+/// down the noise first dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Judge {
+    pub mode: Mode,
     pub heard: bool,
     /// The audio delay that fits best.
     pub lag: Duration,
@@ -200,6 +256,16 @@ impl Judge {
     pub fn why_not(&self) -> Option<String> {
         if self.heard {
             return None;
+        }
+        if self.mode == Mode::Mute && self.slices_down >= MIN_SLICES {
+            return Some(format!(
+                "the receive noise did not drop while the box held the PTT ({:.0} % of the \
+                 time {MUTE_DB:.0} dB under the {:.0} dBFS heard on receive): the PTT did not \
+                 key the radio (the cable, the radio off, BCL on), or its speaker is not \
+                 muted while it transmits",
+                self.share_down * 100.0,
+                self.gap_db
+            ));
         }
         Some(
             if self.slices_down < MIN_SLICES || self.slices_up < MIN_SLICES {
@@ -230,6 +296,18 @@ impl Judge {
 
 impl fmt::Display for Judge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.mode == Mode::Mute {
+            return write!(
+                f,
+                "{} (receive noise {:.0} dBFS while the PTT was held, {:.0} dBFS on receive, \
+                 {:.0} % muted, after {} ms)",
+                if self.heard { "keyed" } else { "not keyed" },
+                self.tone_db,
+                self.gap_db,
+                self.share_down * 100.0,
+                self.lag.as_millis()
+            );
+        }
         write!(
             f,
             "{} (delay {} ms, sidetone {:.0} dBFS, gaps {:.0} dBFS, {:.0} % / {:.0} %)",
@@ -295,6 +373,8 @@ pub struct Monitor {
     known_sidetone_db: Option<f32>,
     /// The last receive level measured, and when (wall clock).
     level: Option<(Instant, f32)>,
+    /// [`Mode::Mute`]: receive noise at `min_level_dbfs` or more has been heard.
+    noise_heard: bool,
     /// Bring-up: raw audio kept from the sample with this index on.
     raw: Option<(u64, Vec<f32>)>,
 }
@@ -324,6 +404,7 @@ impl Monitor {
             sidetone_db: None,
             known_sidetone_db: None,
             level: None,
+            noise_heard: false,
             raw: None,
         }
     }
@@ -401,6 +482,9 @@ impl Monitor {
         while self.slices.front().is_some_and(|s| s.t < at_r - KEEP_S) {
             self.slices.pop_front();
         }
+        if self.s.mode == Mode::Mute && used > 0 {
+            self.update_level(at, true);
+        }
     }
 
     /// A little audio lost shows as every block since arriving that much later than
@@ -471,13 +555,32 @@ impl Monitor {
             }
             t += len;
         }
+        self.add_run(start, downs, t, dot, false)
+    }
+
+    /// The box took an `MCW` run at `start` (no later than then), holding the PTT
+    /// for `ptt` (radio time). Returns the run's id.
+    pub fn ptt_started(&mut self, start: Instant, ptt: Duration) -> u64 {
+        let len = ptt.as_secs_f64();
+        self.add_run(start, vec![(0.0, len)], len, 0.06, true)
+    }
+
+    fn add_run(
+        &mut self,
+        start: Instant,
+        downs: Vec<(f64, f64)>,
+        end: f64,
+        dot: f64,
+        mute: bool,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.runs.push_back(Run {
             id,
+            mute,
             start: self.radio(start),
             downs,
-            end: t,
+            end,
             dot,
             opened: None,
             released: false,
@@ -506,6 +609,15 @@ impl Monitor {
         let run = &self.runs[idx];
         if let Some(j) = &run.judge {
             return Some(j.clone());
+        }
+        if run.mute {
+            if latest < run.start + run.open_at() + SLICE_S {
+                return None;
+            }
+            let reference = self.receive_reference(run);
+            let j = judge_mute(&self.slices, run, reference);
+            self.runs[idx].judge = Some(j.clone());
+            return Some(j);
         }
         let post = POST_S.min(3.0 * run.dot);
         let open = run.open_at();
@@ -539,14 +651,17 @@ impl Monitor {
         }
     }
 
-    /// What the audio says about the radio's key, while the box's is open.
+    /// What the audio says about the radio's key (or PTT), while the box's is open.
     pub fn key_state(&mut self) -> KeyState {
-        match self.after_run() {
-            KeyState::Open => self
+        match (self.after_run(), self.s.mode) {
+            (KeyState::Open, Mode::Sidetone) => self
                 .carrier_after_run()
                 .or_else(|| self.steady_tone())
                 .map_or(KeyState::Open, KeyState::Held),
-            other => other,
+            (KeyState::Open, Mode::Mute) => {
+                self.noise_gone().map_or(KeyState::Open, KeyState::Held)
+            }
+            (other, _) => other,
         }
     }
 
@@ -641,6 +756,125 @@ impl Monitor {
         None
     }
 
+    /// [`Mode::Mute`]: the receive level a run is compared with: the band's when
+    /// the box took it, or the noise just before it.
+    fn receive_reference(&self, run: &Run) -> f32 {
+        run.band_db
+            .or_else(|| median_total_before(&self.slices, run.start))
+            .unwrap_or(self.s.min_level_dbfs)
+    }
+
+    /// [`Mode::Mute`], after an `MCW` run: the noise came back after the box let
+    /// the PTT up; or the audio does not yet reach far enough past it to tell.
+    fn after_ptt(&mut self, idx: usize) -> KeyState {
+        let run = &self.runs[idx];
+        let (lag, reference) = match &run.judge {
+            Some(j) if j.heard => (j.lag.as_secs_f64(), j.gap_db),
+            _ => (MAX_LAG_S, self.receive_reference(run)),
+        };
+        // Only a judged run is ever done with, as in [`Self::after_run`].
+        let judged = run.judge.is_some();
+        let from = run.start + run.open_at() + lag;
+        let threshold = reference - MUTE_DB / 2.0;
+        let need = (RELEASE_S / SLICE_S).round() as usize;
+        let mut back = 0usize;
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            if s.total_db >= threshold {
+                back += 1;
+                if back >= need {
+                    self.runs[idx].released = judged;
+                    return KeyState::Open;
+                }
+            } else {
+                back = 0;
+            }
+        }
+        let heard_for = self.latest().map_or(0.0, |l| l - from);
+        if heard_for < RX_BACK_S {
+            return KeyState::Unsure;
+        }
+        KeyState::Held(format!(
+            "the radio's receive noise did not come back within {:.1} s after the box let \
+             its PTT up: the PTT is held at the radio (a shorted optocoupler or cable, RF on \
+             the cable), or a station came on the channel at once",
+            RX_BACK.as_secs_f32()
+        ))
+    }
+
+    /// [`Mode::Mute`]: no receive noise for [`NOISE_GONE`], once some has been
+    /// heard, with no run of the node's in that time.
+    fn noise_gone(&self) -> Option<String> {
+        if !self.noise_heard {
+            return None;
+        }
+        let latest = self.latest()?;
+        let from = latest - NOISE_GONE_S;
+        if self.slices.front()?.t > from + SLICE_S {
+            return None;
+        }
+        if self
+            .runs
+            .back()
+            .is_some_and(|r| r.start + r.open_at() + MAX_LAG_S + RX_BACK_S > from)
+        {
+            // The check after the run covers that time.
+            return None;
+        }
+        let (mut n, mut gone) = (0usize, 0usize);
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            n += 1;
+            if s.total_db < self.s.min_level_dbfs {
+                gone += 1;
+            }
+        }
+        (n > 0 && gone as f32 >= NOISE_GONE_SHARE * n as f32).then(|| {
+            format!(
+                "no receive noise for {} s: the radio's PTT is held at the radio, or the radio \
+                 was switched off, its squelch closed (SQL must be 0) or its volume turned \
+                 down (stop hfnode before using the radio by hand)",
+                NOISE_GONE.as_secs()
+            )
+        })
+    }
+
+    /// [`Mode::Mute`]: the receiver is quieted now, with the box idle: a station
+    /// on the channel. Over the last second, from after the node's last run.
+    pub fn quieted(&self) -> bool {
+        if self.s.mode != Mode::Mute {
+            return false;
+        }
+        let Some(latest) = self.latest() else {
+            return false;
+        };
+        let after_run = self.runs.back().map_or(f64::NEG_INFINITY, |r| {
+            let lag = r
+                .judge
+                .as_ref()
+                .filter(|j| j.heard)
+                .map_or(MAX_LAG_S, |j| j.lag.as_secs_f64());
+            r.start + r.open_at() + lag
+        });
+        let from = (latest - CARRIER_S).max(after_run);
+        if latest - from < QUIET_MIN_S {
+            return false;
+        }
+        self.quiet_share(from).is_some_and(|q| q >= QUIET_SHARE)
+    }
+
+    /// [`Mode::Mute`]: the share of the slices from `from` on at least half of
+    /// [`MUTE_DB`] under the receive level; `None` with no level or no slices.
+    fn quiet_share(&self, from: f64) -> Option<f32> {
+        let (_, level) = self.level?;
+        let (mut n, mut quiet) = (0usize, 0usize);
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            n += 1;
+            if s.total_db < level - MUTE_DB / 2.0 {
+                quiet += 1;
+            }
+        }
+        (n > 0).then(|| quiet as f32 / n as f32)
+    }
+
     /// After the last run: the sidetone went on, unbroken, after the box opened its
     /// key; or the audio does not yet reach far enough past it to tell.
     fn after_run(&mut self) -> KeyState {
@@ -650,6 +884,9 @@ impl Monitor {
         let run = &self.runs[idx];
         if run.released {
             return KeyState::Open;
+        }
+        if run.mute {
+            return self.after_ptt(idx);
         }
         let open = run.start + run.open_at();
         let (lag, threshold) = self.release_level(run);
@@ -746,6 +983,34 @@ impl Monitor {
         Some(median(&mut v))
     }
 
+    /// Measure the receive level at `now` if the last second of audio is all
+    /// receive audio: no carrier at the pitch (returned, as [`Monitor::carrier`]),
+    /// and for [`Mode::Mute`] the receiver not quieted. Called for each block in
+    /// [`Mode::Mute`], whose checks need the level of the noise as it was just
+    /// before the receiver went quiet.
+    fn update_level(&mut self, now: Instant, audio: bool) -> Option<Option<f32>> {
+        let carrier = self.carrier().filter(|_| audio);
+        // [`Mode::Mute`]: the receiver quieted is a station on the channel (or the
+        // radio transmitting, or switched off), not the band: the level from before
+        // it stands, for [`LEVEL_KEEPS`] at most.
+        let quieting = self.s.mode == Mode::Mute
+            && self
+                .level
+                .is_some_and(|(at, _)| now.saturating_duration_since(at) <= LEVEL_KEEPS)
+            && self
+                .latest()
+                .and_then(|l| self.quiet_share(l - LEVEL_S))
+                .is_some_and(|q| q >= QUIETING_SHARE);
+        if let Some(db) = self
+            .receive_level()
+            .filter(|_| carrier == Some(None) && !quieting)
+        {
+            self.level = Some((now, db));
+            self.noise_heard |= self.s.mode == Mode::Mute && db >= self.s.min_level_dbfs;
+        }
+        carrier
+    }
+
     /// Audio arriving, the band's level, and a carrier at the pitch.
     pub fn band(&mut self, now: Instant) -> Band {
         let audio = self
@@ -753,10 +1018,7 @@ impl Monitor {
             .is_some_and(|b| now.saturating_duration_since(b) <= AUDIO_FRESH);
         // Only audio still arriving says how the band sounds now, and only once
         // there is enough of it to tell the band from a carrier.
-        let carrier = self.carrier().filter(|_| audio);
-        if let Some(db) = self.receive_level().filter(|_| carrier == Some(None)) {
-            self.level = Some((now, db));
-        }
+        let carrier = self.update_level(now, audio);
         let carrier_db = carrier.flatten();
         let level_db = self
             .level
@@ -842,6 +1104,28 @@ impl Monitor {
         best.map(|(f, _)| f)
     }
 
+    /// How long the radio stayed on transmit at once since `from`, as the audio
+    /// shows it: [`Monitor::longest_tone`], or for [`Mode::Mute`] the longest
+    /// unbroken stretch of its receive noise half of [`MUTE_DB`] or more under the
+    /// last receive level.
+    pub fn longest_on_air(&self, from: Instant) -> Duration {
+        if self.s.mode == Mode::Sidetone {
+            return self.longest_tone(from);
+        }
+        let from = self.radio(from);
+        let level = self.level.map_or(self.s.min_level_dbfs, |(_, db)| db);
+        let (mut run, mut longest) = (0usize, 0usize);
+        for s in self.slices.iter().filter(|s| s.t >= from) {
+            if s.total_db < level - MUTE_DB / 2.0 {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        Duration::from_secs_f64(longest as f64 * SLICE_S)
+    }
+
     /// The longest unbroken stretch of sidetone (as loud as in the last run heard,
     /// less 10 dB) since `from`: how long a key stayed closed at the radio.
     pub fn longest_tone(&self, from: Instant) -> Duration {
@@ -898,6 +1182,68 @@ fn median(v: &mut [f32]) -> Option<f32> {
     }
     v.sort_by(f32::total_cmp);
     Some(v[v.len() / 2])
+}
+
+/// Median level (all of it) over the receive audio just before `start`.
+fn median_total_before(slices: &VecDeque<Slice>, start: f64) -> Option<f32> {
+    let mut v: Vec<f32> = slices
+        .iter()
+        .filter(|s| s.t >= start - PRE_S && s.t <= start - EDGE_S)
+        .map(|s| s.total_db)
+        .collect();
+    median(&mut v)
+}
+
+/// [`Mode::Mute`]: whether the receive noise dropped [`MUTE_DB`] under `reference`
+/// for nearly all of the time the PTT was held, from the longest audio delay after
+/// it went down to when it came up; and how long after it went down the noise
+/// first dropped (for a slice of [`RELEASE_S`]).
+fn judge_mute(slices: &VecDeque<Slice>, run: &Run, reference: f32) -> Judge {
+    let (start, up) = (run.start, run.start + run.open_at());
+    let under = reference - MUTE_DB;
+    let mut v: Vec<f32> = Vec::new();
+    let mut muted = 0usize;
+    for s in slices
+        .iter()
+        .filter(|s| s.t >= start + MAX_LAG_S + EDGE_S && s.t <= up - EDGE_S)
+    {
+        v.push(s.total_db);
+        if s.total_db <= under {
+            muted += 1;
+        }
+    }
+    let n = v.len();
+    let share = if n == 0 { 0.0 } else { muted as f32 / n as f32 };
+    let need = (RELEASE_S / SLICE_S).round() as usize;
+    let mut run_of = 0usize;
+    let mut lag = MAX_LAG_S;
+    for s in slices
+        .iter()
+        .filter(|s| s.t >= start && s.t <= start + MAX_LAG_S + RELEASE_S)
+    {
+        if s.total_db <= under {
+            run_of += 1;
+            if run_of >= need {
+                lag = (s.t - start - (need as f64 - 0.5) * SLICE_S).clamp(0.0, MAX_LAG_S);
+                break;
+            }
+        } else {
+            run_of = 0;
+        }
+    }
+    Judge {
+        mode: Mode::Mute,
+        heard: n >= MIN_SLICES && share >= MIN_SHARE,
+        lag: Duration::from_secs_f64(lag),
+        tone_db: median(&mut v).unwrap_or(f32::NEG_INFINITY),
+        gap_db: reference,
+        before_db: Some(reference),
+        share_down: share,
+        share_up: 1.0,
+        share_before: 1.0,
+        slices_down: n,
+        slices_up: n,
+    }
 }
 
 /// Median level at the pitch over the receive audio just before `start`.
@@ -993,6 +1339,7 @@ fn judge_run(slices: &VecDeque<Slice>, run: &Run, post: f64) -> Judge {
                 / before.len() as f32
         };
         let j = Judge {
+            mode: Mode::Sidetone,
             heard: nd >= MIN_SLICES
                 && nu >= MIN_SLICES
                 && tone - gap >= MIN_CONTRAST_DB
@@ -1023,6 +1370,7 @@ fn judge_run(slices: &VecDeque<Slice>, run: &Run, post: f64) -> Judge {
         }
     }
     best.map(|(_, _, j)| j).unwrap_or(Judge {
+        mode: Mode::Sidetone,
         heard: false,
         lag: Duration::ZERO,
         tone_db: f32::NEG_INFINITY,

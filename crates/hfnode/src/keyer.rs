@@ -7,9 +7,16 @@
 //! The box times the Morse itself from text the node sends ([`proto`],
 //! docs/keyer-protocol.md), with limits of its own that do not depend on the node:
 //! a 1 s key-down limit that trips it, a 60 s run limit, a 2 s link timeout, a 1 s
-//! rest after every run, a duty budget, a watch on its own key pin and a hardware
+//! rest after every run, a duty budget, a watch on its own pins and a hardware
 //! watchdog ([`keyer_core`], the same code the box runs). The node keeps a duty
 //! window of its own on top (`[keyer] max_duty_percent`).
+//!
+//! With `[keyer] output = "ptt"` the radio is an FM handheld with no key jack (the
+//! UV-K1 on its stock firmware): the box holds its PTT through its headset jack and
+//! keys the Morse as a tone into its microphone (MCW), with a 60 s PTT limit and a
+//! check of the PTT line, the same rest and duty budget spent by the whole PTT
+//! time (a steady carrier), and the node hears the radio transmit by its receive
+//! noise going quiet ([`monitor`]).
 
 pub mod bench;
 pub mod link;
@@ -47,8 +54,49 @@ pub const BANDS_HZ: [(u64, u64); 13] = [
     (420_000_000, 450_000_000),
 ];
 
+/// Where the node may send MCW (an FM carrier with a keyed tone, `[keyer] output =
+/// "ptt"`), in Hz: 47 CFR 97.305(c), from memory, not checked against the eCFR. The
+/// UV-K1's US version transmits on 144-148 and 420-450 MHz (its manual,
+/// documentation/K1_EN.pdf in armel/k1-teardown, `pdftotext -layout` lines
+/// 478-479).
+pub const MCW_BANDS_HZ: [(u64, u64); 4] = [
+    (50_100_000, 54_000_000),
+    (144_100_000, 148_000_000),
+    (222_000_000, 225_000_000),
+    (420_000_000, 450_000_000),
+];
+
+/// What the box keys (`[keyer] output`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Output {
+    /// A radio's key jack: `CW`.
+    #[default]
+    Key,
+    /// An FM handheld's PTT and microphone: `MCW`.
+    Ptt,
+}
+
+impl fmt::Display for Output {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Key => "key",
+            Self::Ptt => "ptt",
+        })
+    }
+}
+
+/// The DC voltage on a handheld's PTT contact (radio on, PTT open) the box may be
+/// connected to: high enough that the sense line reads it high through its
+/// Schottky diode (RP2350 VIH 2 V, datasheet Table 1435, plus the diode), and well
+/// inside the diode's 30 V and the optocoupler's 80 V (docs/keyer.md, "The box").
+pub const PTT_CONTACT_VOLTS: (f32, f32) = (2.5, 25.0);
+
 /// The longest run limit the box may report: [`keyer_core::limits::RUN_MS`].
 pub const MAX_RUN_LIMIT: Duration = Duration::from_millis(keyer_core::limits::RUN_MS as u64);
+/// The longest PTT limit the box may report: [`keyer_core::limits::PTT_MS`], no
+/// longer than the run limit.
+pub const MAX_PTT_LIMIT: Duration = Duration::from_millis(keyer_core::limits::PTT_MS as u64);
 /// The longest key-down limit the box may report: no element is longer than a dash
 /// at 5 wpm (720 ms), and [`keyer_core::limits::KEY_DOWN_MS`] is the box's.
 pub const MAX_KEY_DOWN_LIMIT: Duration =
@@ -108,6 +156,27 @@ pub enum Action {
     Run,
 }
 
+/// With `[keyer] output = "ptt"`, before anything keys: the PTT contact's voltage
+/// recorded, and one the box may be wired to.
+pub fn check_ptt_cable(k: &crate::config::Keyer) -> Result<()> {
+    if k.output != Output::Ptt {
+        return Ok(());
+    }
+    let (lo, hi) = PTT_CONTACT_VOLTS;
+    match k.ptt_contact_volts {
+        None => bail!(
+            "keyer.output is \"ptt\" but keyer.ptt_contact_volts is not recorded: identify \
+             the handheld's contacts and measure its PTT contact first (docs/keyer.md, \"The \
+             cable\"); nothing is keyed until then"
+        ),
+        Some(v) if !(lo..=hi).contains(&v) => bail!(
+            "keyer.ptt_contact_volts {v} is outside {lo}-{hi} V: the box's PTT line cannot be \
+             wired to that contact (docs/keyer.md, \"The cable\")"
+        ),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Whether `action` may run with `[keyer] commissioned` at `stage`.
 pub fn check_stage(stage: Stage, action: Action) -> Result<()> {
     let (needs, name) = match action {
@@ -125,11 +194,16 @@ pub fn check_stage(stage: Stage, action: Action) -> Result<()> {
 }
 
 /// The longest a keyer piece can take at `wpm`, in the box's own timing: 30 zeros,
-/// the slowest characters there are.
-pub fn longest_piece(wpm: u32) -> Option<Duration> {
-    keyer_core::morse::run_ms(&[b'0'; keyer_core::MAX_TEXT], wpm)
+/// the slowest characters there are. With `output = "ptt"`, the PTT time: with the
+/// box's lead and tail.
+pub fn longest_piece(wpm: u32, output: Output) -> Option<Duration> {
+    let morse = keyer_core::morse::run_ms(&[b'0'; keyer_core::MAX_TEXT], wpm)
         .ok()
-        .map(|ms| Duration::from_millis(ms.into()))
+        .map(|ms| Duration::from_millis(ms.into()))?;
+    Some(match output {
+        Output::Key => morse,
+        Output::Ptt => rig::ptt_time(morse),
+    })
 }
 
 /// Room left in `max_key_seconds` after the longest piece, for the radio's
@@ -156,6 +230,24 @@ pub fn validate(cfg: &Config) -> Result<()> {
             s.frequency_hz
         );
     }
+    if k.output == Output::Ptt
+        && !MCW_BANDS_HZ
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&s.frequency_hz))
+    {
+        bail!(
+            "station.frequency_hz {} is outside the segments where MCW is allowed (6 m from \
+             50.1 MHz, 2 m from 144.1 MHz, 1.25 m, 70 cm; 47 CFR 97.305(c)): keyer.output \
+             \"ptt\" sends MCW",
+            s.frequency_hz
+        );
+    }
+    if let Some(v) = k.ptt_contact_volts {
+        let (lo, hi) = PTT_CONTACT_VOLTS;
+        if !(lo..=hi).contains(&v) {
+            bail!("keyer.ptt_contact_volts {v} must be {lo}-{hi} V (docs/keyer.md, \"The cable\")");
+        }
+    }
     if s.serial_port.trim().is_empty() {
         bail!("station.serial_port must name the keyer box's serial port");
     }
@@ -166,19 +258,40 @@ pub fn validate(cfg: &Config) -> Result<()> {
             MAX_RUN_LIMIT.as_secs()
         );
     }
-    // Every piece the station may send must fit the box's run limit and the
-    // station's own watchdog, or a long message could never be keyed.
-    let longest = longest_piece(s.key_speed_wpm).unwrap_or(Duration::MAX);
-    if longest > MAX_RUN_LIMIT {
+    // Every piece the station may send must fit the box's run limit (and for
+    // `MCW` be under its PTT limit) and the station's own watchdog, or a long
+    // message could never be keyed.
+    let longest = longest_piece(s.key_speed_wpm, k.output).unwrap_or(Duration::MAX);
+    let fits = match k.output {
+        Output::Key => longest <= MAX_RUN_LIMIT,
+        Output::Ptt => longest < MAX_PTT_LIMIT.min(MAX_RUN_LIMIT),
+    };
+    if !fits {
         bail!(
             "station.key_speed_wpm {} is too slow for the keyer box: 30 characters can \
-             take {:.0} s, longer than its run limit of {} s (14 wpm or faster)",
+             take {:.0} s{}, {} its run limit of {} s",
             s.key_speed_wpm,
             longest.as_secs_f32(),
+            if k.output == Output::Ptt {
+                " with the PTT's lead and tail"
+            } else {
+                ""
+            },
+            if k.output == Output::Ptt {
+                "not under"
+            } else {
+                "longer than"
+            },
             MAX_RUN_LIMIT.as_secs()
         );
     }
-    let need = longest + KEY_SECONDS_SPARE;
+    // With a handheld, the receive noise must also be heard back after the PTT.
+    let need = longest
+        + KEY_SECONDS_SPARE
+        + match k.output {
+            Output::Key => Duration::ZERO,
+            Output::Ptt => monitor::RX_BACK,
+        };
     if Duration::from_secs(s.max_key_seconds) < need {
         bail!(
             "station.max_key_seconds must be at least {} at {} wpm with the keyer box: \
@@ -230,6 +343,30 @@ pub fn validate(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Why a box tripped, for people: what each `STATUS` trip means.
+pub fn trip_text(t: keyer_core::keyer::Trip) -> &'static str {
+    use keyer_core::keyer::Trip;
+    match t {
+        Trip::None => "not tripped",
+        Trip::Down => "its key (or tone) stayed on past its key-down limit",
+        Trip::Pin => {
+            "its own watch on its pins saw the key or tone pin on for the key-down limit, or \
+             the PTT pin down for the PTT limit"
+        }
+        Trip::Slow => "a pass of its control loop came too late with the key or tone on",
+        Trip::Clock => {
+            "its clock stopped or slowed against the processor's own count, so none of its \
+             time limits could be trusted"
+        }
+        Trip::Watchdog => "it restarted because its watchdog fired: its control loop had stopped",
+        Trip::Ptt => "its PTT stayed down past its PTT limit",
+        Trip::Line => {
+            "the PTT line stayed low after it let the PTT up: something else holds the \
+             radio's PTT, and the radio may still be transmitting"
+        }
+    }
+}
+
 /// Whether a serial port's USB product string is the keyer box's: its firmware
 /// reports [`keyer_core::NAME`] (firmware/pico2-keyer).
 pub fn is_keyer_box(usb_product: &str) -> bool {
@@ -274,6 +411,13 @@ pub fn check_hello(h: &Hello) -> Result<()> {
             "the box's run limit is {} s; it must be 1-{} s",
             h.run_limit.as_secs(),
             MAX_RUN_LIMIT.as_secs()
+        );
+    }
+    if h.ptt_limit.is_zero() || h.ptt_limit > MAX_PTT_LIMIT || h.ptt_limit > h.run_limit {
+        bail!(
+            "the box's PTT limit is {} s; it must be 1-{} s and no longer than its run limit",
+            h.ptt_limit.as_secs(),
+            MAX_PTT_LIMIT.as_secs()
         );
     }
     if h.key_down_limit.is_zero() || h.key_down_limit > MAX_KEY_DOWN_LIMIT {

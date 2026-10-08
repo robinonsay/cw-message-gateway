@@ -112,8 +112,10 @@ const SIDETONE: f32 = 0.3;
 /// Unix time at radio time zero, for the listening schedule: the top of a UTC hour,
 /// so a scenario starts at the beginning of a window.
 const CLOCK_START: u64 = 1_699_999_200;
-/// The node's frequency in every scenario.
+/// The node's frequency in every scenario but a handheld's.
 const FREQUENCY_HZ: u64 = 7_030_000;
+/// A handheld's, on the keyer box's PTT: in the 2 m MCW segment.
+const HANDHELD_FREQUENCY_HZ: u64 = 144_150_000;
 /// How often someone at the radio nudges the dial, in blocks, with
 /// [`RadioSetup::dial_nudges`].
 const NUDGE_BLOCKS: u64 = 10;
@@ -231,6 +233,9 @@ pub struct RadioSetup {
     /// heard through a sound card, instead of the mock IC-7300 (the fields above
     /// are the IC-7300's): see [`any_radio`].
     pub keyer: bool,
+    /// With `keyer`: an FM handheld on the box's PTT (`[keyer] output = "ptt"`),
+    /// keyed in MCW on 2 m and heard by its receive noise going quiet.
+    pub ptt: bool,
     /// The IC-7300's menu settings, as the node's preflight reads them.
     pub menu: Menu,
     /// The IC-7300's TX Inhibit function (16 66) is ON when the node starts.
@@ -247,6 +252,7 @@ impl Default for RadioSetup {
             sidetone: false,
             dial_nudges: false,
             keyer: false,
+            ptt: false,
             menu: Menu::default(),
             tx_inhibit: false,
         }
@@ -750,7 +756,7 @@ enum Heard {
 /// The radio the node drives: the mock IC-7300, or any radio on the keyer box.
 enum AirRadio {
     Ic7300(MockRadio),
-    Keyer(any_radio::KeyerAir),
+    Keyer(Box<any_radio::KeyerAir>),
 }
 
 impl AirRadio {
@@ -1359,7 +1365,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [station]
         node_call = "{NODE_CALL}"
         field_calls = ["{FIELD_CALL}"]
-        frequency_hz = {FREQUENCY_HZ}
+        frequency_hz = {frequency}
         serial_port = "mock"
         power_watts = 40
         key_speed_wpm = {wpm}
@@ -1408,9 +1414,19 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
             true => "rig = \"keyer\"\n        max_key_seconds = 50",
             false => "",
         },
-        keyer = match s.radio.keyer {
-            true => "[keyer]\n        commissioned = \"done\"",
-            false => "",
+        keyer = match (s.radio.keyer, s.radio.ptt) {
+            (true, false) => "[keyer]\n        commissioned = \"done\"",
+            (true, true) => {
+                "[keyer]\n        commissioned = \"done\"\n        output = \"ptt\"\n        \
+                 ptt_contact_volts = 3.3"
+            }
+            (false, _) => "",
+        },
+        // MCW, on 2 m.
+        frequency = if s.radio.ptt {
+            HANDHELD_FREQUENCY_HZ
+        } else {
+            FREQUENCY_HZ
         },
     ))?;
     cfg.state_dir = dir.join("state");

@@ -1,8 +1,9 @@
 //! The keyer rig with the mock box and radio, under the station's safety layer.
 
 use super::*;
-use crate::keyer::mock::RadioSettings;
-use crate::keyer::testbench::{bench, bench_at, radio_secs, tx};
+use crate::keyer::mock::{MockBox, RadioSettings};
+use crate::keyer::testbench::{bench, bench_at, bench_with, handheld, radio_secs, tx, SCALE};
+use crate::keyer::Output;
 use crate::station::TxError;
 
 #[test]
@@ -53,8 +54,12 @@ fn the_link_test_sees_the_box_open_its_key_on_its_own() {
         .count();
     assert_eq!(stops, 0, "{:?}", st.lines);
     drop(st);
-    // And the run's keying still counts against the duty window.
-    assert!(lock(&rig).rest_needed(Duration::from_secs(1)).unwrap() > Duration::ZERO);
+    // And the run's keying still counts against the duty window: a run that
+    // would just fit an empty window has to wait. (Not the box's rest, which is
+    // over 0.1 s of real time after `link_test` returns, however slow the machine.)
+    let r = lock(&rig);
+    let allows = r.s.duty_window.div_f32(r.s.scale).mul_f32(r.s.duty);
+    assert!(r.duty_rest(allows - Duration::from_millis(50)).unwrap() > Duration::ZERO);
 }
 
 #[test]
@@ -288,15 +293,24 @@ fn a_box_whose_control_loop_hangs_is_reset_by_its_watchdog() {
         "{longest} ms"
     );
     drop(st);
-    // The node learns the run ended early, and then, once the audio covers the
-    // time the box went quiet, that the key is open.
+    // The node learns the run ended early; and the box came back tripped
+    // (`WATCHDOG`) with its key open, so that every status read is an error from
+    // then on, for the station to inhibit on.
     let first = r.is_transmitting();
     assert!(first.is_err(), "{first:?}");
     let deadline = Instant::now() + radio_secs(4.0);
-    while r.is_transmitting().unwrap() {
-        assert!(Instant::now() < deadline, "{:?}", r.transmit_detail());
+    let st = loop {
+        if let Ok(st) = r.status() {
+            break st;
+        }
+        assert!(Instant::now() < deadline, "the box did not come back");
         thread::sleep(radio_secs(0.1));
-    }
+    };
+    assert_eq!(st.trip, Trip::Watchdog);
+    assert!(!st.busy());
+    let e = r.is_transmitting().unwrap_err();
+    assert!(e.to_string().contains("watchdog fired"), "{e}");
+    assert!(r.send_cw("TEST").is_err());
 }
 
 #[test]
@@ -482,6 +496,74 @@ fn a_box_that_trips_inhibits_transmitting() {
     assert!(why.contains("tripped"), "{why}");
 }
 
+/// Send the box `lines` with no node attached, as if the node had stopped since.
+fn tell_box(kb: &MockBox, lines: &[&str]) {
+    let mut t = kb.transport();
+    for (id, body) in (1..).zip(lines) {
+        let l = keyer_core::frame::encode(id, format_args!("{body}")).unwrap();
+        t.write_line(l.as_str()).unwrap();
+    }
+}
+
+fn wait_for_box(kb: &MockBox, what: &str, done: impl Fn(&MockBox) -> bool) {
+    let deadline = Instant::now() + radio_secs(5.0);
+    while !done(kb) {
+        assert!(Instant::now() < deadline, "the box did not {what}");
+        thread::sleep(radio_secs(0.1));
+    }
+}
+
+#[test]
+fn a_box_tripped_before_the_node_opens_it_inhibits_and_keys_nothing() {
+    // A box that tripped while no node was attached (the node stopped and was
+    // started again, as systemd does after a crash) is opened, so that the station
+    // latches its inhibit and emails the owner, rather than `run` failing to start
+    // without a word; and nothing is keyed (rubric H4).
+    fn stuck(kb: &MockBox) {
+        tell_box(kb, &["CW 20 PARIS PARIS", "TEST ARM", "TEST STUCK"]);
+        wait_for_box(kb, "trip", |kb| kb.now().trip() == Trip::Down);
+    }
+    fn hung(kb: &MockBox) {
+        tell_box(kb, &["CW 20 PARIS PARIS", "TEST ARM", "TEST HANG"]);
+        wait_for_box(kb, "come back from its watchdog", |kb| {
+            let st = kb.now();
+            st.resets == 1 && st.trip() == Trip::Watchdog && st.connected()
+        });
+    }
+    type Before = fn(&MockBox);
+    let cases: [(&str, Before); 2] = [
+        ("tripped (its key (or tone) stayed on", stuck),
+        ("watchdog fired", hung),
+    ];
+    for (why, before) in cases {
+        let mut b = bench_with(SCALE, Output::Key, |_| {}, before);
+        let lines = b.keyer_box.now().lines.len();
+        {
+            let rig = b.station.rig();
+            let mut r = lock(&rig);
+            let refusal = r.refusal().map(str::to_string);
+            assert!(
+                refusal.as_deref().is_some_and(|w| w.contains(why)),
+                "{refusal:?}"
+            );
+            assert!(r.is_transmitting().is_err());
+        }
+        assert_eq!(
+            b.station.transmit(&tx(&["DE N0DE K"])),
+            Err(TxError::Inhibited)
+        );
+        let inhibit = std::fs::read_to_string(b.inhibit_file()).unwrap();
+        assert!(inhibit.contains(why), "{inhibit}");
+        let st = b.keyer_box.now();
+        assert!(
+            st.lines[lines..].iter().all(|l| !l.contains(" CW ")),
+            "{:?}",
+            &st.lines[lines..]
+        );
+        assert!(!st.key_down());
+    }
+}
+
 #[test]
 fn a_run_stopped_at_full_speed_is_confirmed_on_receive_in_real_time() {
     // At real time: the station's waits between its attempts are wall-clock, and
@@ -494,4 +576,202 @@ fn a_run_stopped_at_full_speed_is_confirmed_on_receive_in_real_time() {
     thread::sleep(Duration::from_millis(400));
     crate::station::force_receive(&mut *r).unwrap();
     assert!(!r.is_transmitting().unwrap());
+}
+
+// An FM handheld on the box's PTT (`[keyer] output = "ptt"`).
+
+#[test]
+fn a_handheld_is_keyed_on_its_ptt_and_heard_going_quiet() {
+    let mut b = handheld(|_| {});
+    b.station.transmit(&tx(&["R 42 DE N0DE K"])).unwrap();
+    let st = b.keyer_box.now();
+    assert!(
+        st.lines.iter().any(|l| l.contains("MCW 20 R 42 DE N0DE K")),
+        "{:?}",
+        st.lines
+    );
+    assert!(!st.lines.iter().any(|l| l.contains(" CW ")));
+    assert_eq!(st.ended(), Ended::Done);
+    let now = b.keyer_box.clock.ms();
+    // The key line never moved; the PTT was held for each run, its tone inside.
+    assert!(st.downs(0, now).is_empty());
+    let run = st.runs.iter().find(|r| r.text == "R 42 DE N0DE K").unwrap();
+    let end = run.end.unwrap();
+    let ptt = st.ptt_downs(run.start, end);
+    assert_eq!(ptt, [(run.start, end)]);
+    let tones = st.tones(run.start, end);
+    assert!(tones[0].0 >= run.start + u64::from(keyer_core::mcw::LEAD_MS));
+    assert!(tones.last().unwrap().1 + u64::from(keyer_core::mcw::TAIL_MS) <= end);
+    drop(st);
+    assert!(!b.station.tx_inhibited());
+    assert!(b.station.can_transmit());
+}
+
+#[test]
+fn a_handheld_counts_all_its_ptt_time_on_the_air() {
+    // MCW on FM is a steady carrier for as long as the PTT is down, lead and tail
+    // too, not only the tone's elements: all of it goes into the duty window, as
+    // the box counts all of it against its duty budget.
+    let mut b = handheld(|_| {});
+    b.station
+        .transmit(&tx(&["R 42 DE N0DE K", "QSL 42 TU K"]))
+        .unwrap();
+    let st = b.keyer_box.now();
+    let ptt = st.ptt_downs(0, b.keyer_box.clock.ms());
+    assert!(ptt.len() >= 2, "{ptt:?}");
+    assert!(st.runs.iter().all(|r| r.ended == Ended::Done));
+    // Between runs, at least the box's rest.
+    for w in ptt.windows(2) {
+        assert!(
+            w[1].0 - w[0].1 >= u64::from(keyer_core::limits::REST_MS),
+            "{ptt:?}"
+        );
+    }
+    let box_ms: u64 = ptt.iter().map(|(s, e)| e - s).sum();
+    drop(st);
+    let rig = b.station.rig();
+    let r = lock(&rig);
+    let on_air: Duration = lock(&r.shared).on_air.iter().map(|(s, e)| *e - *s).sum();
+    let node_ms = on_air.mul_f32(r.s.scale).as_millis() as u64;
+    let slack = 100 * ptt.len() as u64;
+    assert!(
+        node_ms + slack >= box_ms && node_ms <= box_ms + slack,
+        "the node counted {node_ms} ms on the air, the box held the PTT {box_ms} ms"
+    );
+}
+
+#[test]
+fn a_handheld_counts_its_lead_and_tail_against_the_duty_budget() {
+    // 59 s of Morse fits the box's 60 s duty budget on the key line, but not with
+    // a handheld's PTT lead and tail for each of the two runs (an ID and a piece)
+    // the station rests for.
+    let b = bench(|_| {});
+    let rig = b.station.rig();
+    let keying = Duration::from_secs(59).div_f32(lock(&rig).s.scale);
+    assert_eq!(lock(&rig).rest_needed(keying).unwrap(), Duration::ZERO);
+    let b = handheld(|_| {});
+    let rig = b.station.rig();
+    let e = lock(&rig).rest_needed(keying).unwrap_err().to_string();
+    assert!(e.contains("duty budget"), "{e}");
+}
+
+#[test]
+fn a_handheld_with_its_cable_out_is_not_keyed() {
+    let mut b = handheld(|r| r.cable_out = true);
+    let e = b.station.transmit(&tx(&["DE N0DE K"])).unwrap_err();
+    assert!(e.to_string().contains("squelch"), "{e}");
+    assert_eq!(b.cw_lines(), 0);
+    assert!(!b.station.tx_inhibited());
+}
+
+#[test]
+fn a_ptt_line_not_wired_ends_the_run_at_once() {
+    // The sense wire is open: the box's PTT keys the radio, but its line never
+    // reads it, so the box ends the run within 100 ms.
+    let mut b = handheld(|r| r.sense_open = true);
+    let r = b.station.transmit(&tx(&["DE N0DE K"]));
+    assert!(r.is_err(), "{r:?}");
+    let st = b.keyer_box.now();
+    assert_eq!(st.ended(), Ended::Line);
+    let longest = st
+        .ptt_downs(0, b.keyer_box.clock.ms())
+        .iter()
+        .map(|&(a, b)| b - a)
+        .max()
+        .unwrap();
+    assert!(
+        longest <= u64::from(keyer_core::mcw::LINE_MS) + 5,
+        "{longest} ms"
+    );
+    assert!(st.tones(0, b.keyer_box.clock.ms()).is_empty());
+    drop(st);
+    assert!(!b.station.tx_inhibited());
+}
+
+#[test]
+fn a_ptt_held_at_the_handheld_trips_the_box_and_inhibits() {
+    let mut b = handheld(|_| {});
+    let at = b.now() + 1.5;
+    b.radio.set(|r| r.stuck_from = Some(at));
+    assert_eq!(
+        b.station.transmit(&tx(&["DE N0DE N0DE K"])),
+        Err(TxError::Inhibited)
+    );
+    assert_eq!(b.keyer_box.now().trip(), Trip::Line);
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("PTT line"), "{why}");
+}
+
+#[test]
+fn a_ptt_already_held_at_the_handheld_is_found_before_keying() {
+    let b = handheld(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.stuck_from = Some(at));
+    thread::sleep(radio_secs(0.5));
+    assert!(b.station.check().is_err());
+    assert!(b.station.tx_inhibited());
+    assert_eq!(b.cw_lines(), 0);
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("PTT line reads low"), "{why}");
+}
+
+#[test]
+fn a_handheld_transmitting_on_its_own_inhibits_while_idle() {
+    // Its PTT held somewhere the box's line does not see (its own button, VOX):
+    // no receive noise for 30 s.
+    let b = handheld(|r| r.sense_open = true);
+    let at = b.now();
+    b.radio.set(|r| r.stuck_from = Some(at));
+    let deadline = Instant::now() + radio_secs(40.0) + Duration::from_secs(2);
+    while !b.station.tx_inhibited() {
+        assert!(Instant::now() < deadline, "not inhibited");
+        thread::sleep(radio_secs(0.5));
+    }
+    let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
+    assert!(why.contains("no receive noise"), "{why}");
+    assert_eq!(b.cw_lines(), 0);
+}
+
+#[test]
+fn a_handheld_waits_for_a_station_on_the_channel() {
+    let mut b = handheld(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.carrier = Some((at, at + 6.0, 0.0)));
+    thread::sleep(radio_secs(1.5));
+    b.station.transmit(&tx(&["DE N0DE K"])).unwrap();
+    let st = b.keyer_box.now();
+    let first = st.ptt_downs(0, b.keyer_box.clock.ms())[0].0 as f64 / 1000.0;
+    assert!(
+        first >= at + 6.0,
+        "keyed at {first} s, the station left at {}",
+        at + 6.0
+    );
+}
+
+#[test]
+fn a_channel_busy_for_a_minute_gives_the_transmission_up() {
+    // A station with a faint tone on it: quiet enough to quiet the receiver, not
+    // so quiet that the node takes it for its radio's noise gone.
+    let mut b = handheld(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.carrier = Some((at, at + 1000.0, 0.01)));
+    thread::sleep(radio_secs(1.5));
+    let e = b.station.transmit(&tx(&["DE N0DE K"])).unwrap_err();
+    assert!(e.to_string().contains("quiet for 60 s"), "{e}");
+    assert_eq!(b.cw_lines(), 0);
+    assert!(!b.station.tx_inhibited());
+}
+
+#[test]
+fn a_dead_carrier_on_the_channel_for_thirty_seconds_inhibits() {
+    // Known false alarm, the safe way: an unmodulated carrier silences the
+    // receiver exactly as a PTT held at the radio does.
+    let b = handheld(|_| {});
+    let at = b.now();
+    b.radio.set(|r| r.carrier = Some((at, at + 1000.0, 0.0)));
+    let deadline = Instant::now() + radio_secs(40.0) + Duration::from_secs(2);
+    while !b.station.tx_inhibited() {
+        assert!(Instant::now() < deadline, "not inhibited");
+        thread::sleep(radio_secs(0.5));
+    }
 }

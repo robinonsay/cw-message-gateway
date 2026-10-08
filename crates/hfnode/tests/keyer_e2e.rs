@@ -38,6 +38,8 @@ const NAMES: &[&str] = &[
     "keyer-cable-out",
     "keyer-stuck-key",
     "keyer-box-unplugged",
+    "keyer-ht-tx",
+    "keyer-ht-stuck-ptt",
 ];
 
 #[test]
@@ -78,4 +80,14 @@ fn keyer_stuck_key() {
 #[test]
 fn keyer_box_unplugged() {
     run("keyer-box-unplugged");
+}
+
+#[test]
+fn keyer_ht_tx() {
+    run("keyer-ht-tx");
+}
+
+#[test]
+fn keyer_ht_stuck_ptt() {
+    run("keyer-ht-stuck-ptt");
 }

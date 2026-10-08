@@ -296,21 +296,25 @@ enum RadioCmd {
 
 #[derive(Subcommand)]
 enum KeyerCmd {
-    /// Greet the box (its limits, why it last started, its key) and check the
-    /// radio's audio: band level, no key held at the radio. Keys nothing.
+    /// Greet the box (its limits, why it last started, its key and PTT, its PTT
+    /// line) and check the radio's audio: band level, no key held at the radio.
+    /// Keys nothing.
     Check,
-    /// Stop the box and confirm the radio's key open, by the box and the audio.
+    /// Stop the box and confirm the radio's key (or PTT) open, by the box and the
+    /// audio.
     Rx,
     /// Key TEXT through the box with every check `run` makes but the storm
     /// stand-down, and report whether the radio was heard sending it.
     Key { text: String },
-    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch.
+    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch. Not
+    /// for a handheld (`keyer.output = "ptt"`), which has none.
     Sidetone,
     /// Hang the box's control loop mid-run: its watchdog must reset it and open
-    /// the key within 0.5 s. Then identifies.
+    /// the key (or release the PTT) within 0.5 s. Then identifies.
     Hangtest,
-    /// Identify, then make the box hold its key down: its 1 s limit must open the
-    /// key and trip it (unplug it and plug it in again afterwards).
+    /// Identify, then make the box hold its key (or a handheld's tone) down: its
+    /// 1 s limit must open it and trip the box (unplug it and plug it in again
+    /// afterwards).
     Stucktest,
     /// Key a long message and then stop talking to the box: its link timeout must
     /// open the key by itself, as it would if the node died or the cable came out.
@@ -941,10 +945,20 @@ fn verify_setup(cfg: &Config, st: &Station<civ::ic7300::Ic7300>) -> Result<()> {
     Ok(())
 }
 
-fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
-    use civ::Rig;
-    match cfg.station.rig {
-        RigKind::Ic7300 => {}
+/// What `hfnode radio <action>` runs for the configured rig.
+#[derive(Debug, PartialEq)]
+enum RadioRoute {
+    Ic7300,
+    /// `hfnode keyer rx`.
+    KeyerRx,
+}
+
+fn radio_route(rig: RigKind, action: &RadioCmd) -> Result<RadioRoute> {
+    match rig {
+        RigKind::Ic7300 => Ok(RadioRoute::Ic7300),
+        // What the systemd unit and the supervise scripts run after every stop or
+        // crash, whichever the rig (the safety audit's KB-12).
+        RigKind::Keyer if matches!(action, RadioCmd::Rx) => Ok(RadioRoute::KeyerRx),
         RigKind::Keyer => bail!(
             "station.rig is \"keyer\": the radio itself is not controlled; use `hfnode keyer \
              --config C ...` (docs/keyer.md)"
@@ -952,6 +966,13 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         RigKind::Handheld => {
             bail!("station.rig is \"handheld\": use `hfnode handheld ...` (docs/handheld.md)")
         }
+    }
+}
+
+fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
+    use civ::Rig;
+    if radio_route(cfg.station.rig, &action)? == RadioRoute::KeyerRx {
+        return keyer_rx(cfg);
     }
     match action {
         RadioCmd::Status => {
@@ -1265,12 +1286,16 @@ fn serve<R: civ::Rig + 'static>(
         storm,
     } = parts;
     node::spawn_inbound(cfg.clone(), inbox, im);
-    let mut station = Station::new(
-        rig,
-        StationConfig::from_config(&cfg.station),
-        Some(cfg.state_dir.join("health.csv")),
-    );
-    guard_station(&station);
+    let mut on_air = OnAir {
+        station: Station::new(
+            rig,
+            StationConfig::from_config(&cfg.station),
+            Some(cfg.state_dir.join("health.csv")),
+        ),
+        audio: cap,
+    };
+    let station = &mut on_air.station;
+    guard_station(station);
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -1283,17 +1308,30 @@ fn serve<R: civ::Rig + 'static>(
         station.set_storm_hold(hold);
     }
     station.configure()?;
-    verify(&station)?;
-    let cap = match cap {
+    verify(station)?;
+    let cap = match &mut on_air.audio {
         Some(c) => c,
-        None => audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?,
+        none => none.insert(audio::Capture::start(
+            &cfg.audio.device,
+            cfg.audio.sample_rate,
+        )?),
     };
     log::info!(
         "{} listening on {} Hz",
         cfg.station.node_call,
         cfg.station.frequency_hz
     );
-    node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+    node::run(cfg, station, &cap.samples, &mut session, &mut svc)
+}
+
+/// The station and the radio's audio it hears, for `run`. A struct's fields are
+/// dropped in the order they are declared, so the station goes first: its last
+/// receive check, when it is dropped, still hears the radio through the capture
+/// (the keyer rig confirms its key open by the sidetone going quiet; the safety
+/// audit's KB-12).
+struct OnAir<S, A> {
+    station: S,
+    audio: Option<A>,
 }
 
 /// The keyer box and the radio's audio, for a command that may key (`needs`, or
@@ -1305,6 +1343,8 @@ fn open_keyer(
 ) -> Result<(keyer::rig::KeyerRig, Option<audio::Capture>)> {
     let k = keyer_section(cfg)?;
     keyer::check_stage(k.commissioned, needs.unwrap_or(keyer::Action::Run))?;
+    // Everything opened here keys: a handheld's PTT contact must be on record.
+    keyer::check_ptt_cable(k)?;
     let (cap, monitor) = keyer::bench::start_listening(cfg)?;
     let rig = keyer::bench::open_rig(cfg, monitor.clone())?;
     let band = keyer::bench::wait_for_band(&monitor, Duration::from_secs(5));
@@ -1343,18 +1383,34 @@ fn keyer_section(cfg: &Config) -> Result<&hfnode::config::Keyer> {
     cfg.keyer.as_ref().context("no [keyer] section")
 }
 
+/// `hfnode keyer rx`, and `hfnode radio rx` with rig = "keyer": the box's key open
+/// and no sidetone heard, or the transmit inhibit latched. It keys nothing, so it
+/// needs no bring-up stage.
+fn keyer_rx(cfg: &Config) -> Result<()> {
+    use keyer::bench;
+    let k = keyer_section(cfg)?;
+    let (_cap, monitor) = bench::start_listening(cfg)?;
+    let mut rig = bench::open_rig(cfg, monitor)?;
+    bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
+    if k.output == keyer::Output::Ptt {
+        println!(
+            "PTT open: the box is idle, its PTT line reads high and the radio's receive \
+             noise is heard"
+        );
+    } else {
+        println!("key open: the box is idle and no sidetone is heard");
+    }
+    Ok(())
+}
+
 fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
     use keyer::bench;
     let k = keyer_section(cfg)?;
     match action {
-        KeyerCmd::Check | KeyerCmd::Rx => {
+        KeyerCmd::Rx => keyer_rx(cfg),
+        KeyerCmd::Check => {
             let (_cap, monitor) = bench::start_listening(cfg)?;
             let mut rig = bench::open_rig(cfg, monitor)?;
-            if matches!(action, KeyerCmd::Rx) {
-                bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
-                println!("key open: the box is idle and no sidetone is heard");
-                return Ok(());
-            }
             let (report, ok) = bench::check(&mut rig, k.min_level_dbfs);
             print!("{report}");
             println!(
@@ -1378,6 +1434,13 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             };
             if let KeyerCmd::Key { text } = &action {
                 check_key_length(&sanitize(text), k.commissioned)?;
+            }
+            if matches!(action, KeyerCmd::Sidetone) && k.output == keyer::Output::Ptt {
+                bail!(
+                    "keyer.output is \"ptt\": a handheld has no sidetone. `hfnode keyer key` \
+                     reports whether its receive noise went quiet while the box held the PTT, \
+                     and came back after"
+                );
             }
             // The health log and any transmit inhibit are written there.
             check_state_dir(&cfg.state_dir)?;
@@ -1437,7 +1500,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                         bench::stucktest(&mut st, &id, 1.0)?
                     };
                     println!(
-                        "longest sidetone {} ms (limit {} ms)",
+                        "longest on the air {} ms, as its audio shows (limit {} ms)",
                         rep.longest.as_millis(),
                         rep.limit.as_millis()
                     );
@@ -2016,6 +2079,48 @@ key_file = '{}'
             Ok(_) => panic!("the port does not exist"),
         };
         assert!(!e.contains("bring-up stage"), "{e}");
+    }
+
+    #[test]
+    fn radio_rx_checks_the_keyer_box() {
+        // The systemd unit's ExecStopPost and the supervise scripts run `hfnode
+        // radio rx` after every stop or crash (the safety audit's KB-12): with
+        // rig = "keyer" it is `hfnode keyer rx`, which keys nothing and so needs no
+        // bring-up stage. Decided before anything is opened, so no test here opens
+        // a sound card.
+        assert_eq!(
+            radio_route(RigKind::Keyer, &RadioCmd::Rx).unwrap(),
+            RadioRoute::KeyerRx
+        );
+        // Everything else on `radio` is still refused for the keyer.
+        for action in [RadioCmd::Status, RadioCmd::Check, RadioCmd::Tune] {
+            let e = radio_route(RigKind::Keyer, &action)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("not controlled"), "{e}");
+        }
+        assert_eq!(
+            radio_route(RigKind::Ic7300, &RadioCmd::Rx).unwrap(),
+            RadioRoute::Ic7300
+        );
+    }
+
+    #[test]
+    fn the_station_is_dropped_before_the_audio_it_hears() {
+        // `run`'s last receive check, in the station's Drop, must still hear the
+        // radio (the safety audit's KB-12).
+        struct Mark(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Mark {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        drop(OnAir {
+            station: Mark("station", log.clone()),
+            audio: Some(Mark("audio", log.clone())),
+        });
+        assert_eq!(*log.lock().unwrap(), ["station", "audio"]);
     }
 
     #[test]
