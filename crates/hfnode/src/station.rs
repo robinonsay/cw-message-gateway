@@ -4501,8 +4501,10 @@ mod tests {
     #[test]
     fn the_status_is_read_again_once_break_in_is_on() {
         // A radio that reads receive until break-in goes on, then transmit (a key
-        // held closed at its jack): refused before anything is tuned or keyed.
-        struct KeyAtJack(SimRig);
+        // held closed at its jack): refused before anything is tuned or keyed. Also
+        // when the first reading after break-in is a false receive (one flipped bit,
+        // K15; the safety audit's m11): the status is read twice.
+        struct KeyAtJack(SimRig, u32);
         impl Rig for KeyAtJack {
             fn frequency(&mut self) -> civ::Result<u64> {
                 self.0.frequency()
@@ -4547,6 +4549,10 @@ mod tests {
                 self.0.stop_cw()
             }
             fn is_transmitting(&mut self) -> civ::Result<bool> {
+                if self.0.break_in && self.1 > 0 {
+                    self.1 -= 1;
+                    return Ok(false);
+                }
                 Ok(self.0.break_in)
             }
             fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
@@ -4556,21 +4562,27 @@ mod tests {
                 self.0.inhibit_transmit()
             }
         }
-        let mut sim = fast_rig();
-        sim.break_in = false;
-        let mut st = Station::new(KeyAtJack(sim), cfg(), None);
-        assert!(st.start_window().is_err());
-        assert!(st.tx_inhibited());
-        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
-        let rig = st.rig();
-        let r = rig.lock().unwrap();
-        assert_eq!((r.0.tunes, r.0.sent.len()), (0, 0));
-        // Left with break-in off, so the key at the jack no longer transmits.
-        assert!(!r.0.break_in && r.0.tx_inhibit);
-        drop(r);
-        // A check while inhibited does not turn break-in back on.
-        let _ = st.check();
-        assert!(!st.rig().lock().unwrap().0.break_in);
+        for false_rx in [0, 1] {
+            let mut sim = fast_rig();
+            sim.break_in = false;
+            let mut st = Station::new(KeyAtJack(sim, false_rx), cfg(), None);
+            assert!(st.start_window().is_err());
+            assert!(st.tx_inhibited());
+            assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
+            let rig = st.rig();
+            let r = rig.lock().unwrap();
+            assert_eq!(
+                (r.0.tunes, r.0.sent.len()),
+                (0, 0),
+                "{false_rx} false reads"
+            );
+            // Left with break-in off, so the key at the jack no longer transmits.
+            assert!(!r.0.break_in && r.0.tx_inhibit);
+            drop(r);
+            // A check while inhibited does not turn break-in back on.
+            let _ = st.check();
+            assert!(!st.rig().lock().unwrap().0.break_in);
+        }
     }
 
     /// K12: nothing limited the output from above.
@@ -4581,10 +4593,34 @@ mod tests {
         st.rig().lock().unwrap().sim.po_override = Some(90.0);
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighPower(90.0)));
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
-        // At the limit it keys.
-        st.rig().lock().unwrap().sim.po_override = Some(po_limit(40));
+        // At the limit it keys: half as much again as 40 W, and 5 points more
+        // (the safety audit's m12: the trip point is pinned, from both sides).
+        st.rig().lock().unwrap().sim.po_override = Some(65.0);
         st.start_window().unwrap();
         st.transmit(&tx(&["TEST"])).unwrap();
+        st.rig().lock().unwrap().sim.po_override = Some(66.0);
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighPower(66.0)));
+        assert_eq!((po_limit(10), po_limit(100)), (20.0, 155.0));
+    }
+
+    /// K13 and K14 (the safety audit's m09 and m10): the key-down budget and the
+    /// longest transmission a station gets from its configuration.
+    #[test]
+    fn the_duty_budget_and_the_transmission_cap_are_as_documented() {
+        let c: crate::config::Config =
+            toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        let at = |watts: u32| {
+            let mut s = c.station.clone();
+            s.power_watts = watts;
+            StationConfig::from_config(&s)
+        };
+        // Half of any 10 minutes up to 50 W, then less, down to a quarter at 100 W.
+        for (watts, duty) in [(5, 0.5), (10, 0.5), (50, 0.5), (80, 0.3125), (100, 0.25)] {
+            assert_eq!(at(watts).duty, duty, "{watts} W");
+        }
+        assert_eq!(at(10).duty_window, Duration::from_secs(600));
+        assert_eq!(at(10).max_transmission, Duration::from_secs(30 * 60));
+        assert_eq!(at(40).po_limit, 65.0);
     }
 
     #[test]
