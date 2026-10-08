@@ -380,6 +380,8 @@ pub struct Settings {
     pub break_in_delay_level: u16,
     pub tuner: u8,
     pub echo: bool,
+    /// TX Inhibit (16 66) is ON.
+    pub tx_inhibit: bool,
 }
 
 #[derive(Debug)]
@@ -1369,6 +1371,7 @@ impl MockRadio {
             break_in_delay_level: s.break_in_delay,
             tuner: s.tuner,
             echo: s.cfg.echo,
+            tx_inhibit: s.cfg.tx_inhibit,
         }
     }
 

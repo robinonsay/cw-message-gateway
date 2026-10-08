@@ -358,10 +358,10 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, purpose: Purpose) -> Report {
     );
 
     // TX Inhibit ON: the radio "cannot transmit" (p. 13-6, lines 7505-7506), so a
-    // command that transmits would only seem to, and whatever set it (an IC-PW2
-    // locking this exciter out, or a controller that could not get the radio back
-    // to receive) has not been dealt with. `radio check` and `radio setup` transmit
-    // nothing, so for them it is only a warning.
+    // command that transmits would only seem to, and whatever set it (hfnode, when
+    // it inhibited transmitting, or an IC-PW2 locking this exciter out) has not been
+    // dealt with. `radio check` and `radio setup` transmit nothing, so for them it
+    // is only a warning.
     let inhibit_level = match purpose {
         Purpose::Transmit => Level::Fail,
         Purpose::Check | Purpose::Setup => Level::Warn,
@@ -373,7 +373,8 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, purpose: Purpose) -> Report {
             "16 66",
             "ON",
             inhibit_level,
-            "the radio will not transmit; find out why it was set, then clear it",
+            "the radio will not transmit: hfnode sets it when it inhibits transmitting; \
+             once tx-inhibited is dealt with and removed, `hfnode radio setup` clears it",
         ),
         Err(e) => rep.add("TX Inhibit", "16 66", "-", inhibit_level, unread(&e)),
     }

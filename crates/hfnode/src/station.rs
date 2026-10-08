@@ -482,6 +482,19 @@ pub fn force_receive_or_latch<R: Rig + ?Sized>(
     })
 }
 
+/// Latch `inhibit`, and have the radio refuse to transmit on its own as well
+/// ([`Rig::inhibit_transmit`]; the IC-7300: semi break-in off, so a key held closed
+/// at its jack no longer transmits, and TX Inhibit on, so it "cannot transmit"
+/// whatever reaches it, p. 13-6, manual text lines 7505-7506). The radio's TX
+/// Inhibit holds whatever the node's state directory says, until `hfnode radio
+/// setup` turns it off once [`INHIBIT_FILE`] is gone.
+fn latch_at_radio<R: Rig + ?Sized>(r: &mut R, inhibit: &Inhibit, why: &str) {
+    inhibit.latch(why);
+    if let Err(e) = r.inhibit_transmit() {
+        log::error!("inhibiting transmit at the radio: {e}");
+    }
+}
+
 /// [`force_receive`], latching `inhibit` if receive is not confirmed.
 fn force_receive_latching<R: Rig + ?Sized>(r: &mut R, inhibit: &Inhibit) -> Result<(), TxError> {
     force_receive(r).map_err(|e| {
@@ -1080,7 +1093,9 @@ impl<R: Rig + 'static> Station<R> {
                                  keying it: forcing receive"
                             );
                             let _ = force_receive(&mut *r);
-                            inhibit.latch(
+                            latch_at_radio(
+                                &mut *r,
+                                &inhibit,
                                 "the radio transmitted with nothing from the node keying it \
                                  (1C 00 read transmit twice while idle): someone at the radio, \
                                  VOX, a key or PTT line, or another program. Stop hfnode \
@@ -1111,6 +1126,11 @@ impl<R: Rig + 'static> Station<R> {
     fn with_rig<T>(&self, f: impl FnOnce(&mut R) -> civ::Result<T>) -> civ::Result<T> {
         let mut r = self.rig.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut r)
+    }
+
+    /// Inhibit transmitting, here and at the radio ([`latch_at_radio`]).
+    fn latch(&self, why: &str) {
+        latch_at_radio(&mut *lock(&self.rig), &self.tx_inhibit, why);
     }
 
     fn health(&self, event: &str, value: &str) {
@@ -1386,7 +1406,7 @@ impl<R: Rig + 'static> Station<R> {
             stopped = 0;
             if Instant::now() >= limit {
                 self.health("tune", "not-stopped");
-                self.tx_inhibit.latch(&why);
+                self.latch(&why);
                 return Err(TxError::Inhibited);
             }
             thread::sleep(self.cfg.poll);
@@ -1718,7 +1738,7 @@ impl<R: Rig + 'static> Station<R> {
         self.faults += 1;
         if self.faults >= FAULTS_TO_LATCH {
             self.health("faults", &self.faults.to_string());
-            self.tx_inhibit.latch(&format!(
+            self.latch(&format!(
                 "{what}: {} faults in a row with no transmission going out whole between \
                  them, so the next tune would only key into the same fault",
                 self.faults
@@ -1913,7 +1933,7 @@ impl<R: Rig + 'static> Station<R> {
             if before.min(after) >= min_po {
                 if !tx {
                     self.health("tx-status", "rx-with-output");
-                    self.tx_inhibit.latch(
+                    self.latch(
                         "radio reads receive (1C 00) while the Po meter shows output: its \
                          transmit status cannot be trusted",
                     );
@@ -2286,7 +2306,10 @@ mod tests {
             "{log}"
         );
         assert!(dir.path().join(INHIBIT_FILE).exists());
-        assert!(st.rig().lock().unwrap().sim.sent.is_empty());
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert!(r.sim.sent.is_empty());
+        assert!(r.sim.tx_inhibit && !r.sim.break_in, "and at the radio");
     }
 
     #[test]
@@ -2756,6 +2779,11 @@ mod tests {
                 let why = notices.try_recv().unwrap().reason;
                 assert!(why.contains("2 faults in a row"), "{a}, {b}: {why}");
                 assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+                // At the radio too: a key held closed at it no longer transmits, and
+                // its TX Inhibit holds whatever state directory a later run uses.
+                let rig = st.rig();
+                let r = rig.lock().unwrap();
+                assert!(r.sim.tx_inhibit && !r.sim.break_in, "{a}, {b}");
             }
         }
     }
@@ -3267,6 +3295,7 @@ mod tests {
         let r = rig.lock().unwrap();
         assert_eq!(r.sim.sent.len(), 2, "stopped in the second piece");
         assert!(!r.sim.keyer_busy());
+        assert!(r.sim.tx_inhibit && !r.sim.break_in, "and at the radio");
     }
 
     #[test]
@@ -4054,6 +4083,7 @@ mod tests {
         let rig = st.rig();
         let mut r = rig.lock().unwrap();
         assert!(!r.is_transmitting().unwrap(), "forced to receive");
+        assert!(r.tx_inhibit && !r.break_in, "and inhibited at the radio");
     }
 
     #[test]

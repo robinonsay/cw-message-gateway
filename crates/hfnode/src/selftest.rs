@@ -363,7 +363,9 @@ pub struct Expect {
     /// The node forced the radio to receive (stopped the keyer with `17 FF`) while
     /// it ran, as it must after any fault and never otherwise.
     pub forced_receive: bool,
-    /// The node inhibited transmitting until restart.
+    /// The node inhibited transmitting until restart. It leaves the radio's semi
+    /// break-in off, and, if it latched the inhibit while it ran, the radio's own
+    /// TX Inhibit on (16 66 01).
     pub inhibited: bool,
     /// `DE <call>` keyed right after a tune: one per tune that matched when the node
     /// started listening (at start-up or a window's start; a tune before a reply is
@@ -1725,7 +1727,7 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
 
-    out.checks.push(settings_check(&cfg, &settings));
+    out.checks.push(settings_check(&cfg, s, &settings));
     out.checks.push(forced_receive_check(e, stops, "17 FF"));
     out.checks
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
@@ -2083,7 +2085,12 @@ fn station_id_check(
 /// The radio as the node left it: on the configured frequency, in CW with FIL1, semi
 /// break-in, and the power, keyer speed and break-in delay the node sets. Levels are
 /// read back on the mock's own scales (p. 19-3): 0-100 W, 6-48 wpm, 2-13 dots.
-fn settings_check(cfg: &Config, s: &Settings) -> Check {
+/// The radio as the node left it: set up as configured, with semi break-in on
+/// unless the node is inhibited, and the radio's own TX Inhibit on only if the node
+/// latched the inhibit while it ran.
+fn settings_check(cfg: &Config, scenario: &Scenario, s: &Settings) -> Check {
+    let e = &scenario.expect;
+    let radio_inhibited = e.inhibited && !scenario.node.inhibited_at_start;
     let st = &cfg.station;
     let watts = s.rf_power_level as f32 * 100.0 / 255.0;
     let wpm = 6.0 + s.key_speed_level as f32 * 42.0 / 255.0;
@@ -2099,8 +2106,16 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
             s.mode, s.filter
         ));
     }
-    if s.break_in != 0x01 {
-        bad.push(format!("BK-IN {:02X}, not semi", s.break_in));
+    let break_in = if e.inhibited { 0x00 } else { 0x01 };
+    if s.break_in != break_in {
+        bad.push(format!("BK-IN {:02X}, not {break_in:02X}", s.break_in));
+    }
+    if s.tx_inhibit != radio_inhibited {
+        bad.push(format!(
+            "TX Inhibit {}, not {}",
+            on_off(s.tx_inhibit),
+            on_off(radio_inhibited)
+        ));
     }
     // Within half a level of what was asked for.
     if (watts - st.power_watts as f32).abs() > 0.25 {
@@ -2115,13 +2130,28 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
         ));
     }
     let detail = format!(
-        "{} Hz, CW FIL{}, {watts:.0} W, {wpm:.1} wpm, semi break-in {dots:.1} dots",
-        s.frequency_hz, s.filter
+        "{} Hz, CW FIL{}, {watts:.0} W, {wpm:.1} wpm, {} break-in {dots:.1} dots, TX Inhibit {}",
+        s.frequency_hz,
+        s.filter,
+        match s.break_in {
+            0x00 => "no",
+            0x01 => "semi",
+            _ => "full",
+        },
+        on_off(s.tx_inhibit)
     );
     if bad.is_empty() {
         check("settings", true, detail)
     } else {
         check("settings", false, format!("{}; {detail}", bad.join("; ")))
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "ON"
+    } else {
+        "OFF"
     }
 }
 
@@ -3273,26 +3303,35 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
-        // After the first tune and ID: the read-back sticks.
-        s.script.insert(
-            0,
+        // After the first tune and ID: the read-back sticks. Locked out from then
+        // until the next tune (the safety audit's K7), the node commits the OK it
+        // hears but keys nothing, however often it is repeated.
+        s.script = vec![
             Step::Inject(Fault::StickInTx {
                 skip: 0,
                 carrier,
                 recoverable: true,
             }),
-        );
+            s.script[0].clone(),
+            Step::Unanswered {
+                text: "OK 43 {43} K".into(),
+                tries: 2,
+            },
+        ];
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.forced_receive = true;
         s
     };
     v.push(stuck(
         "fault-stuck-tx",
-        "the radio stays on transmit after the read-back; the node forces receive and carries on",
+        "the radio stays on transmit after the read-back: the node forces receive and keys \
+         nothing more until its next tune, so the OK reaches the gateway and SENT is not keyed",
         false,
     ));
     v.push(stuck(
         "fault-stuck-key",
-        "the key sticks down after the read-back; the node forces receive within the stuck margin",
+        "the key sticks down after the read-back: the node forces receive within the stuck \
+         margin and keys nothing more until its next tune",
         true,
     ));
     v.push({
