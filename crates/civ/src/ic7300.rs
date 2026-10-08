@@ -136,6 +136,11 @@ mod cmd {
     /// codes; "“FF” stops sending CW messages" (p. 19-13).
     pub const SEND_CW: &[u8] = &[0x17];
     pub const STOP_CW: u8 = 0xFF;
+    /// 16 66: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; manual
+    /// text lines 8788-8789). "When the exciter tries to transmit, “TX Inhibit” is
+    /// displayed and cannot transmit" (p. 13-14, lines 7500-7506; described there
+    /// for the IC-PW2's transmitter lockout, and not yet checked on the radio).
+    pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
     /// 1C 00: "Send/read transceiver's status" "00" RX, "01" TX (p. 19-7).
     pub const TX_STATUS: &[u8] = &[0x1C, 0x00];
     /// 1C 01: "00=Send/read the antenna tuner OFF, 01=Send/read the antenna tuner ON,
@@ -542,6 +547,13 @@ impl<P: Port> Ic7300<P> {
         self.read_byte(cmd::TIME_OUT_TIMER, 0x00..=0x05)
     }
 
+    /// 16 66 00: the TX Inhibit function off again, once a person has checked a
+    /// radio the node turned it on in ([`Rig::inhibit_transmit`]). Only `hfnode
+    /// radio setup` sends it.
+    pub fn release_tx_inhibit(&mut self) -> Result<()> {
+        self.set(cmd::TX_INHIBIT, &[0x00])
+    }
+
     /// 1A 05 00 78, 00 79, 00 80: the USB control-line settings.
     pub fn usb_lines(&mut self) -> Result<UsbLines> {
         Ok(UsbLines {
@@ -720,6 +732,35 @@ impl<P: Port> Rig for Ic7300<P> {
             ));
         }
         self.set(cmd::TX_STATUS, &[0x00])
+    }
+
+    /// 1C 00 is one short read.
+    fn polls_status_while_idle(&self) -> bool {
+        true
+    }
+
+    /// 1A 05 00 29 "00=OFF, 01=3 min., 02=5 min., 03=10min., 04=20 min., 05=30 min."
+    /// (p. 19-4; manual text lines 8861-8863), which applies to "transmitting
+    /// initiated by a CI-V command or pushing TRANSMIT" (p. 12-5; line 6283).
+    fn time_out_timer(&mut self) -> Result<Option<Duration>> {
+        let minutes = [0, 3, 5, 10, 20, 30][Ic7300::time_out_timer(self)? as usize];
+        Ok(Some(Duration::from_secs(minutes * 60)))
+    }
+
+    /// 14 0A "Send/read [RF PWR] position" (p. 19-3; line 8677), on the scale
+    /// [`power_level`] sends.
+    fn rf_power_watts(&mut self) -> Result<Option<f32>> {
+        Ok(Some(self.rf_power_level()? as f32 * 100.0 / 255.0))
+    }
+
+    /// 16 47 00 "BK-IN OFF" (p. 19-3; line 8776): without break-in a keyer message
+    /// is not transmitted (footnote *2, p. 19-8) and a key held closed only sounds
+    /// the sidetone (p. 4-15; lines 2833-2836). Then 16 66 01, TX Inhibit ON (lines
+    /// 8788-8789). Each is sent whether or not the other was taken.
+    fn inhibit_transmit(&mut self) -> Result<()> {
+        let off = self.set_break_in(false);
+        let inhibit = self.set(cmd::TX_INHIBIT, &[0x01]);
+        off.and(inhibit)
     }
 }
 

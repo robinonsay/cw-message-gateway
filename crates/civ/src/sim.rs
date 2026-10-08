@@ -37,6 +37,18 @@ pub struct SimRig {
     pub tuner_bypassed: bool,
     /// Someone at the radio switched split on, transmitting on this frequency.
     pub split_tx_hz: Option<u64>,
+    /// Something other than the node keys the radio (its TRANSMIT switch, a key at
+    /// its jack): on transmit, with output, until switched to receive.
+    pub keyed_elsewhere: bool,
+    /// The radio's own Time-Out Timer; `Some(ZERO)` is OFF.
+    pub time_out_timer: Option<Duration>,
+    /// What the RF power reads back as, if not what was set.
+    pub power_read_back: Option<f32>,
+    /// What the Po meter reads with the key down, if not the power set.
+    pub po_override: Option<f32>,
+    /// [`Rig::inhibit_transmit`] was sent: break-in off and TX Inhibit on. Nothing
+    /// keyed after it goes out.
+    pub tx_inhibit: bool,
     /// Simulated speed-up: keying takes `real time / time_scale`.
     pub time_scale: f32,
     keying: Option<Keying>,
@@ -80,6 +92,11 @@ impl Default for SimRig {
             tx_jammed: false,
             tuner_bypassed: false,
             split_tx_hz: None,
+            keyed_elsewhere: false,
+            time_out_timer: Some(Duration::from_secs(180)),
+            power_read_back: None,
+            po_override: None,
+            tx_inhibit: false,
             time_scale: 1.0,
             keying: None,
             forced_tx: false,
@@ -138,7 +155,7 @@ impl SimRig {
 
     fn key_down(&self, now: Instant) -> bool {
         let stuck = self.stuck_key && self.keying.as_ref().is_some_and(|k| now >= k.start);
-        stuck || self.phase(now).key_down
+        stuck || self.keyed_elsewhere || self.phase(now).key_down
     }
 
     /// Whether the keyer still has text to send.
@@ -218,7 +235,7 @@ impl Rig for SimRig {
 
     fn read_po(&mut self) -> Result<f32> {
         Ok(if self.key_down(Instant::now()) {
-            self.power_watts as f32
+            self.po_override.unwrap_or(self.power_watts as f32)
         } else {
             0.0
         })
@@ -228,7 +245,7 @@ impl Rig for SimRig {
         if text.len() > MAX_CW_CHARS {
             return Err(RigError::Rejected);
         }
-        if !self.cw_mode || !self.break_in {
+        if !self.cw_mode || !self.break_in || self.tx_inhibit {
             // A real radio would not transmit; make the mistake visible in tests.
             return Err(RigError::Protocol(
                 "send_cw without CW mode and break-in".into(),
@@ -266,6 +283,7 @@ impl Rig for SimRig {
     fn is_transmitting(&mut self) -> Result<bool> {
         Ok(self.tx_jammed
             || self.forced_tx
+            || self.keyed_elsewhere
             || self.stuck_key && self.keying.is_some()
             || self.phase(Instant::now()).tx)
     }
@@ -275,7 +293,28 @@ impl Rig for SimRig {
         if !tx {
             self.keying = None;
             self.stuck_key = false;
+            self.keyed_elsewhere = false;
         }
+        Ok(())
+    }
+
+    fn polls_status_while_idle(&self) -> bool {
+        true
+    }
+
+    fn time_out_timer(&mut self) -> Result<Option<Duration>> {
+        Ok(self.time_out_timer)
+    }
+
+    fn rf_power_watts(&mut self) -> Result<Option<f32>> {
+        Ok(Some(
+            self.power_read_back.unwrap_or(self.power_watts as f32),
+        ))
+    }
+
+    fn inhibit_transmit(&mut self) -> Result<()> {
+        self.break_in = false;
+        self.tx_inhibit = true;
         Ok(())
     }
 }

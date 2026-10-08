@@ -1,7 +1,10 @@
 use super::mock::{MockFirmware, Off};
 use super::*;
 use crate::session::Transmission;
-use crate::station::{Station, StationConfig, TxError, ID_INTERVAL};
+use crate::station::{
+    duty_for_power, po_limit, Station, StationConfig, TxError, DUTY_WINDOW, ID_INTERVAL,
+    MAX_TRANSMISSION,
+};
 use crate::storm::StormHold;
 
 /// Morse goes this many times faster than real time, in the firmware and the rig.
@@ -510,6 +513,11 @@ fn station_cfg() -> StationConfig {
         poll: Duration::from_millis(2),
         station_id: "DE N0DE".into(),
         id_interval: ID_INTERVAL.div_f32(SCALE),
+        po_limit: po_limit(5),
+        duty: duty_for_power(5),
+        duty_window: DUTY_WINDOW.div_f32(SCALE),
+        max_transmission: MAX_TRANSMISSION.div_f32(SCALE),
+        radio_wait: Duration::from_secs(10),
     }
 }
 

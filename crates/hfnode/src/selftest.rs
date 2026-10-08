@@ -645,6 +645,19 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn transmit_detail(&mut self) -> Option<String> {
         self.inner.transmit_detail()
     }
+    fn polls_status_while_idle(&self) -> bool {
+        self.inner.polls_status_while_idle()
+    }
+    /// A setting, not a time the station waits: not scaled.
+    fn time_out_timer(&mut self) -> civ::Result<Option<Duration>> {
+        self.inner.time_out_timer()
+    }
+    fn rf_power_watts(&mut self) -> civ::Result<Option<f32>> {
+        self.inner.rf_power_watts()
+    }
+    fn inhibit_transmit(&mut self) -> civ::Result<()> {
+        self.inner.inhibit_transmit()
+    }
 }
 
 /// A scratch directory, removed when dropped.
@@ -1414,9 +1427,12 @@ fn station_config(cfg: &Config, scale: f32) -> StationConfig {
         &mut sc.tune_timeout,
         &mut sc.poll,
         &mut sc.id_interval,
+        &mut sc.duty_window,
+        &mut sc.max_transmission,
     ] {
         *d = d.div_f32(scale);
     }
+    // Not `radio_wait`: how long a call to the radio may hold it is real time.
     sc
 }
 

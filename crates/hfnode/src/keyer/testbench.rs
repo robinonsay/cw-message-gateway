@@ -4,7 +4,10 @@ use super::mock::{Clock, MockBox, MockRadio, RadioSettings};
 use super::monitor::{self, Monitor};
 use super::rig::{KeyerRig, Settings};
 use crate::session::Transmission;
-use crate::station::{Station, StationConfig, ID_INTERVAL, INHIBIT_FILE};
+use crate::station::{
+    duty_for_power, po_limit, Station, StationConfig, DUTY_WINDOW, ID_INTERVAL, INHIBIT_FILE,
+    MAX_TRANSMISSION,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -39,6 +42,11 @@ pub fn cfg_at(scale: f32) -> StationConfig {
         poll: secs(0.1),
         station_id: "DE N0DE".into(),
         id_interval: ID_INTERVAL.div_f32(scale),
+        po_limit: po_limit(5),
+        duty: duty_for_power(5),
+        duty_window: DUTY_WINDOW.div_f32(scale),
+        max_transmission: MAX_TRANSMISSION.div_f32(scale),
+        radio_wait: Duration::from_secs(10),
     }
 }
 
