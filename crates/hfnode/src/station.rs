@@ -2495,6 +2495,7 @@ mod tests {
             on: true,
             rig: fast_rig(),
             tx_hz: None,
+            poll_idle: false,
         };
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
@@ -2585,6 +2586,7 @@ mod tests {
             on: true,
             rig: fast_rig(),
             tx_hz: None,
+            poll_idle: false,
         };
         let mut st = Station::new(rig, cfg(), None);
         st.configure().unwrap();
@@ -2931,6 +2933,23 @@ mod tests {
         /// is still on transmit for its break-in delay, is held up this long (the
         /// station's thread descheduled on a busy computer).
         hold_up_in_hang: Option<Duration>,
+        /// A tuner stuck "tuning" stops once a stop command comes.
+        tune_ends_on_stop: bool,
+        /// The next this many status reads answer receive whatever the radio is
+        /// doing: a reply whose 01 lost a bit (CI-V has no checksum).
+        false_rx: u32,
+        /// As `false_rx`, but only reads taken with the keyer finished and the radio
+        /// still on transmit.
+        false_rx_after_keyer: u32,
+        /// The next this many status reads answer transmit.
+        false_tx: u32,
+        /// The next this many tuner reads answer "not tuning".
+        false_tuner_done: u32,
+        /// Whether the watchdog reads the status while idle
+        /// ([`Rig::polls_status_while_idle`]).
+        poll_idle: bool,
+        /// The transmitter jams on with the next piece.
+        jam_on_send: bool,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -2967,6 +2986,13 @@ mod tests {
                 sent_at: Vec::new(),
                 rests: None,
                 hold_up_in_hang: None,
+                tune_ends_on_stop: false,
+                false_rx: 0,
+                false_rx_after_keyer: 0,
+                false_tx: 0,
+                false_tuner_done: 0,
+                poll_idle: false,
+                jam_on_send: false,
             }
         }
 
@@ -3019,7 +3045,12 @@ mod tests {
             if self.tuner_unreadable_after_stop && self.stopped_since_tune {
                 return Err(RigError::Timeout);
             }
-            Ok(self.tuner_stuck || self.sim.tuner_busy()?)
+            if self.false_tuner_done > 0 {
+                self.false_tuner_done -= 1;
+                return Ok(false);
+            }
+            let stuck = self.tuner_stuck && !(self.tune_ends_on_stop && self.stopped_since_tune);
+            Ok(stuck || self.sim.tuner_busy()?)
         }
         fn tuner_matched(&mut self) -> civ::Result<bool> {
             if self.matched_unreadable {
@@ -3061,6 +3092,7 @@ mod tests {
         fn send_cw(&mut self, text: &str) -> civ::Result<()> {
             self.hang_until = None;
             self.sim.send_cw(text)?;
+            self.sim.tx_jammed |= self.jam_on_send;
             if let Some((n, swr)) = self.swr_after.filter(|(n, _)| self.sim.sent.len() > *n) {
                 self.sim.swr = swr;
                 let _ = n;
@@ -3099,14 +3131,39 @@ mod tests {
             if self.status_blind || self.blind_after.is_some_and(|n| self.sim.sent.len() > n) {
                 return Ok(false);
             }
+            if self.false_rx > 0 {
+                self.false_rx -= 1;
+                return Ok(false);
+            }
+            if self.false_tx > 0 {
+                self.false_tx -= 1;
+                return Ok(true);
+            }
             let hanging = self.hang_until.is_some_and(|t| Instant::now() < t);
-            Ok(hanging || self.sim.is_transmitting()?)
+            let tx = hanging || self.sim.is_transmitting()?;
+            if tx && !self.sim.keyer_busy() && self.false_rx_after_keyer > 0 {
+                self.false_rx_after_keyer -= 1;
+                return Ok(false);
+            }
+            Ok(tx)
         }
         fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
             if !tx {
                 self.hang()?;
             }
             self.sim.set_transmit(tx)
+        }
+        fn polls_status_while_idle(&self) -> bool {
+            self.poll_idle
+        }
+        fn time_out_timer(&mut self) -> civ::Result<Option<Duration>> {
+            self.sim.time_out_timer()
+        }
+        fn rf_power_watts(&mut self) -> civ::Result<Option<f32>> {
+            self.sim.rf_power_watts()
+        }
+        fn inhibit_transmit(&mut self) -> civ::Result<()> {
+            self.sim.inhibit_transmit()
         }
     }
 
@@ -3316,6 +3373,8 @@ mod tests {
         on: bool,
         rig: SimRig,
         tx_hz: Option<u64>,
+        /// [`Rig::polls_status_while_idle`], as the IC-7300's driver answers.
+        poll_idle: bool,
     }
 
     impl Switchable {
@@ -3381,6 +3440,9 @@ mod tests {
             let rig = self.rig()?;
             tx_hz.map_or_else(|| rig.transmit_frequency(), Ok)
         }
+        fn polls_status_while_idle(&self) -> bool {
+            self.poll_idle
+        }
         fn split_or_delta_tx(&mut self) -> civ::Result<bool> {
             self.rig()?.split_or_delta_tx()
         }
@@ -3392,6 +3454,7 @@ mod tests {
             on: true,
             rig: fast_rig(),
             tx_hz: None,
+            poll_idle: false,
         };
         let mut st = Station::new(rig, cfg(), None);
         let (to, notices) = mpsc::channel();
@@ -3933,5 +3996,426 @@ mod tests {
         assert!(!r.sent.is_empty() && r.sent.len() < 16, "{:?}", r.sent);
         assert!(!r.keyer_busy() && !r.is_transmitting().unwrap());
         assert!(!st.tx_inhibited());
+    }
+
+    /// Wait up to `limit` for `f`.
+    fn eventually(limit: Duration, f: impl Fn() -> bool) -> bool {
+        let until = Instant::now() + limit;
+        while Instant::now() < until {
+            if f() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        f()
+    }
+
+    /// The safety audit's K4: a call to the radio that never returns holds its lock.
+    /// The watchdog must not wait for it for ever: it latches the inhibit without
+    /// the radio, and forces receive once it can.
+    #[test]
+    fn the_watchdog_latches_without_a_radio_it_cannot_reach() {
+        let mut c = cfg();
+        c.radio_wait = Duration::from_millis(200);
+        let st = Station::new(fast_rig(), c, None);
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        let rig = st.rig();
+        let held = rig.lock().unwrap();
+        *st.keying_since.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+        let why = notices
+            .recv_timeout(Duration::from_secs(3))
+            .expect("latched while the radio is held")
+            .reason;
+        assert!(why.contains("could not be reached"), "{why}");
+        // Once the call returns, receive is forced and the watchdog stops.
+        drop(held);
+        assert!(eventually(Duration::from_secs(3), || st
+            .keying_since
+            .lock()
+            .unwrap()
+            .is_none()));
+    }
+
+    /// K9: nothing watched the IC-7300 while the node was not keying, so a key held
+    /// closed, VOX or someone at the radio went unseen until the next check.
+    #[test]
+    fn a_transmission_the_node_did_not_start_is_stopped_and_latches() {
+        let st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        st.rig().lock().unwrap().keyed_elsewhere = true;
+        let why = notices
+            .recv_timeout(Duration::from_secs(4))
+            .expect("found within a few seconds")
+            .reason;
+        assert!(why.contains("nothing from the node keying it"), "{why}");
+        let rig = st.rig();
+        let mut r = rig.lock().unwrap();
+        assert!(!r.is_transmitting().unwrap(), "forced to receive");
+    }
+
+    #[test]
+    fn one_transmit_reading_while_idle_is_not_enough() {
+        // K15: CI-V has no checksum, so one bad reply proves nothing.
+        let mut rig = Radio::new(fast_rig());
+        rig.poll_idle = true;
+        let st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().false_tx = 1;
+        thread::sleep(Duration::from_secs(3));
+        assert_eq!(st.rig().lock().unwrap().false_tx, 0, "read while idle");
+        assert!(!st.tx_inhibited());
+        // Twice in a row is.
+        st.rig().lock().unwrap().false_tx = 2;
+        assert!(eventually(Duration::from_secs(4), || st.tx_inhibited()));
+    }
+
+    #[test]
+    fn a_radio_that_stops_answering_while_idle_is_found_within_seconds() {
+        let rig = Switchable {
+            on: true,
+            rig: fast_rig(),
+            tx_hz: None,
+            poll_idle: true,
+        };
+        let st = Station::new(rig, cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().on = false;
+        // IDLE_ERRORS reads a second apart, then the forced receive.
+        assert!(eventually(Duration::from_secs(9), || st.tx_inhibited()));
+    }
+
+    /// K8: semi break-in goes on last, so a key held closed at the radio starts
+    /// transmitting only once the settings are sent: read the status after them,
+    /// and when receive cannot be confirmed, turn break-in off and TX Inhibit on.
+    #[test]
+    fn the_status_is_read_again_once_break_in_is_on() {
+        // A radio that reads receive until break-in goes on, then transmit (a key
+        // held closed at its jack): refused before anything is tuned or keyed.
+        struct KeyAtJack(SimRig);
+        impl Rig for KeyAtJack {
+            fn frequency(&mut self) -> civ::Result<u64> {
+                self.0.frequency()
+            }
+            fn set_frequency(&mut self, hz: u64) -> civ::Result<()> {
+                self.0.set_frequency(hz)
+            }
+            fn set_mode_cw(&mut self) -> civ::Result<()> {
+                self.0.set_mode_cw()
+            }
+            fn set_rf_power_watts(&mut self, w: u32) -> civ::Result<()> {
+                self.0.set_rf_power_watts(w)
+            }
+            fn set_key_speed(&mut self, wpm: u32) -> civ::Result<()> {
+                self.0.set_key_speed(wpm)
+            }
+            fn set_break_in(&mut self, on: bool) -> civ::Result<()> {
+                self.0.set_break_in(on)
+            }
+            fn set_break_in_delay(&mut self, dots: f32) -> civ::Result<()> {
+                self.0.set_break_in_delay(dots)
+            }
+            fn dot_duration(&mut self) -> civ::Result<Duration> {
+                self.0.dot_duration()
+            }
+            fn start_tune(&mut self) -> civ::Result<()> {
+                self.0.start_tune()
+            }
+            fn tuner_busy(&mut self) -> civ::Result<bool> {
+                self.0.tuner_busy()
+            }
+            fn read_swr(&mut self) -> civ::Result<f32> {
+                self.0.read_swr()
+            }
+            fn read_po(&mut self) -> civ::Result<f32> {
+                self.0.read_po()
+            }
+            fn send_cw(&mut self, text: &str) -> civ::Result<()> {
+                self.0.send_cw(text)
+            }
+            fn stop_cw(&mut self) -> civ::Result<()> {
+                self.0.stop_cw()
+            }
+            fn is_transmitting(&mut self) -> civ::Result<bool> {
+                Ok(self.0.break_in)
+            }
+            fn set_transmit(&mut self, tx: bool) -> civ::Result<()> {
+                self.0.set_transmit(tx)
+            }
+            fn inhibit_transmit(&mut self) -> civ::Result<()> {
+                self.0.inhibit_transmit()
+            }
+        }
+        let mut sim = fast_rig();
+        sim.break_in = false;
+        let mut st = Station::new(KeyAtJack(sim), cfg(), None);
+        assert!(st.start_window().is_err());
+        assert!(st.tx_inhibited());
+        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.0.tunes, r.0.sent.len()), (0, 0));
+        // Left with break-in off, so the key at the jack no longer transmits.
+        assert!(!r.0.break_in && r.0.tx_inhibit);
+        drop(r);
+        // A check while inhibited does not turn break-in back on.
+        let _ = st.check();
+        assert!(!st.rig().lock().unwrap().0.break_in);
+    }
+
+    /// K12: nothing limited the output from above.
+    #[test]
+    fn output_above_the_set_power_stops_keying() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().sim.po_override = Some(90.0);
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighPower(90.0)));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::SwrLockout));
+        // At the limit it keys.
+        st.rig().lock().unwrap().sim.po_override = Some(po_limit(40));
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+    }
+
+    #[test]
+    fn a_power_setting_that_does_not_read_back_is_not_keyed() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().power_read_back = Some(41.5);
+        let e = st.transmit(&tx(&["TEST"])).unwrap_err();
+        assert!(e.to_string().contains("RF power reads back 41.5 W"), "{e}");
+        assert!(st.start_window().is_err());
+        st.rig().lock().unwrap().power_read_back = Some(40.6);
+        st.start_window().unwrap();
+        st.transmit(&tx(&["TEST"])).unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.tunes, r.sent.len()), (1, 1));
+    }
+
+    /// K9: the Time-Out Timer was read once, at start-up.
+    #[test]
+    fn the_time_out_timer_is_read_before_every_tune_and_transmission() {
+        let mut st = Station::new(fast_rig(), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        for tot in [Some(Duration::ZERO), Some(Duration::from_secs(300))] {
+            st.rig().lock().unwrap().time_out_timer = tot;
+            match st.transmit(&tx(&["E"])) {
+                Err(TxError::NotReady(e)) => assert!(e.contains("Time-Out Timer"), "{e}"),
+                r => panic!("{tot:?}: {r:?}"),
+            }
+            assert!(st.start_window().is_err(), "{tot:?}");
+            st.rig().lock().unwrap().time_out_timer = Some(REQUIRED_TOT);
+            st.start_window().unwrap();
+        }
+        // A rig with no such setting.
+        st.rig().lock().unwrap().time_out_timer = None;
+        st.start_window().unwrap();
+        st.transmit(&tx(&["E"])).unwrap();
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!((r.tunes, r.sent.len()), (4, 1));
+    }
+
+    /// K13: no key-down budget.
+    #[test]
+    fn the_duty_budget_holds_keying_on_receive() {
+        let mut c = cfg();
+        (c.duty, c.duty_window) = (0.5, Duration::from_millis(1500));
+        let mut st = Station::new(fast_rig(), c, None);
+        st.configure().unwrap();
+        // The budget used up just now: the next piece waits for it to come back.
+        st.record_carrier(Duration::from_millis(750));
+        let t0 = Instant::now();
+        st.transmit(&tx(&["E"])).unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(1400),
+            "{:?}",
+            t0.elapsed()
+        );
+        // Carrier that could never fit is refused.
+        let e = st.duty_rest(Duration::from_secs(1)).unwrap_err();
+        assert!(e.to_string().contains("duty budget"), "{e}");
+        assert_eq!(duty_for_power(10), 0.5);
+        assert_eq!(duty_for_power(100), 0.25);
+    }
+
+    #[test]
+    fn the_duty_budget_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("health.csv");
+        {
+            let mut st = Station::new(fast_rig(), cfg(), Some(log.clone()));
+            st.configure().unwrap();
+            st.transmit(&tx(&["TEST TEST"])).unwrap();
+            st.record_carrier(Duration::from_secs(100));
+        }
+        let text = std::fs::read_to_string(dir.path().join(DUTY_FILE)).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        let st = Station::new(fast_rig(), cfg(), Some(log));
+        let used = st.duty.used(DUTY_WINDOW);
+        assert!(used >= Duration::from_secs(100), "{used:?}");
+        // What left the window is dropped.
+        let duty = DutyLog::load(Some(dir.path().join(DUTY_FILE)), Duration::ZERO);
+        assert!(duty.keyed.is_empty());
+    }
+
+    #[test]
+    fn a_transmission_longer_than_the_limit_is_not_keyed() {
+        let mut c = cfg();
+        c.max_transmission = Duration::from_millis(500);
+        let mut st = Station::new(fast_rig(), c, None);
+        st.configure().unwrap();
+        let long = tx(&["THIS ONE IS FAR TOO LONG", "TO KEY IN HALF A SECOND HERE"]);
+        assert!(matches!(st.transmit(&long), Err(TxError::TooLong { .. })));
+        st.transmit(&tx(&["E"])).unwrap();
+        assert_eq!(st.rig().lock().unwrap().sent, ["E"]);
+    }
+
+    /// K14: at 18 wpm 30 zeros take 44 s, against the 45 s watchdog with the
+    /// break-in delay and stuck margin still to come.
+    #[test]
+    fn a_piece_that_would_outlast_the_watchdog_is_split() {
+        let mut c = cfg();
+        c.max_key = Duration::from_millis(1000);
+        let mut st = Station::new(fast_rig(), c.clone(), None);
+        st.configure().unwrap();
+        let dot = st.rig().lock().unwrap().dot_duration().unwrap();
+        let zeros = "0".repeat(30);
+        let pieces = st.pieces(&format!("AB {zeros}"), dot);
+        assert!(pieces.len() > 2, "{pieces:?}");
+        for p in &pieces {
+            assert!(st.keying_bound(&[p.clone()], dot) <= c.max_key, "{p}");
+        }
+        assert_eq!(pieces.concat().replace(' ', ""), format!("AB{zeros}"));
+        st.transmit(&tx(&[&zeros])).unwrap();
+        assert!(!st.watchdog_fired.load(Ordering::SeqCst));
+        // A watchdog shorter than one character (a bench test of it): left whole.
+        let mut short = c;
+        short.max_key = Duration::from_millis(100);
+        let st = Station::new(fast_rig(), short, None);
+        assert_eq!(st.pieces(&zeros, dot), [zeros.clone()]);
+        assert!(shortest_max_key(18) < Duration::from_secs(5));
+        assert!(shortest_max_key(6) > Duration::from_secs(8));
+    }
+
+    /// K15: one reading of receive (a transmit reply with a bit lost) confirmed it.
+    #[test]
+    fn one_receive_reading_does_not_confirm_receive() {
+        let mut r = Radio::new(fast_rig());
+        r.sim.tx_jammed = true;
+        r.false_rx = 1;
+        assert!(force_receive(&mut r).is_err());
+        let mut rig = Radio::new(fast_rig());
+        rig.sim.tx_jammed = true;
+        let st = Station::new(rig, cfg(), None);
+        st.rig().lock().unwrap().false_rx = 1;
+        assert_eq!(
+            st.wait_for_receive(Instant::now() + Duration::from_millis(200)),
+            Err(TxError::Stuck)
+        );
+    }
+
+    #[test]
+    fn one_receive_reading_does_not_end_a_piece() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        {
+            // On transmit, without output, from the piece on, whatever it is told.
+            let rig = st.rig();
+            let mut r = rig.lock().unwrap();
+            r.jam_on_send = true;
+            r.false_rx_after_keyer = 1;
+        }
+        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::Inhibited));
+        assert_eq!(st.rig().lock().unwrap().false_rx_after_keyer, 0);
+    }
+
+    #[test]
+    fn one_not_tuning_reading_does_not_confirm_the_tuner_stopped() {
+        let mut rig = Radio::new(fast_rig());
+        rig.tuner_stuck = true;
+        rig.false_tuner_done = 1;
+        let st = Station::new(rig, quick_tune(), None);
+        assert_eq!(
+            st.confirm_tuner_stopped(Instant::now()),
+            Err(TxError::Inhibited)
+        );
+        // Nor does it end a tune.
+        let mut rig = Radio::new(fast_rig());
+        rig.tuner_stuck = true;
+        let mut st = Station::new(rig, quick_tune(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().false_tuner_done = 1;
+        assert!(st.start_window().is_err());
+        assert!(st.tx_inhibited(), "still tuning");
+    }
+
+    /// K16: the watchdog did not time tunes, and the storm hold was not checked
+    /// while one ran.
+    #[test]
+    fn the_watchdog_times_a_tune() {
+        let mut rig = Radio::new(fast_rig());
+        (rig.tuner_stuck, rig.tune_ends_on_stop) = (true, true);
+        let mut c = cfg();
+        c.max_key = Duration::from_millis(300);
+        let mut st = Station::new(rig, c, None);
+        st.configure().unwrap();
+        let t0 = Instant::now();
+        let e = st.start_window().unwrap_err().to_string();
+        assert!(e.contains("max_key_seconds"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+        assert!(!st.tx_inhibited());
+        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::SwrLockout));
+    }
+
+    #[test]
+    fn a_storm_during_a_tune_stops_waiting_for_it_without_a_fault() {
+        let mut st = Station::new(Radio::new(SimRig::new()), cfg(), None);
+        st.configure().unwrap();
+        let hold = StormHold::new(Duration::from_secs(60));
+        hold.set(None);
+        st.set_storm_hold(hold.clone());
+        for _ in 0..FAULTS_TO_LATCH {
+            let setter = {
+                let hold = hold.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(300));
+                    hold.set(Some("thunder".into()));
+                })
+            };
+            let t0 = Instant::now();
+            let e = st.start_window().unwrap_err().to_string();
+            setter.join().unwrap();
+            assert!(e.contains("storm stand-down"), "{e}");
+            // Stopped well before the tune's 1.5 s, but waited for the tuner to stop.
+            assert!(!st.tuned());
+            assert!(
+                t0.elapsed() >= Duration::from_millis(1400),
+                "{:?}",
+                t0.elapsed()
+            );
+            hold.set(None);
+        }
+        assert!(!st.tx_inhibited(), "a storm is not the radio's fault");
+        assert_eq!(st.transmit(&tx(&["E"])), Err(TxError::SwrLockout));
+        st.start_window().unwrap();
+        st.transmit(&tx(&["E"])).unwrap();
+    }
+
+    /// K4: no flush, so no wait without a limit while the radio's lock is held:
+    /// pinned in civ's own tests, where a flush panics.
+    #[test]
+    fn lock_within_gives_up() {
+        let m = Mutex::new(());
+        let held = m.lock().unwrap();
+        let t0 = Instant::now();
+        assert!(lock_within(&m, Duration::from_millis(100)).is_none());
+        assert!(t0.elapsed() >= Duration::from_millis(100));
+        drop(held);
+        assert!(lock_within(&m, Duration::ZERO).is_some());
     }
 }
