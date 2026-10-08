@@ -922,7 +922,9 @@ pub struct Station<R: Rig + 'static> {
     /// sent, whether or not their replies came back); zero between transmissions.
     tx_keying: Duration,
     /// A tune is under way: the watchdog times it against `tune_timeout`, not
-    /// `max_key`.
+    /// `max_key`. Set before `keying_since` as the tune starts, and dropped with
+    /// `keying_since` held once the window start is done with the tune; the
+    /// watchdog reads the two with `keying_since` held.
     tuning: Arc<AtomicBool>,
     /// For [`StationConfig::duty`].
     duty: DutyLog,
@@ -1085,14 +1087,19 @@ impl<R: Rig + 'static> Station<R> {
             let (mut at_radio, mut told) = (false, false);
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(WATCHDOG_TICK);
-                let started = *lock(&since);
+                // Read together, with `since` held, as the station changes `tuning`:
+                // never the keying from before a tune ended and the flag from after.
+                let (started, limit) = {
+                    let keying = lock(&since);
+                    let limit = match tuning.load(Ordering::SeqCst) {
+                        true => tune_limit,
+                        false => max,
+                    };
+                    (*keying, limit)
+                };
                 if started.is_some() {
                     (ticks, keyed, failed) = (0, 0, 0);
                 }
-                let limit = match tuning.load(Ordering::SeqCst) {
-                    true => tune_limit,
-                    false => max,
-                };
                 if started.is_some_and(|t| t.elapsed() > limit) {
                     log::error!("watchdog: keying exceeded {limit:?}, forcing receive");
                     fired.store(true, Ordering::SeqCst);
@@ -1457,14 +1464,18 @@ impl<R: Rig + 'static> Station<R> {
                     .and(Err(e))
             }
         };
-        if !self.tx_inhibited() {
+        let inhibited = self.tx_inhibited();
+        let mut since = lock(&self.keying_since);
+        if !inhibited {
             // Not confirmed on receive leaves it to the watchdog to keep trying.
-            *lock(&self.keying_since) = None;
+            *since = None;
         }
-        // Only now, with the keying above cleared or left to the watchdog: had the
-        // tune ended first, a watchdog tick in between would time the tune's
-        // keying against `max_key` and force receive after a good tune.
+        // Only now, with the keying above cleared or left to the watchdog, and in
+        // the same hold of it: had the tune ended first, a watchdog tick in between
+        // would time the tune's keying against `max_key` and force receive after a
+        // good tune.
         self.tuning.store(false, Ordering::SeqCst);
+        drop(since);
         result
     }
 
