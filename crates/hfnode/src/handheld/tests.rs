@@ -736,7 +736,151 @@ fn ids_stay_on_time_under_the_duty_cycle_with_runs_that_overrun() {
     }
 }
 
+/// The most the whole test process may stop, in any [`PAUSE_WINDOW`] of a
+/// transmission, for the ID test to judge it: under the least slack the test's
+/// timing leaves, the 100 ms `run_slack` the node allows past a run's text less the
+/// 30 ms overrun (a longer stop as a run ends has the node stop it for going on too
+/// long), with room for the node's own polling and the firmware's replies. The IDs
+/// leave more: on an idle machine each ends about 1.4 s after the one before, for
+/// the 1.6 s allowed.
+const PAUSE_LIMIT: Duration = Duration::from_millis(50);
+/// Longer than anything the ID test times: an ID interval with the 100 ms it
+/// allows (1.6 s), or a run up to the node's deadline for it.
+const PAUSE_WINDOW: Duration = Duration::from_secs(2);
+/// How often the pause meter looks at the clock.
+const PAUSE_TICK: Duration = Duration::from_millis(5);
+/// Times the ID test runs a transmission again after one the machine paused in.
+/// The last run is judged, paused or not.
+const NOT_JUDGED_RERUNS: usize = 2;
+
+/// Measures how long the whole test process stops running, as the self-test's
+/// pause meter does (`selftest::any_radio::PauseMeter`): a thread that looks at the
+/// clock every [`PAUSE_TICK`] and keeps the gaps past that. Nothing the node does
+/// holds it up; only the machine can (a CI runner stops the whole process for
+/// tens to hundreds of milliseconds now and then).
+struct PauseMeter {
+    stop: Arc<AtomicBool>,
+    /// Every pause of [`PAUSE_TICK`] or more: when it ended, and how long.
+    thread: Option<JoinHandle<Vec<(Instant, Duration)>>>,
+}
+
+impl PauseMeter {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let mut pauses = Vec::new();
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(PAUSE_TICK);
+                    let now = Instant::now();
+                    let gap = (now - last).saturating_sub(PAUSE_TICK);
+                    if gap >= PAUSE_TICK {
+                        pauses.push((now, gap));
+                    }
+                    last = now;
+                }
+                pauses
+            })
+        };
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stop measuring: every pause of [`PAUSE_TICK`] or more, as (when it ended,
+    /// how long).
+    fn pauses(mut self) -> Vec<(Instant, Duration)> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for PauseMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The most of `pauses` (each as when it ended, and how long) in any `window`: the
+/// most lies in a window that ends where a pause ends, or starts where one starts.
+fn most_paused_in(pauses: &[(Instant, Duration)], window: Duration) -> Duration {
+    let spans: Vec<(Instant, Instant)> = pauses
+        .iter()
+        .map(|&(end, gap)| (end.checked_sub(gap).unwrap_or(end), end))
+        .collect();
+    let within = |from: Instant, to: Instant| -> Duration {
+        spans
+            .iter()
+            .map(|&(s, e)| e.min(to).saturating_duration_since(s.max(from)))
+            .sum()
+    };
+    spans
+        .iter()
+        .flat_map(|&(s, e)| {
+            [
+                within(e.checked_sub(window).unwrap_or(e), e),
+                within(s, s + window),
+            ]
+        })
+        .max()
+        .unwrap_or_default()
+}
+
+/// Runs the ID test's transmission until one is judged: a run the machine paused in
+/// for [`PAUSE_LIMIT`] or more in any [`PAUSE_WINDOW`] is not judged, pass or fail,
+/// and runs again, up to [`NOT_JUDGED_RERUNS`] times; the last run is judged
+/// whatever it measured. Each run's pauses are printed.
 fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
+    for run in 0..=NOT_JUDGED_RERUNS {
+        let (result, pauses) = ids_on_time_once(overrun);
+        let longest = pauses.iter().map(|p| p.1).max().unwrap_or_default();
+        let most = most_paused_in(&pauses, PAUSE_WINDOW);
+        let paused = most >= PAUSE_LIMIT;
+        let measured = format!(
+            "overrun {overrun:?}, run {} of at most {}: the test process stopped {} times, \
+             longest {:.3} s, {:.3} s in any {:.0} s (limit {:.3} s)",
+            run + 1,
+            NOT_JUDGED_RERUNS + 1,
+            pauses.len(),
+            longest.as_secs_f32(),
+            most.as_secs_f32(),
+            PAUSE_WINDOW.as_secs_f32(),
+            PAUSE_LIMIT.as_secs_f32()
+        );
+        let judged = !paused || run == NOT_JUDGED_RERUNS;
+        println!(
+            "{measured}: {}, {}",
+            match (judged, paused) {
+                (false, _) => "not judged",
+                (true, false) => "judged",
+                (true, true) => "judged, as the last run allowed",
+            },
+            match &result {
+                Ok(ends) => format!("passed: {ends}"),
+                Err(e) => format!("failed: {e}"),
+            }
+        );
+        if judged {
+            if let Err(e) = result {
+                panic!("{e} ({measured})");
+            }
+            return;
+        }
+    }
+}
+
+/// One transmission of the ID test, with the pauses of the test process while it
+/// was under way: an error says what was late, or what failed.
+fn ids_on_time_once(overrun: Duration) -> (Result<String, String>, Vec<(Instant, Duration)>) {
     let mut set = settings();
     // 0.5 s on the air (real) in any 1 s, and an ID due every 1.5 s.
     set.duty = 0.5;
@@ -750,30 +894,52 @@ fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
         .map(|i| format!("TEST TEST TEST = {}", (b'A' + i) as char))
         .collect();
     segments.last_mut().unwrap().push_str(" DE N0DE K");
+    let meter = PauseMeter::start();
     let start = Instant::now();
-    st.transmit(&Transmission {
+    let sent = st.transmit(&Transmission {
         segments,
         read_ids: Vec::new(),
-    })
-    .unwrap();
-    let runs = fw.runs();
+    });
+    let pauses = meter.pauses();
+    (on_time(sent, &fw.runs(), start, interval), pauses)
+}
+
+/// Whether a transmission `sent` from `start` went out whole, and keyed the ID
+/// (or its end) within `interval` of its start and of each ID before: how long
+/// after each the next ended, or what was late.
+fn on_time(
+    sent: Result<(), TxError>,
+    runs: &[super::mock::Run],
+    start: Instant,
+    interval: Duration,
+) -> Result<String, String> {
+    sent.map_err(|e| format!("the transmission failed: {e:?}"))?;
     let ids = runs.iter().filter(|r| r.text == "DE N0DE").count();
-    assert!(ids >= 2, "{ids} IDs in {:?}", start.elapsed());
+    if ids < 2 {
+        return Err(format!("{ids} IDs in {:?}", start.elapsed()));
+    }
     // From the start, and from each ID, the next ID (or the end) is keyed within
     // the interval, rests on receive included.
     let mut since = start;
+    let mut ends = Vec::new();
     for (i, r) in runs.iter().enumerate() {
         if r.text == "DE N0DE" || i + 1 == runs.len() {
-            let end = r.off.unwrap().0;
-            assert!(
-                end <= since + interval + Duration::from_millis(100),
-                "run {i} {:?} ends {:?} after the last ID",
-                r.text,
-                end - since
-            );
+            let end = r.off.ok_or(format!("run {i} {:?} never ended", r.text))?.0;
+            if end > since + interval + Duration::from_millis(100) {
+                return Err(format!(
+                    "run {i} {:?} ends {:?} after the last ID",
+                    r.text,
+                    end - since
+                ));
+            }
+            ends.push(format!("{:.3} s", (end - since).as_secs_f32()));
             since = r.on;
         }
     }
+    Ok(format!(
+        "{ids} IDs; each, and the end, ended {} after the start or the ID before",
+        ends.join(", ")
+    ))
 }
 
 #[test]
