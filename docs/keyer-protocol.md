@@ -71,9 +71,11 @@ through its headset jack").
   character, 3 between characters, 7 between words. hfnode computes the same
   timeline, so it knows when each element is keyed.
 - `MCW`: the same text rules and timing, for an FM handheld. Refused (`LINE`)
-  while the PTT line reads low: the radio off, the cable out, or the PTT already
-  held. A run closes the PTT, waits 500 ms (the radio coming up on transmit, the
-  far squelch opening), keys the Morse on the tone, waits 200 ms and opens the PTT.
+  while the PTT line reads low: the PTT already held, or the radio off if its
+  contact then reads low. A cable out reads high on the line's pull-up, so it is
+  not refused here: the check 100 ms after the PTT closes ends that run (below).
+  A run closes the PTT, waits 500 ms (the radio coming up on transmit, the far
+  squelch opening), keys the Morse on the tone, waits 200 ms and opens the PTT.
   Its PTT time (500 ms, the Morse, 200 ms) must be under the PTT limit and the run
   limit (`LIMIT`) and within the duty budget (`DUTY`): the whole PTT time counts,
   because an FM transmitter's carrier is on for all of it. 100 ms after the PTT
@@ -107,7 +109,7 @@ Errors are `ERR <command> <code>`:
 | `ERR CW REST` | the rest after the last run is not over |
 | `ERR CW DUTY` | its key-down time is more than the duty budget allows |
 | `ERR MCW <code>` | as for `CW`, with `LIMIT` for a PTT time not under the PTT limit, `DUTY` for one the budget does not hold, and: |
-| `ERR MCW LINE` | the PTT line reads low: the radio off, the cable out, or the PTT held |
+| `ERR MCW LINE` | the PTT line reads low: the PTT held, or the radio off |
 | `ERR TEST RUN` | a test outside a run (`TEST HOLD`: outside an `MCW` run) |
 | `ERR TEST ARM` | a test that no `TEST ARM` armed, or armed over 2 s ago |
 | `ERR <word> UNKNOWN` | a command the box does not know |

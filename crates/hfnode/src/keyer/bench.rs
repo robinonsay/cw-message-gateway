@@ -498,13 +498,35 @@ pub const STOP_NOW: &str = "THE RADIO MAY STILL BE TRANSMITTING: pull the key pl
 fn identify_first(st: &mut Station<KeyerRig>, id: &str) -> Result<(Judge, Vec<String>)> {
     let judge = key(st, id)?.context("no audio covering the identification")?;
     if !judge.heard {
-        bail!(
-            "the identification was not heard ({}): the test cannot measure the sidetone, so it \
-             would prove nothing; run `hfnode keyer sidetone` first",
-            judge.why_not().unwrap_or_else(|| "see above".into())
-        );
+        let output = lock(&st.rig()).output();
+        bail!(not_heard_first(
+            output,
+            &judge.why_not().unwrap_or_else(|| "see above".into())
+        ));
     }
     Ok((judge, vec![format!("identified first: {id}")]))
+}
+
+/// What checks the audio a box test measures by, for this `output`: a handheld has
+/// no sidetone, and `hfnode keyer sidetone` refuses it.
+fn audio_check(output: Output) -> &'static str {
+    match output {
+        Output::Key => "`hfnode keyer sidetone`",
+        Output::Ptt => "`hfnode keyer check`, then `hfnode keyer key \"TEST\"`",
+    }
+}
+
+/// Why a box test stops when its identification was not heard (`why`).
+fn not_heard_first(output: Output, why: &str) -> String {
+    let what = match output {
+        Output::Key => "the sidetone",
+        Output::Ptt => "the radio's receive noise going quiet",
+    };
+    format!(
+        "the identification was not heard ({why}): the test cannot measure {what}, so it \
+         would prove nothing; run {} first",
+        audio_check(output)
+    )
 }
 
 /// Wait out the box's rest and the duty window (and, with a handheld, a busy
@@ -514,6 +536,27 @@ fn rest(st: &Station<KeyerRig>, keying: Duration) -> Result<()> {
     let mut r = lock(&rig);
     r.wait_rest(keying)?;
     Ok(())
+}
+
+/// What `hfnode keyer linktest` keys: long enough to outlast the box's link timeout.
+pub const LINK_TEST_TEXT: &str = "TTTT TTTT TTTT TTTT";
+
+/// `hfnode keyer linktest`: the node keys [`LINK_TEST_TEXT`] and then says nothing
+/// more, and the box must open its key (or let its PTT up) by itself within its
+/// link timeout, reporting the run ended `LINK` ([`KeyerRig::link_test`]); how long
+/// that took. The test text carries no call, so the node then identifies, but only
+/// once the audio shows the radio back on receive: before that the station takes
+/// the radio for transmitting by itself, and refuses. A radio not confirmed back on
+/// receive latches the transmit inhibit in `state_dir`, as `hfnode keyer rx` does.
+pub fn linktest(st: &mut Station<KeyerRig>, id: &str, state_dir: &Path) -> Result<Duration> {
+    let rig = st.rig();
+    let waited = lock(&rig).link_test(LINK_TEST_TEXT)?;
+    let inhibit = InhibitLatch::in_dir(state_dir);
+    force_receive_or_latch(&mut *lock(&rig), &inhibit).context(
+        "the box opened its key by itself, but the radio's key is not confirmed open after it",
+    )?;
+    key(st, id).context("the box passed the link test, but identifying after it failed")?;
+    Ok(waited)
 }
 
 /// `hfnode keyer hangtest`: the box's control loop hangs mid-run with its key
@@ -605,7 +648,7 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
             trip.map_or("unread", |t| t.as_str())
         ));
     }
-    let measured = check_measured(longest, span, &mut notes);
+    let measured = check_measured(longest, span, lock(&rig).output(), &mut notes);
     Ok(TestReport {
         longest,
         limit,
@@ -615,14 +658,20 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
 }
 
 /// Whether the test measured the key down at all, and within its span.
-fn check_measured(longest: Duration, span: Duration, notes: &mut Vec<String>) -> bool {
+fn check_measured(
+    longest: Duration,
+    span: Duration,
+    output: Output,
+    notes: &mut Vec<String>,
+) -> bool {
     if longest < MIN_TEST_TONE {
         notes.push(format!(
             "nothing measured: the longest the audio showed the radio on the air (its sidetone, or \
              a handheld's receive noise gone) was {} ms, under the {} ms a key held down must \
-             give; check the audio (`hfnode keyer sidetone`) and run the test again",
+             give; check the audio ({}) and run the test again",
             longest.as_millis(),
-            MIN_TEST_TONE.as_millis()
+            MIN_TEST_TONE.as_millis(),
+            audio_check(output)
         ));
         return false;
     }
@@ -689,7 +738,7 @@ pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Tes
     } else {
         notes.push("the box did not trip".into());
     }
-    let measured = check_measured(longest, span, &mut notes);
+    let measured = check_measured(longest, span, lock(&rig).output(), &mut notes);
     Ok(TestReport {
         longest,
         limit,

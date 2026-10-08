@@ -63,6 +63,35 @@ fn the_link_test_sees_the_box_open_its_key_on_its_own() {
 }
 
 #[test]
+fn the_link_test_times_the_key_open_from_the_last_line_before_its_status() {
+    // The box's link timeout runs from the last line it took. The node used to time
+    // it from the `STATUS` it sends after waiting that timeout out, so it put the
+    // key open about 2 s late: the monitor looked for the radio back on receive
+    // that much later, and the run counted as keying for that much longer.
+    for b in [bench(|_| {}), handheld(|_| {})] {
+        let rig = b.station.rig();
+        lock(&rig).link_test("TTTT TTTT TTTT TTTT").unwrap();
+        // Past where the late time put it.
+        thread::sleep(radio_secs(3.0));
+        let r = lock(&rig);
+        let allows = r.s.duty_window.div_f32(r.s.scale).mul_f32(r.s.duty);
+        // The box's 2 s link timeout keyed, not 4.5 s and more: on a handheld the
+        // PTT is down throughout; on a key line only the dahs count, 0.9 s of the
+        // first 2 s at 20 wpm and 2.0 s of the first 4.5 s.
+        let most = match r.s.output {
+            Output::Ptt => radio_secs(3.0),
+            Output::Key => radio_secs(1.5),
+        };
+        assert_eq!(
+            r.duty_rest(allows - most).unwrap(),
+            Duration::ZERO,
+            "{:?}",
+            r.s.output
+        );
+    }
+}
+
+#[test]
 fn the_link_test_fails_on_a_box_that_keeps_keying() {
     // A box whose link timeout never fires: the node must say so, not pass.
     let b = bench(|_| {});

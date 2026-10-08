@@ -5,7 +5,10 @@
 > driven with its stock firmware through its headset jack, by the keyer box: see
 > [A handheld through its headset jack](keyer.md#a-handheld-through-its-headset-jack)
 > in keyer.md, which also has the jack's wiring from evidence and the checks to make
-> on your own cable. The code below stays, tested against simulations only.
+> on your own cable. The code below stays, tested against simulations only. The
+> stock firmware's settings that can transmit by themselves are in
+> [The stock firmware's own transmissions](#the-stock-firmwares-own-transmissions)
+> at the end.
 
 `hfnode` can drive a Quansheng handheld (a UV-K1 or UV-K5 v3; not the older UV-K5,
 which has a different processor, from memory) instead of the IC-7300, so that the
@@ -237,3 +240,36 @@ official online code of federal regulations):
   to answer while you are away is automatic control, which Part 97 allows only for
   some kinds of station (97.109(d)); that question is open for the HF node too. Until
   it is settled, run it on a handheld only while you are with it.
+
+## The stock firmware's own transmissions
+
+For a UV-K1 on its stock firmware, driven through its K-plug by the keyer box. These
+are the settings, modes and keys with which the radio transmits by itself, or keys
+somewhere other than the agreed frequency, whatever the box does. The box's limits
+do not cover them and the node cannot read them, so they are checked at the radio
+every session, with the rest of the list in
+[Setting up the radio, every session](keyer.md#setting-up-the-radio-every-session)
+in keyer.md. Line numbers are in the radio's manual, `K1_EN.txt`.
+
+- **WX (menu 18) OFF**, no "DW" on the display. At CHAN_A or CHAN_B, every
+  transmission goes out on that channel, whatever the main channel shows (:299-302,
+  :345-351).
+- **TDR (menu 17) OFF**, and channel B set to the same frequency as A (F+2, enter
+  it, F+2 back). With dual watch, the channel that last heard a call becomes the
+  transmit channel for a while, shown as ">" (:240-242, :353-361); with B on A's
+  frequency, a ">" cannot send anywhere else.
+- **D-DCD OFF (menu 43) and D-RSP NULL (menu 39)** (:304, :311). With DTMF decoding
+  on and the response at REPLY or BOTH, the radio answers a DTMF call with an
+  automatic callback (:411-419).
+- **Not scanning (long *), not in NOAA (F+5) or FM-radio (F+0) mode, and NOAA_S
+  (menu 49) OFF** (:287, :325, :429, :464). In each, the PTT answers the call it
+  found or leaves the mode for a call on the channel (:432-436, :459-461).
+- **AL-MOD SITE (menu 34)**: at TONE, the alarm transmits (:294).
+- **VOX OFF (menu 15)**: with VOX on, any sound into the microphone keys the radio
+  (:285). F+7 toggles it (:282), so the keypad is locked, last of all (long #,
+  :468).
+- **The side keys are not covered by the keypad lock** (:467-469). Side key 1 held
+  transmits a 1750 Hz tone, side key 2 held sounds the alarm (:212-215), and side
+  key 2 pressed while the PTT is held enters Air Copy, from which MENU sends the
+  radio's settings on 410.0125 MHz (:461-470). While anything can hold the PTT, the
+  radio lies on its back with nothing pressing on its sides.

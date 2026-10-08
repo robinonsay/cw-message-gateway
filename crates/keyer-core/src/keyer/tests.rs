@@ -4,12 +4,12 @@ use crate::frame::encode;
 /// The radio on the box's PTT output, as the PTT line reads it.
 #[derive(Debug, Clone, Copy, Default)]
 struct Radio {
-    /// Switched off, or the cable out: the line reads low.
+    /// Switched off, its contact then reading low.
     off: bool,
     /// Something other than the box holds the PTT: the line reads low.
     held: bool,
     /// The box's PTT does not reach the radio (an optocoupler open, a broken
-    /// wire): the line stays high.
+    /// wire, the cable out): the line stays high, on GP19's pull-up.
     open: bool,
 }
 
@@ -960,7 +960,7 @@ fn mcw_refusals_and_its_length_under_both_limits() {
 #[test]
 fn mcw_waits_for_the_ptt_line_and_spends_the_duty_budget() {
     let mut b = Bench::ptt();
-    // Radio off or the cable out: the line is low, nothing keys.
+    // Radio off, its contact reading low: nothing keys.
     b.radio.off = true;
     assert_eq!(b.send(10, "MCW 20 E").unwrap(), "ERR MCW LINE");
     assert!(b.changes.is_empty());

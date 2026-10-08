@@ -1485,18 +1485,13 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                     Ok(())
                 }
                 KeyerCmd::Linktest => {
-                    let rig = st.rig();
-                    let waited = rig
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .link_test("TTTT TTTT TTTT TTTT")?;
+                    let waited = bench::linktest(&mut st, &id, &cfg.state_dir)?;
                     println!(
                         "passed: the box opened its key by itself within {:.1} s of the node's \
                          last line, and reports the run ended by the link going quiet",
                         waited.as_secs_f32()
                     );
                     // The test text carries no call.
-                    bench::key(&mut st, &id)?;
                     println!("identified: {id}");
                     Ok(())
                 }
