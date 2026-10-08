@@ -373,8 +373,9 @@ the air.
 | `hfnode keyer --config C rx` | no | Stop the box and confirm the key is open, by the box and by the radio's audio. |
 | `hfnode keyer --config C key TEXT` | **yes** | Key TEXT through the box with every check `run` makes but the storm stand-down; report whether the radio was heard sending it. |
 | `hfnode keyer --config C sidetone` | **yes** | Key `DE <call>` and measure the radio's sidetone: its delay, level and pitch. |
-| `hfnode keyer --config C hangtest` | **yes** | Hang the box's control loop mid-transmission: its watchdog must open the key within 0.5 s. Then identifies. |
+| `hfnode keyer --config C hangtest` | **yes** | Identify, then hang the box's control loop mid-transmission: its watchdog must open the key within 0.5 s. |
 | `hfnode keyer --config C stucktest` | **yes** | Identify, then make the box hold its key down: its 1 s limit must open the key and lock the box until it is unplugged. |
+| `hfnode keyer --config C linktest` | **yes** | Key a long message, then stop talking to the box: its link timeout must open the key by itself, as if the node had died. |
 | `hfnode handheld --config C check` | no | A handheld running the CW firmware in `firmware/uv-k1` ([docs/handheld.md](docs/handheld.md)): its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
 | `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
 | `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it, as given: include your call. |

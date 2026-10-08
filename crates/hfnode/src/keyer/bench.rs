@@ -9,11 +9,12 @@ use super::rig::{self, KeyerRig};
 use crate::audio::Capture;
 use crate::config::Config;
 use crate::session::Transmission;
-use crate::station::Station;
+use crate::station::{force_receive_or_latch, InhibitLatch, Station};
 use anyhow::{bail, Context, Result};
 use civ::Rig;
 use keyer_core::keyer::{Boot, Trip};
 use std::fmt::Write as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +51,11 @@ pub fn rig_settings(cfg: &Config, scale: f32) -> rig::Settings {
         frequency_hz: cfg.station.frequency_hz,
         min_level_dbfs: min_level(cfg),
         scale,
+        duty: cfg
+            .keyer
+            .as_ref()
+            .map_or(0.5, |k| k.max_duty_percent as f32 / 100.0),
+        duty_window: Duration::from_secs(cfg.keyer.as_ref().map_or(600, |k| k.duty_window_secs)),
     }
 }
 
@@ -65,10 +71,42 @@ pub fn start_listening(cfg: &Config) -> Result<(Capture, Arc<Mutex<Monitor>>)> {
     Ok((cap, monitor))
 }
 
+/// The sidetone level `hfnode keyer sidetone` measured, kept in the state
+/// directory: the level a tone at the pitch must come near to be the sidetone, so
+/// that a quiet sidetone held on is not taken for band noise (the safety audit's
+/// KB-2(ii)).
+pub const SIDETONE_FILE: &str = "keyer-sidetone";
+
+/// Keep `db` as the sidetone's level for later runs of the node.
+pub fn save_sidetone(state_dir: &Path, db: f32) -> Result<()> {
+    let f = state_dir.join(SIDETONE_FILE);
+    std::fs::create_dir_all(state_dir)
+        .and_then(|()| std::fs::write(&f, format!("{db}\n")))
+        .with_context(|| format!("writing {}", f.display()))
+}
+
+/// The sidetone level a `sidetone` check measured before, if one did.
+pub fn load_sidetone(state_dir: &Path) -> Option<f32> {
+    std::fs::read_to_string(state_dir.join(SIDETONE_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Open the box on `station.serial_port`, with `monitor` getting the radio's audio.
 pub fn open_rig(cfg: &Config, monitor: Arc<Mutex<Monitor>>) -> Result<KeyerRig> {
+    if let Some(db) = load_sidetone(&cfg.state_dir) {
+        lock(&monitor).set_known_sidetone(db);
+    }
     let t = SerialTransport::open(&cfg.station.serial_port)?;
-    KeyerRig::open(Box::new(t), monitor, rig_settings(cfg, 1.0))
+    let rig = KeyerRig::open(Box::new(t), monitor, rig_settings(cfg, 1.0))?;
+    // The firmware the owner checked, if hfnode.toml names one.
+    super::check_build(
+        rig.hello(),
+        cfg.keyer.as_ref().and_then(|k| k.firmware_build.as_deref()),
+    )?;
+    Ok(rig)
 }
 
 /// Wait up to `timeout` for the monitor to have heard enough band to know its
@@ -101,6 +139,13 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
     );
     let _ = writeln!(
         out,
+        "box: rest {} ms between runs, duty budget {} s, build {}",
+        h.rest.as_millis(),
+        h.duty_budget.as_secs(),
+        h.build
+    );
+    let _ = writeln!(
+        out,
         "box: up {:.0} s, last started by {}{}",
         h.uptime.as_secs_f32(),
         h.boot.as_str(),
@@ -110,6 +155,12 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
             ""
         }
     );
+    // A box that will key nothing until it has been looked at: said here, before any
+    // of the audio checks, because nothing else will get past it.
+    if let Some(why) = rig.refusal() {
+        ok = false;
+        let _ = writeln!(out, "box: {why}");
+    }
     match rig.status() {
         Ok(st) => {
             let _ = writeln!(
@@ -124,6 +175,12 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
                     ok = false;
                     ", TRIPPED: unplug the box and plug it in again".into()
                 }
+            );
+            let _ = writeln!(
+                out,
+                "box: {} ms of rest to go, {:.0} s of duty budget",
+                st.rest_left.as_millis(),
+                st.budget.as_secs_f32()
             );
             ok &= !st.busy();
         }
@@ -181,6 +238,29 @@ pub fn carrier_note(db: f32) -> String {
     )
 }
 
+/// `hfnode keyer rx`: the box's key open, then the radio's, as far as its audio
+/// shows within `wait`. A key this cannot confirm open (the box's, or the radio's:
+/// no audio to show it, or a steady tone at the pitch, which is how a key closed at
+/// the radio sounds) latches the transmit inhibit in `state_dir`, so that the node
+/// keys nothing more until someone has looked at the radio (the safety audit's
+/// KB-2).
+pub fn rx(rig: &mut KeyerRig, state_dir: &Path, wait: Duration) -> Result<()> {
+    let inhibit = InhibitLatch::in_dir(state_dir);
+    force_receive_or_latch(rig, &inhibit).context("the radio's key is not confirmed open")?;
+    let band = wait_for_band(&rig.monitor(), wait);
+    let why = if !band.audio {
+        Some("no audio from the radio".to_string())
+    } else {
+        band.carrier_db.map(carrier_note)
+    };
+    if let Some(why) = why {
+        let why = format!("the radio's key is not confirmed open: {why}");
+        inhibit.latch(&why);
+        bail!("{why}");
+    }
+    Ok(())
+}
+
 /// The last run's judgement, once the audio covers it.
 fn last_judge(st: &Station<KeyerRig>) -> Option<Judge> {
     let rig = st.rig();
@@ -212,6 +292,10 @@ pub fn key(st: &mut Station<KeyerRig>, text: &str) -> Result<Option<Judge>> {
     Ok(last_judge(st))
 }
 
+/// The sidetone must be at least this far over the band noise for `sidetone` to
+/// pass: more than the 10 dB within which the node takes a tone for the sidetone.
+pub const MIN_SIDETONE_MARGIN_DB: f32 = 15.0;
+
 /// What `hfnode keyer sidetone` measured.
 #[derive(Debug)]
 pub struct SidetoneReport {
@@ -237,8 +321,36 @@ impl SidetoneReport {
         if let Some(why) = j.why_not() {
             let _ = writeln!(out, "not heard: {why}");
         }
-        if let Some(db) = self.band_db {
-            let _ = writeln!(out, "band {db:.0} dBFS on receive");
+        // A sidetone only a little over the band noise is not enough to tell a key
+        // held at the radio from the band (the safety audit's KB-2(ii)): the node
+        // only takes a tone for the sidetone within 10 dB of the level measured
+        // here, so the margin has to be larger than that.
+        match self.band_db {
+            Some(db) if j.tone_db - db < MIN_SIDETONE_MARGIN_DB => {
+                ok = false;
+                let _ = writeln!(
+                    out,
+                    "band {db:.0} dBFS on receive: the sidetone is only {:.0} dB over it, under \
+                     the {MIN_SIDETONE_MARGIN_DB:.0} dB needed to tell a key held at the radio \
+                     from the band; turn the radio's sidetone level up (its monitor level), or \
+                     the volume down",
+                    j.tone_db - db
+                );
+            }
+            Some(db) => {
+                let _ = writeln!(
+                    out,
+                    "band {db:.0} dBFS on receive: the sidetone is {:.0} dB over it: ok",
+                    j.tone_db - db
+                );
+            }
+            None => {
+                ok = false;
+                let _ = writeln!(
+                    out,
+                    "no band level measured: the sidetone's margin over the band is not known"
+                );
+            }
         }
         if j.tone_db > -6.0 {
             ok = false;
@@ -304,39 +416,94 @@ pub struct TestReport {
 /// Text keyed during a box test: dashes, so that the box is mid-element soon.
 const TEST_TEXT: &str = "TTTT TTTT";
 
-/// `hfnode keyer hangtest`: the box's control loop hangs mid-run with its key
-/// down; its watchdog must reset it and open the key within its 0.5 s. Then the
-/// node identifies, through the station.
-pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
-    st.open_window().map_err(anyhow::Error::msg)?;
+/// A box test must have measured at least this much unbroken sidetone. Less than
+/// that and the audio never showed the key down, so nothing was measured and the
+/// test proves nothing (the safety audit's KB-3: `longest: 0ns ... passed: true`).
+pub const MIN_TEST_TONE: Duration = Duration::from_millis(250);
+
+/// What a test may take from its first key-down to the radio's key reading open:
+/// enough for the box's own limit and the audio behind it, not enough for a test
+/// that measured nothing to pass on patience.
+const TEST_SPAN: Duration = Duration::from_secs(6);
+
+/// Printed before every test that holds the radio's key down, and again if one
+/// times out. See docs/keyer.md, "Stopping it by hand".
+pub const MANUAL_STOP: &str = "This test holds the radio's key down on purpose. If the radio \
+     keeps transmitting: pull the key plug out of the radio, then switch the radio off. Do that \
+     first and read the output afterwards.";
+
+/// What to tell the operator if a test leaves the radio transmitting.
+pub const STOP_NOW: &str = "THE RADIO MAY STILL BE TRANSMITTING: pull the key plug out of the \
+     radio now, then switch the radio off.";
+
+/// The node's `DE <call>`, keyed and heard, before a test: the sidetone's level and
+/// the audio delay come from it, and without them [`Monitor::longest_tone`] has
+/// only `min_level_dbfs` to go on and a test can pass having measured nothing.
+fn identify_first(st: &mut Station<KeyerRig>, id: &str) -> Result<(Judge, Vec<String>)> {
+    let judge = key(st, id)?.context("no audio covering the identification")?;
+    if !judge.heard {
+        bail!(
+            "the identification was not heard ({}): the test cannot measure the sidetone, so it \
+             would prove nothing; run `hfnode keyer sidetone` first",
+            judge.why_not().unwrap_or_else(|| "see above".into())
+        );
+    }
+    Ok((judge, vec![format!("identified first: {id}")]))
+}
+
+/// Wait out the box's rest and the duty window before keying again.
+fn rest(st: &Station<KeyerRig>, keying: Duration) -> Result<()> {
     let rig = st.rig();
     let mut r = lock(&rig);
-    let m = r.monitor();
+    r.wait_rest(keying)?;
+    Ok(())
+}
+
+/// `hfnode keyer hangtest`: the box's control loop hangs mid-run with its key
+/// down; its watchdog must reset it and open the key within its 0.5 s.
+///
+/// The node identifies first, so that the sidetone is measured before the key is
+/// held down, and the rig lock is free between each look at the box: the operator's
+/// Ctrl-C must get through while the key is down (the safety audit's KB-3).
+pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
+    let (_, mut notes) = identify_first(st, id)?;
+    let watchdog = Duration::from_millis(keyer_core::limits::WATCHDOG_MS.into());
+    let limit = watchdog + Duration::from_millis(250);
+    let rig = st.rig();
+    let m = lock(&rig).monitor();
+    rest(st, Duration::from_secs(2))?;
     let t0 = Instant::now();
-    r.send_cw(TEST_TEXT)?;
+    lock(&rig).send_cw(TEST_TEXT)?;
     thread::sleep(Duration::from_millis(100).div_f32(scale));
-    r.test(&Command::TestHang)?;
-    let mut notes = Vec::new();
+    // A box that hangs before its reply gets out has still taken the command.
+    if let Err(e) = lock(&rig).test(&Command::TestHang) {
+        notes.push(format!(
+            "no reply to TEST HANG ({e}): it may still have taken it"
+        ));
+    }
     // The node finds out: the run ended early, the box came back from its reset.
-    let end = Instant::now() + Duration::from_secs(10).div_f32(scale);
-    loop {
-        match r.is_transmitting() {
-            Ok(false) => break,
+    let end = t0 + TEST_SPAN.div_f32(scale);
+    let open = loop {
+        match lock(&rig).is_transmitting() {
+            Ok(false) => break Instant::now(),
             Ok(true) => {}
             Err(e) => notes.push(format!("node: {e}")),
         }
         if Instant::now() >= end {
-            bail!("the radio still reads transmitting 10 s after the hang");
+            notes.push(STOP_NOW.into());
+            bail!(
+                "the radio still reads transmitting {:.0} s after the hang. {STOP_NOW}",
+                TEST_SPAN.as_secs_f32()
+            );
         }
         thread::sleep(Duration::from_millis(50).div_f32(scale));
-    }
+    };
     let longest = lock(&m).longest_tone(t0);
-    let watchdog = Duration::from_millis(keyer_core::limits::WATCHDOG_MS.into());
-    let limit = watchdog + Duration::from_millis(250);
+    let span = open.saturating_duration_since(t0).mul_f32(scale);
     // The box comes back as a new USB device after its reset.
     let back = Instant::now() + Duration::from_secs(5).div_f32(scale);
     let hello = loop {
-        match r.hello_again() {
+        match lock(&rig).hello_again() {
             Ok(h) => break Some(h),
             Err(_) if Instant::now() < back => {
                 thread::sleep(Duration::from_millis(100).div_f32(scale))
@@ -351,46 +518,71 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
     if !restarted {
         notes.push("the box did not report a watchdog restart".into());
     }
-    drop(r);
-    let passed = restarted && longest <= limit;
-    if passed {
-        key(st, id)?;
-        notes.push(format!("identified: {id}"));
-    } else {
-        notes.push(format!(
-            "not identified: key `{id}` with `hfnode keyer key` once the box is checked"
-        ));
-    }
+    let measured = check_measured(longest, span, &mut notes);
+    notes.push(
+        "unplug the box and plug it in again before keying: its watchdog reset is not a power-up, \
+         and the trip it came back from is not kept"
+            .into(),
+    );
     Ok(TestReport {
         longest,
         limit,
-        passed,
+        passed: restarted && measured && longest <= limit,
         notes,
     })
+}
+
+/// Whether the test measured the key down at all, and within its span.
+fn check_measured(longest: Duration, span: Duration, notes: &mut Vec<String>) -> bool {
+    if longest < MIN_TEST_TONE {
+        notes.push(format!(
+            "nothing measured: the longest sidetone was {} ms, under the {} ms a key held down \
+             must give; check the audio (`hfnode keyer sidetone`) and run the test again",
+            longest.as_millis(),
+            MIN_TEST_TONE.as_millis()
+        ));
+        return false;
+    }
+    if span > TEST_SPAN {
+        notes.push(format!(
+            "the key read open only {:.1} s after the test started, past the {:.0} s a test may \
+             take: the sidetone measurement does not cover it",
+            span.as_secs_f32(),
+            TEST_SPAN.as_secs_f32()
+        ));
+        return false;
+    }
+    true
 }
 
 /// `hfnode keyer stucktest`: the node identifies first (the box cannot key again
 /// after this test until it is plugged in again), then the box holds an element
 /// down; its key-down limit must open the key within its 1 s, and trip.
 pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
-    key(st, id)?;
+    let (_, mut notes) = identify_first(st, id)?;
+    let limit =
+        Duration::from_millis(keyer_core::limits::KEY_DOWN_MS.into()) + Duration::from_millis(250);
     let rig = st.rig();
-    let mut r = lock(&rig);
-    let m = r.monitor();
+    let m = lock(&rig).monitor();
+    rest(st, Duration::from_secs(2))?;
     let t0 = Instant::now();
-    r.send_cw(TEST_TEXT)?;
-    r.test(&Command::TestStuck)?;
-    let mut notes = vec![format!("identified first: {id}")];
-    let end = Instant::now() + Duration::from_secs(10).div_f32(scale);
+    lock(&rig).send_cw(TEST_TEXT)?;
+    if let Err(e) = lock(&rig).test(&Command::TestStuck) {
+        notes.push(format!(
+            "no reply to TEST STUCK ({e}): it may still have taken it"
+        ));
+    }
+    let end = t0 + TEST_SPAN.div_f32(scale);
     // Not `is_transmitting`, which reads a tripped box as an error, for the
     // station to inhibit on: here the trip is what the test is for.
-    loop {
-        match r.status() {
+    let open = loop {
+        let status = lock(&rig).status();
+        match status {
             Ok(st) if !st.busy() => match lock(&m).key_state() {
-                KeyState::Open => break,
+                KeyState::Open => break Instant::now(),
                 KeyState::Held(why) => {
                     notes.push(format!("node: {why}"));
-                    break;
+                    break Instant::now();
                 }
                 KeyState::Unsure => {}
             },
@@ -398,23 +590,26 @@ pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Tes
             Err(e) => notes.push(format!("node: {e}")),
         }
         if Instant::now() >= end {
-            bail!("the radio still reads transmitting 10 s after the stuck-key test");
+            bail!(
+                "the radio still reads transmitting {:.0} s after the stuck-key test. {STOP_NOW}",
+                TEST_SPAN.as_secs_f32()
+            );
         }
         thread::sleep(Duration::from_millis(50).div_f32(scale));
-    }
+    };
     let longest = lock(&m).longest_tone(t0);
-    let limit =
-        Duration::from_millis(keyer_core::limits::KEY_DOWN_MS.into()) + Duration::from_millis(250);
-    let tripped = r.status().context("STATUS after the test")?.trip == Trip::Down;
+    let span = open.saturating_duration_since(t0).mul_f32(scale);
+    let tripped = lock(&rig).status().context("STATUS after the test")?.trip == Trip::Down;
     if tripped {
         notes.push("the box tripped: unplug it and plug it in again before keying".into());
     } else {
         notes.push("the box did not trip".into());
     }
+    let measured = check_measured(longest, span, &mut notes);
     Ok(TestReport {
         longest,
         limit,
-        passed: tripped && longest <= limit,
+        passed: tripped && measured && longest <= limit,
         notes,
     })
 }

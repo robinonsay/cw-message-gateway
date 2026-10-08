@@ -106,8 +106,9 @@ System Settings > Privacy & Security; the port is then `/dev/cu.SLAB_USBtoUART`.
 opens it (read in Apple's IOSerialFamily source; not yet measured on this radio),
 and the IC-7300 can be set to transmit on either. `hfnode` lowers them straight
 after opening and will not use the port if it cannot; before writing anything to
-the radio it reads USB SEND and both USB Keying items and refuses unless they are
-OFF, which is what makes the lines harmless. (The radio's Inhibit Timer at USB
+the radio (but for `radio rx`, which only stops the keyer and switches to receive)
+it reads USB SEND and both USB Keying items and refuses unless they are OFF, which
+is what makes the lines harmless. (The radio's Inhibit Timer at USB
 Connection, left ON, also holds off a signal for a few seconds when a port opens.)
 Other programs do not lower the lines, so keep the radio's port to `hfnode` alone:
 quit WSJT-X, fldigi, flrig and similar programs before starting it.

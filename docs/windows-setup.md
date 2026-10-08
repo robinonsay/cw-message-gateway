@@ -89,8 +89,9 @@ to UART Bridge (COM3)". Put the name in `station.serial_port`, for example
 Whether the CP210x driver raises the lines for an instant when the port opens is
 not documented. `hfnode` opens the port with both lines set to off, clears them
 again straight after, and will not use the port if it cannot; before writing
-anything to the radio it reads USB SEND and both USB Keying items and refuses
-unless they are OFF, which is what makes the lines harmless. (The radio's Inhibit
+anything to the radio (but for `radio rx`, which only stops the keyer and switches
+to receive) it reads USB SEND and both USB Keying items and refuses unless they
+are OFF, which is what makes the lines harmless. (The radio's Inhibit
 Timer at USB Connection, left ON, also holds off a signal for a few seconds when a
 port opens.) A COM port can be open in one program at a time, so quit WSJT-X,
 fldigi, flrig and similar programs before starting `hfnode`, and do not start them

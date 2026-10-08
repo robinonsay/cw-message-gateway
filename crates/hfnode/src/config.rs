@@ -111,6 +111,17 @@ pub struct Keyer {
     /// Commands that need a later stage are refused.
     #[serde(default)]
     pub commissioned: crate::keyer::Stage,
+    /// At most this share of any `duty_window_secs` with the key down (at most
+    /// 50); longer replies wait on receive between keying runs. The box keeps a
+    /// duty budget of its own as well.
+    #[serde(default = "default_duty")]
+    pub max_duty_percent: u32,
+    #[serde(default = "default_keyer_duty_window")]
+    pub duty_window_secs: u64,
+    /// The box's firmware build, as `hfnode keyer check` reports it: if set, a box
+    /// reporting any other is refused (so the box keeps running the firmware whose
+    /// UF2 was checked).
+    pub firmware_build: Option<String>,
 }
 
 /// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in
@@ -766,6 +777,9 @@ fn default_duty() -> u32 {
 fn default_duty_window() -> u64 {
     300
 }
+fn default_keyer_duty_window() -> u64 {
+    600
+}
 fn default_busy_quiet() -> u64 {
     1000
 }
@@ -1392,6 +1406,25 @@ mod tests {
         assert_eq!(
             example().station.commissioned,
             crate::commissioning::Stage::None
+        );
+    }
+
+    #[test]
+    fn the_keying_watchdog_is_45_seconds_unless_set() {
+        // The bring-up (docs/hardware-test-plan.md) and the audit assume the
+        // watchdog forces receive after 45 s of keying: in the example, and when
+        // the line is left out.
+        assert_eq!(example().station.max_key_seconds, 45);
+        let text = include_str!("../../../hfnode.example.toml")
+            .lines()
+            .filter(|l| !l.starts_with("max_key_seconds"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.station.max_key_seconds, 45);
+        assert_eq!(
+            crate::station::StationConfig::from_config(&c.station).max_key,
+            std::time::Duration::from_secs(45)
         );
     }
 

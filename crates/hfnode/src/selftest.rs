@@ -36,6 +36,7 @@ mod any_radio;
 pub use any_radio::{KeyerFault, MAX_SCALE as KEYER_MAX_SCALE};
 
 use crate::audio::{self, Block, BlockReceiver, BlockSender};
+use crate::commissioning::{self, Action, Stage};
 use crate::config::Config;
 use crate::inbox::{Message, State as MsgState};
 use crate::node;
@@ -44,7 +45,9 @@ use crate::station::{InhibitNotice, Station, StationConfig};
 use anyhow::{Context, Result};
 use auth::{CodeBook, SeqStore};
 use civ::ic7300::Ic7300;
-use civ::mock::{Fault, Foldback, MockConfig, MockRadio, ReplyFault, Report, Settings};
+use civ::mock::{
+    is_read, Fault, Foldback, Menu, MockConfig, MockRadio, ReplyFault, Report, Settings,
+};
 use civ::Rig;
 use cw::{Keyer, Noise};
 use protocol::{parse, Vocabulary};
@@ -211,6 +214,8 @@ pub struct RadioSetup {
     /// heard through a sound card, instead of the mock IC-7300 (the fields above
     /// are the IC-7300's): see [`any_radio`].
     pub keyer: bool,
+    /// The IC-7300's menu settings, as the node's preflight reads them.
+    pub menu: Menu,
 }
 
 impl Default for RadioSetup {
@@ -223,6 +228,7 @@ impl Default for RadioSetup {
             sidetone: false,
             dial_nudges: false,
             keyer: false,
+            menu: Menu::default(),
         }
     }
 }
@@ -347,6 +353,9 @@ pub struct Expect {
     pub mid_ids: u32,
     /// Text the node must have decoded and logged in `rx.log`, answered or not.
     pub heard: Vec<String>,
+    /// The IC-7300's preflight refuses to start the node, naming this check: the
+    /// node writes nothing to the radio, so nothing above applies.
+    pub refused: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -1512,15 +1521,35 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         echo: s.radio.echo,
         swr: s.radio.swr,
         foldback: s.radio.foldback,
+        menu: s.radio.menu,
         ..MockConfig::default()
     });
+    // As `hfnode run` opens the radio, on a station past every bring-up stage: the
+    // read-only preflight, with the radio's Time-Out Timer required, before
+    // anything is written.
+    let opened = commissioning::open_for(Stage::Done, Action::Run, cfg.station.power_watts, || {
+        Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
+    });
+    let inner = match (opened, s.expect.refused) {
+        (Ok(rig), None) => rig,
+        (Err(e), None) => return Err(e.context("opening the mock radio")),
+        (Ok(_), Some(item)) => {
+            out.checks.push(check(
+                "preflight",
+                false,
+                format!("passed; expected it to refuse to start on {item}"),
+            ));
+            return Ok(());
+        }
+        (Err(e), Some(item)) => {
+            refused_checks(&radio, item, &format!("{e:#}"), out);
+            return Ok(());
+        }
+    };
     for f in &s.radio.faults {
         radio.inject(f.clone());
     }
-    let rig = TimeScaled {
-        inner: Ic7300::with_port(radio.port(), cfg.station.civ_address),
-        scale,
-    };
+    let rig = TimeScaled { inner, scale };
     inhibit_at_start(s, &cfg)?;
     let station = Station::new(
         rig,
@@ -1595,6 +1624,46 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
     Ok(())
+}
+
+/// The node refused to start: the preflight named `item`, and only its reads went
+/// to the radio.
+fn refused_checks(radio: &MockRadio, item: &str, error: &str, out: &mut Outcome) {
+    out.checks.push(check(
+        "preflight",
+        error.contains(item),
+        format!("refused to start: {error}"),
+    ));
+    let cmds = radio.commands();
+    let writes: Vec<_> = cmds.iter().filter(|(_, b)| !is_read(b)).collect();
+    let r = radio.report();
+    out.radio_time = r.now;
+    let mut bad = Vec::new();
+    if !writes.is_empty() {
+        bad.push(format!("wrote {writes:02X?}"));
+    }
+    if !r.keyed.is_empty() || !r.transmissions.is_empty() || r.tunes > 0 {
+        bad.push(format!(
+            "{} pieces keyed, {} transmissions, {} tunes",
+            r.keyed.len(),
+            r.transmissions.len(),
+            r.tunes
+        ));
+    }
+    bad.extend(
+        r.violations
+            .iter()
+            .map(|v| format!("{:02X?}: {}", v.bytes, v.reason)),
+    );
+    out.checks.push(check(
+        "nothing written",
+        bad.is_empty(),
+        if bad.is_empty() {
+            format!("{} reads, no writes, nothing keyed", cmds.len())
+        } else {
+            bad.join("; ")
+        },
+    ));
 }
 
 /// Leave the inhibit file a fault before a restart would, if the scenario says.
@@ -2119,6 +2188,7 @@ fn base(name: &str, about: &str) -> Scenario {
             ids: 1,
             mid_ids: 0,
             heard: Vec::new(),
+            refused: None,
         },
     }
 }
@@ -2988,6 +3058,25 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     v.push({
         let mut s = base(
+            "fault-high-swr-mid-over",
+            "the antenna goes to SWR 3.5 once the read-back's first piece is keyed: the SWR is \
+             watched all through every piece, so the second is cut off, and nothing more is \
+             keyed this window",
+        );
+        s.script = vec![
+            Step::Inject(Fault::SwrAfter { skip: 1, swr: 3.5 }),
+            Step::Unanswered {
+                text: open_long.clone(),
+                tries: 2,
+            },
+        ];
+        s.expect.keyed = vec![Over::Cut(rb_long.clone())];
+        s.expect.last_seq = 42;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = base(
             "fault-foldback",
             "the antenna goes bad after the window's tune and the radio folds its output back \
              to nothing: no SWR reading, so the node stops",
@@ -3274,15 +3363,39 @@ pub fn scenarios() -> Vec<Scenario> {
         s
     });
     v.push({
-        let mut s = with_radio(
-            tx(
-                "fault-tune-hang",
-                "the tuner never reports done: the node gives up on it, forces receive and still works",
-                "MOM",
-                "HOME SUN",
-            ),
-            |r| r.faults.push(Fault::TuneNeverFinishes),
+        let mut s = base(
+            "fault-tune-hang",
+            "the tuner never reports done, and still reads tuning (1C 01 02) after the node \
+             gives up on it and forces receive: the node inhibits transmitting and tells the \
+             owner",
         );
+        s.radio.faults.push(Fault::TuneNeverFinishes);
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s.expect.ids = 0;
+        s.expect.forced_receive = true;
+        s.expect.inhibited = true;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "fault-tune-lost-reply",
+            "the reply to the start-up tune command is lost: the node cannot trust that tune, \
+             so it forces receive and keys nothing until it has tuned again, which it does \
+             before its first reply",
+            "MOM",
+            "HOME SUN",
+        );
+        s.radio.faults.push(Fault::Reply {
+            cmd: vec![0x1C, 0x01, 0x02],
+            skip: 0,
+            times: 1,
+            kind: ReplyFault::Drop,
+        });
+        s.expect.tunes = 2;
         s.expect.ids = 0;
         s.expect.forced_receive = true;
         s
@@ -3304,6 +3417,28 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.inhibited = true;
         s
     });
+    let refused = |name: &str, about: &str, item: &'static str, change: fn(&mut Menu)| {
+        let mut s = base(name, about);
+        change(&mut s.radio.menu);
+        s.expect.tunes = 0;
+        s.expect.ids = 0;
+        s.expect.refused = Some(item);
+        s
+    };
+    v.push(refused(
+        "preflight-tot-off",
+        "the radio's Time-Out Timer is OFF (its default): the node refuses to start, having \
+         only read from the radio",
+        "Time-Out Timer (CI-V)",
+        |m| m.time_out_timer = 0x00,
+    ));
+    v.push(refused(
+        "preflight-usb-send-dtr",
+        "the radio is set to transmit while DTR is up (USB SEND = DTR): the node refuses to \
+         start, having only read from the radio",
+        "USB SEND",
+        |m| m.usb_send = 0x01,
+    ));
 
     // Listening all the time, as the node does by default.
     v.push({
@@ -3385,6 +3520,51 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.sent = sent("MOM", "HOME SUN");
         s.expect.last_seq = 45;
         s.expect.tunes = 2;
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = base(
+            "fault-retune-lost-reply",
+            "listening all the time: the reply to the tune before a read-back is lost, so the \
+             node keys nothing on that try; it does not count that tune, and tunes again \
+             before answering the repeated open",
+        );
+        s.node.retune_minutes = 10;
+        s.radio.faults.push(Fault::Reply {
+            cmd: vec![0x1C, 0x01, 0x02],
+            skip: 1,
+            times: 1,
+            kind: ReplyFault::Drop,
+        });
+        let (rb42, sent43) = (rb_tx(42, "MOM", "HOME SUN"), de("SENT 43"));
+        let (rb44, sent45) = (rb_tx(44, "BOB", "CALL ME"), de("SENT 45"));
+        s.script = vec![
+            Step::Open {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM HOME SUN K"),
+                read_back: rb42.clone(),
+            },
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(sent43.clone()),
+            },
+            Step::Tunes(1),
+            Step::Wait(600.0),
+            // The first try's tune fails; the repeat gets the read-back.
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX BOB CALL ME K"),
+                read_back: rb44.clone(),
+            },
+            Step::Tunes(3),
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(sent45.clone()),
+            },
+        ];
+        s.expect.keyed = full(&[&rb42, &sent43, &rb44, &sent45]);
+        s.expect.sent = [sent("MOM", "HOME SUN"), sent("BOB", "CALL ME")].concat();
+        s.expect.last_seq = 45;
+        s.expect.tunes = 3;
         s.expect.forced_receive = true;
         s
     });

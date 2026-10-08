@@ -1,0 +1,8 @@
+# The keyer box's firmware is pinned to one compiler, so that the UF2 the safety
+# audit checked and the UF2 a later build produces are the same file
+# (docs/keyer.md, "Flashing"; the audit's KB-13). Change this only on purpose, and
+# say so in the pull request: a different compiler is a different firmware.
+[toolchain]
+channel = "1.97.0"
+targets = ["thumbv8m.main-none-eabihf"]
+components = ["rustfmt", "clippy"]

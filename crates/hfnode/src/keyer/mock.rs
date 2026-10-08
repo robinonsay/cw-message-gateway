@@ -112,6 +112,12 @@ pub struct BoxState {
     pub runs: Vec<Run>,
     /// Times it restarted.
     pub resets: u32,
+    /// A fault: the box's link timeout never comes, as if it kept hearing the
+    /// node. For `hfnode keyer linktest`.
+    pub deaf_to_silence: bool,
+    /// A fault: it keys every run at this speed, whatever it was asked, so that a
+    /// run lasts longer than the node expects (a box with a wrong clock).
+    pub slow_wpm: Option<u32>,
 }
 
 impl BoxState {
@@ -125,6 +131,8 @@ impl BoxState {
             lines: Vec::new(),
             runs: Vec::new(),
             resets: 0,
+            deaf_to_silence: false,
+            slow_wpm: None,
         }
     }
 
@@ -171,6 +179,13 @@ impl BoxState {
                 }
             }
         } else {
+            if self.deaf_to_silence {
+                // Its link never goes quiet: a line of its own every poll, the
+                // reply dropped, so the node sees only the run going on.
+                if let Some(l) = keyer_core::frame::encode(1, format_args!("STATUS")) {
+                    let _ = self.keyer.handle_line(now, l.as_bytes());
+                }
+            }
             self.keyer
                 .poll_with(now, |at, down| keys.push_back((at, down)));
         }
@@ -289,6 +304,23 @@ struct MockTransport {
     b: MockBox,
 }
 
+/// A `CW <wpm> <text>` line with its speed changed, keeping its id: a box that
+/// keys slower than it was asked.
+fn rewrite_wpm(line: &str, wpm: u32) -> String {
+    let same = || line.to_string();
+    let Ok((id, body)) = keyer_core::frame::decode(line.as_bytes()) else {
+        return same();
+    };
+    let Some((_, text)) = body
+        .strip_prefix("CW ")
+        .and_then(|rest| rest.split_once(' '))
+    else {
+        return same();
+    };
+    keyer_core::frame::encode(id, format_args!("CW {wpm} {text}"))
+        .map_or_else(same, |l| l.as_str().to_string())
+}
+
 fn gone() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotConnected,
@@ -304,10 +336,15 @@ impl Transport for MockTransport {
             return Err(gone());
         }
         s.lines.push(line.to_string());
+        // What the box keys: the line as sent, unless its clock is wrong.
+        let keyed = match s.slow_wpm {
+            Some(wpm) => rewrite_wpm(line, wpm),
+            None => line.to_string(),
+        };
         let mut ks = Vec::new();
         let reply = s
             .keyer
-            .handle_line_with(now, line.as_bytes(), |at, down| ks.push((at, down)));
+            .handle_line_with(now, keyed.as_bytes(), |at, down| ks.push((at, down)));
         s.keys.extend(ks);
         if s.keyer.hung() {
             s.hung_at.get_or_insert(now);
@@ -384,6 +421,9 @@ pub struct RadioSettings {
     pub cable_out: bool,
     /// The key held down at the radio from this radio time on.
     pub stuck_from: Option<f64>,
+    /// The key held down at the radio until this radio time, then released: a hold
+    /// that clears by itself, which the node must still catch.
+    pub stuck_until: Option<f64>,
     pub off: bool,
     /// No audio reaches the computer at all.
     pub unplugged: bool,
@@ -404,6 +444,7 @@ impl RadioSettings {
             latency: 0.06,
             cable_out: false,
             stuck_from: None,
+            stuck_until: None,
             off: false,
             unplugged: false,
             carrier: None,
@@ -476,7 +517,10 @@ impl MockRadio {
                     let mut floor = vec![0.0f32; n];
                     noise.add(&mut floor, s.floor);
                     let w = 2.0 * std::f64::consts::PI * f64::from(s.pitch_hz);
-                    let stuck = |at: f64| s.stuck_from.is_some_and(|f| at >= f);
+                    let stuck = |at: f64| {
+                        s.stuck_from.is_some_and(|f| at >= f)
+                            && s.stuck_until.is_none_or(|u| at < u)
+                    };
                     // Whether the radio's key was closed at any time in `a..=b`.
                     let closed = |a: f64, b: f64| {
                         (!s.cable_out && downs.iter().any(|&(d, u)| d <= b && u > a)) || stuck(b)

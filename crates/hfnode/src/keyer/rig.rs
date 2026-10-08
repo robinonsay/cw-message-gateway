@@ -7,6 +7,15 @@
 //! depend on each other: the box (`STATUS`: its key, its run) and the
 //! [`Monitor`] listening to the radio's sidetone. The radio counts as transmitting
 //! if either says so, or if the audio cannot yet show its key open after a run.
+//!
+//! Once the audio has shown the radio's key held with the box's open, or the box
+//! has come back from its watchdog firing (outside `hfnode keyer hangtest`), the
+//! rig never again reads the radio as on receive: every status read is an error,
+//! and the station latches its transmit inhibit, which only the owner clears.
+//!
+//! Before each run the rig waits ([`Rig::rest_needed`]) for the box's rest after
+//! its last run and its duty budget, and for `[keyer] max_duty_percent` of the
+//! last `duty_window_secs`.
 
 use super::link::{refused, Link, Transport};
 use super::monitor::{KeyState, Monitor, MAX_LAG, STUCK_AFTER_RUN};
@@ -16,6 +25,7 @@ use anyhow::{anyhow, bail};
 use civ::{Result, Rig, RigError};
 use keyer_core::keyer::{Boot, Ended, Trip};
 use keyer_core::morse::{self, Segments};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -48,6 +58,10 @@ pub struct Settings {
     pub min_level_dbfs: f32,
     /// Radio time per wall-clock time: 1, except in the self-tests.
     pub scale: f32,
+    /// `[keyer] max_duty_percent`, as a share.
+    pub duty: f32,
+    /// `[keyer] duty_window_secs`, radio time.
+    pub duty_window: Duration,
 }
 
 /// A run the box took.
@@ -68,6 +82,21 @@ struct Shared {
     last: Option<u64>,
     /// Something that fails the transmission, reported once.
     failure: Option<String>,
+    /// The box's key-downs as keyed, for the duty window (wall clock).
+    on_air: VecDeque<(Instant, Instant)>,
+}
+
+impl Shared {
+    /// The box's key opened at `at`, ending a run early: its key-downs from then on
+    /// were never keyed.
+    fn cut(&mut self, at: Instant) {
+        for (s, e) in self.on_air.iter_mut() {
+            if *e > at {
+                *e = at.max(*s);
+            }
+        }
+        self.on_air.retain(|(s, e)| e > s);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -87,13 +116,17 @@ fn ended(shared: &Mutex<Shared>, monitor: &Mutex<Monitor>, st: &Status, now: Ins
     };
     if now < a.ends {
         lock(monitor).key_opened(a.id, now);
+        sh.cut(now);
     }
     let why = match st.ended {
         Ended::Done | Ended::Stop => return,
         Ended::Link => "no line from the node for its link timeout",
         Ended::Usb => "the USB link dropped",
         Ended::Limit => "its run limit",
-        Ended::Down => "its key-down limit; it has tripped: unplug it and plug it in again",
+        Ended::Down => {
+            "it tripped (its key-down limit, or its watch on its key pin): unplug it and plug \
+             it in again"
+        }
         Ended::None => "no run at all (did it restart?)",
     };
     let msg = format!("the keyer box ended the run early: {why}");
@@ -114,6 +147,12 @@ pub struct KeyerRig {
     wpm: u32,
     /// Whether the last answer about the key was that it is held at the radio.
     held: bool,
+    /// Why the radio is never again taken to be on receive: its key was seen held
+    /// at the radio, or the box's watchdog fired. See the module documentation.
+    fault: Option<String>,
+    /// Why nothing is keyed until the box is plugged in again: it last started other
+    /// than by being plugged in (as after flashing it).
+    replug: Option<String>,
 }
 
 impl KeyerRig {
@@ -131,16 +170,32 @@ impl KeyerRig {
             .map_err(|e| anyhow!("no HELLO from the keyer box on {place}: {e}"))?;
         let hello = Hello::parse(&f).map_err(|e| anyhow!("keyer box on {place}: {e}"))?;
         check_hello(&hello)?;
+        let (mut fault, mut replug) = (None, None);
         match hello.boot {
-            Boot::Watchdog => log::warn!(
-                "keyer box: it last restarted because its watchdog fired (its control loop \
-                 stalled), {:.0} s ago",
-                hello.uptime.as_secs_f32()
-            ),
-            b => log::info!(
-                "keyer box {} on {place}: started ({}) {:.0} s ago",
+            Boot::Watchdog => {
+                let msg = format!(
+                    "the keyer box last restarted because its watchdog fired, {:.0} s ago: its \
+                     control loop stalled. Unless that was `hfnode keyer hangtest`, report it; \
+                     either way, unplug the box and plug it in again",
+                    hello.uptime.as_secs_f32()
+                );
+                log::error!("{msg}");
+                fault = Some(msg);
+            }
+            Boot::Other => {
+                let msg = format!(
+                    "the keyer box last started other than by being plugged in ({:.0} s ago; \
+                     right after flashing it, that is expected): unplug it and plug it in \
+                     again before keying",
+                    hello.uptime.as_secs_f32()
+                );
+                log::warn!("{msg}");
+                replug = Some(msg);
+            }
+            Boot::Power => log::info!(
+                "keyer box {} build {} on {place}: plugged in {:.0} s ago",
                 hello.name,
-                b.as_str(),
+                hello.build,
                 hello.uptime.as_secs_f32()
             ),
         }
@@ -163,7 +218,8 @@ impl KeyerRig {
             let (link, shared, monitor, stop) =
                 (link.clone(), shared.clone(), monitor.clone(), stop.clone());
             let every = KEEP_ALIVE.div_f32(s.scale);
-            thread::spawn(move || keep_alive(&link, &shared, &monitor, &stop, every))
+            let link_timeout = hello.link_timeout.div_f32(s.scale);
+            thread::spawn(move || keep_alive(&link, &shared, &monitor, &stop, every, link_timeout))
         };
         Ok(Self {
             link,
@@ -176,7 +232,69 @@ impl KeyerRig {
             frequency_hz: s.frequency_hz,
             wpm: 20,
             held: false,
+            fault,
+            replug,
         })
+    }
+
+    /// Why the rig refuses to key, if it does: see [`KeyerRig::fault`] and
+    /// `replug`.
+    pub fn refusal(&self) -> Option<&str> {
+        self.fault.as_deref().or(self.replug.as_deref())
+    }
+
+    /// Wait, as the station does before each run, until the box and the duty
+    /// window allow keying for `keying`.
+    pub fn wait_rest(&mut self, keying: Duration) -> Result<()> {
+        loop {
+            let rest = self.rest_needed(keying)?;
+            if rest.is_zero() {
+                return Ok(());
+            }
+            thread::sleep(rest);
+        }
+    }
+
+    /// The duty window's wait before a run that keys for `keying` (wall clock).
+    fn duty_rest(&self, keying: Duration) -> Result<Duration> {
+        let window = self.s.duty_window.div_f32(self.s.scale);
+        let allows = window.mul_f32(self.s.duty);
+        if keying > allows {
+            return Err(RigError::Protocol(format!(
+                "a keying run of {:.0} s is more than keyer.max_duty_percent allows",
+                keying.mul_f32(self.s.scale).as_secs_f32()
+            )));
+        }
+        let now = Instant::now();
+        let mut sh = lock(&self.shared);
+        sh.on_air
+            .retain(|&(_, e)| now.saturating_duration_since(e) < window);
+        // Key-down time in the window ending `t` from now, nothing keyed in
+        // between; it only falls as `t` grows. The run itself counts whole.
+        let used = |t: Duration| -> Duration {
+            let to = now + t;
+            let from = to.checked_sub(window);
+            sh.on_air
+                .iter()
+                .map(|&(s, e)| {
+                    let s = from.map_or(s, |f| s.max(f));
+                    e.min(to).saturating_duration_since(s)
+                })
+                .sum()
+        };
+        if used(Duration::ZERO) + keying <= allows {
+            return Ok(Duration::ZERO);
+        }
+        let (mut lo, mut hi) = (Duration::ZERO, window);
+        while hi - lo > Duration::from_millis(10).div_f32(self.s.scale) {
+            let mid = lo + (hi - lo) / 2;
+            if used(mid) + keying <= allows {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Ok(hi)
     }
 
     pub fn hello(&self) -> &Hello {
@@ -210,12 +328,66 @@ impl KeyerRig {
         Ok(st)
     }
 
-    /// Bring-up only: `TEST HANG` or `TEST STUCK`, during a run.
+    /// Bring-up only: `TEST HANG` or `TEST STUCK`, during a run, each after the
+    /// `TEST ARM` the box needs just before it.
     pub fn test(&mut self, cmd: &Command) -> Result<()> {
         if !matches!(cmd, Command::TestHang | Command::TestStuck) {
             return Err(RigError::Protocol(format!("{} is not a test", cmd.body())));
         }
-        lock(&self.link).request(cmd).map(drop)
+        let mut l = lock(&self.link);
+        l.request(&Command::TestArm)?;
+        l.request(cmd).map(drop)
+    }
+
+    /// `hfnode keyer linktest`: key a run longer than the box's link timeout, then
+    /// say nothing. The box must open its key by itself and report the run ended by
+    /// the link going quiet (`LINK`). Returns how long the node waited.
+    ///
+    /// This is the one check that the node dying, its USB cable coming out or its
+    /// host going to sleep leaves the radio on receive, and nothing else tests it
+    /// (the safety audit's KB-11).
+    pub fn link_test(&mut self, text: &str) -> Result<Duration> {
+        let wait = self.link_timeout() + LINK_MARGIN.div_f32(self.s.scale);
+        let segs = Segments::of(text.as_bytes())
+            .map_err(|e| RigError::Protocol(format!("the keyer box cannot key {text:?}: {e:?}")))?;
+        let dot_ms = morse::dot_ms(self.wpm).map_err(|_| no("such speed"))?;
+        let keying = Duration::from_millis(u64::from(segs.units()) * u64::from(dot_ms));
+        if keying.div_f32(self.s.scale) < wait + Duration::from_secs(1).div_f32(self.s.scale) {
+            return Err(RigError::Protocol(format!(
+                "{text:?} keys for only {:.1} s at {} wpm: too short to outlast the box's link \
+                 timeout, so the test could not tell a stop from the text running out",
+                keying.as_secs_f32(),
+                self.wpm
+            )));
+        }
+        self.wait_rest(keying)?;
+        self.send_cw(text)?;
+        // Nothing more goes to the box: with no keep-alive the run is now the box's
+        // own to end. Its `STATUS` below is the first line it hears after that.
+        let run = lock(&self.shared).run.take();
+        thread::sleep(wait);
+        let st = self.status()?;
+        if let Some(a) = run {
+            let opened = lock(&self.link).sent().unwrap_or(Instant::now()) + self.link_timeout();
+            lock(&self.shared).cut(opened);
+            lock(&self.monitor).key_opened(a.id, opened);
+        }
+        if st.busy() {
+            let _ = self.stop_cw();
+            return Err(RigError::Protocol(format!(
+                "the box was still keying {:.1} s after the node's last line: its link timeout \
+                 did not open the key",
+                wait.as_secs_f32()
+            )));
+        }
+        if st.ended != Ended::Link {
+            return Err(RigError::Protocol(format!(
+                "the box opened its key but says the run ended {}, not by the link going quiet: \
+                 the run was too short, or something else stopped it",
+                st.ended.as_str()
+            )));
+        }
+        Ok(wait)
     }
 
     /// The box's link timeout, in wall-clock time.
@@ -223,7 +395,8 @@ impl KeyerRig {
         self.hello.link_timeout.div_f32(self.s.scale)
     }
 
-    /// The radio's key as the audio shows it, logging a held key once.
+    /// The radio's key as the audio shows it, logging a held key once. A held
+    /// key is never forgotten: see [`KeyerRig::fault`].
     fn key_state(&mut self) -> KeyState {
         let k = lock(&self.monitor).key_state();
         let held = matches!(k, KeyState::Held(_));
@@ -231,6 +404,7 @@ impl KeyerRig {
             if !self.held {
                 log::error!("keyer: {why}");
             }
+            self.fault.get_or_insert_with(|| why.clone());
         }
         self.held = held;
         k
@@ -245,6 +419,7 @@ fn keep_alive(
     monitor: &Mutex<Monitor>,
     stop: &AtomicBool,
     every: Duration,
+    link_timeout: Duration,
 ) {
     while !stop.load(Ordering::Relaxed) {
         thread::sleep(every);
@@ -259,16 +434,30 @@ fn keep_alive(
         let now = Instant::now();
         match status(&mut l) {
             Ok(st) if !st.busy() => ended(shared, monitor, &st, now),
-            Ok(_) if now > a.deadline => {
-                let r = l.request(&Command::Stop);
+            // Past its deadline, still keying or not answering: STOP, once, and no
+            // more keep-alives for it, so that the box's link timeout ends the run
+            // if the STOP is lost.
+            r if now > a.deadline => {
+                let stop = l.request(&Command::Stop);
                 let at = Instant::now();
+                let opened = match stop {
+                    Ok(_) => at,
+                    Err(_) => at + link_timeout,
+                };
                 let mut sh = lock(shared);
                 sh.run = None;
-                lock(monitor).key_opened(a.id, at);
+                sh.cut(at);
+                lock(monitor).key_opened(a.id, opened);
+                let state = match r {
+                    Ok(_) => "still keying".to_string(),
+                    Err(e) => format!("not answering ({e})"),
+                };
                 let msg = format!(
-                    "the keyer box was still keying {:.1} s past the end of its run: stopped{}",
+                    "the keyer box was {state} {:.1} s past the end of its run: stopped{}",
                     (now - a.ends).as_secs_f32(),
-                    r.err().map(|e| format!(" (STOP: {e})")).unwrap_or_default()
+                    stop.err()
+                        .map(|e| format!(" (STOP: {e})"))
+                        .unwrap_or_default()
                 );
                 log::error!("{msg}");
                 sh.failure.get_or_insert(msg);
@@ -356,6 +545,9 @@ impl Rig for KeyerRig {
     }
 
     fn send_cw(&mut self, text: &str) -> Result<()> {
+        if let Some(why) = self.refusal() {
+            return Err(RigError::Protocol(why.to_string()));
+        }
         let text = text.trim().to_ascii_uppercase();
         let segs = Segments::of(text.as_bytes())
             .map_err(|e| RigError::Protocol(format!("the keyer box cannot key {text:?}: {e:?}")))?;
@@ -417,6 +609,23 @@ impl Rig for KeyerRig {
         }
         let dot_ms = morse::dot_ms(self.wpm).map_err(|_| no("such speed"))?;
         let run = Duration::from_millis(u64::from(segs.units()) * u64::from(dot_ms));
+        // The station waits these out first (`rest_needed`): the box would refuse.
+        let down: u32 = segs
+            .as_slice()
+            .iter()
+            .filter(|s| s.down)
+            .map(|s| u32::from(s.units))
+            .sum();
+        let down = Duration::from_millis(u64::from(down) * u64::from(dot_ms));
+        if !st.rest_left.is_zero() || st.budget < down {
+            return Err(RigError::Protocol(format!(
+                "the keyer box is resting: {} ms of its rest after the last run to go, {:.1} s \
+                 of duty budget for {:.1} s of key-down",
+                st.rest_left.as_millis(),
+                st.budget.as_secs_f32(),
+                down.as_secs_f32()
+            )));
+        }
         let cmd = Command::Cw {
             wpm: self.wpm,
             text,
@@ -436,6 +645,15 @@ impl Rig for KeyerRig {
         );
         let ends = t0 + run.div_f32(self.s.scale);
         let mut sh = lock(&self.shared);
+        let dot = Duration::from_millis(dot_ms.into()).div_f32(self.s.scale);
+        let mut t = t0;
+        for seg in segs.as_slice() {
+            let len = dot * u32::from(seg.units);
+            if seg.down {
+                sh.on_air.push_back((t, t + len));
+            }
+            t += len;
+        }
         sh.last = Some(id);
         sh.failure = None;
         sh.run = Some(Active {
@@ -460,17 +678,23 @@ impl Rig for KeyerRig {
         let now = Instant::now();
         // Stop keeping a run alive either way: if STOP did not arrive, the box's
         // link timeout ends the run.
-        if let Some(a) = lock(&self.shared).run.take() {
+        let mut sh = lock(&self.shared);
+        if let Some(a) = sh.run.take() {
             let opened = match r {
                 Ok(_) => now,
                 Err(_) => now + self.link_timeout(),
             };
+            sh.cut(opened);
             lock(&self.monitor).key_opened(a.id, opened);
         }
+        drop(sh);
         r.map(drop)
     }
 
     fn is_transmitting(&mut self) -> Result<bool> {
+        if let Some(f) = &self.fault {
+            return Err(RigError::Protocol(f.clone()));
+        }
         let unreachable = match self.status() {
             Ok(st) if st.busy() => return Ok(true),
             // Its key is open, but it will key nothing more until it is power-cycled,
@@ -516,7 +740,10 @@ impl Rig for KeyerRig {
         }
         let now = Instant::now();
         match self.key_state() {
-            KeyState::Held(_) | KeyState::Unsure => Ok(true),
+            // Not "still transmitting", which a key released in time would answer
+            // by the station's deadline: an error, for the station to inhibit on.
+            KeyState::Held(why) => Err(RigError::Protocol(why)),
+            KeyState::Unsure => Ok(true),
             KeyState::Open => {
                 if unreachable && !lock(&self.monitor).band(now).audio {
                     return Err(RigError::Protocol(
@@ -546,10 +773,42 @@ impl Rig for KeyerRig {
     }
 
     fn held_key(&mut self) -> Option<String> {
+        if let Some(f) = &self.fault {
+            return Some(f.clone());
+        }
         match self.key_state() {
             KeyState::Held(why) => Some(why),
             _ => None,
         }
+    }
+
+    /// The box's rest after its last run and its duty budget, then the duty window
+    /// (`[keyer] max_duty_percent`); `keying` counts as all key-down.
+    fn rest_needed(&mut self, keying: Duration) -> Result<Duration> {
+        if let Some(why) = self.refusal() {
+            return Err(RigError::Protocol(why.to_string()));
+        }
+        let scale = self.s.scale;
+        let on_box = keying.mul_f32(scale);
+        if on_box > self.hello.duty_budget {
+            return Err(RigError::Protocol(format!(
+                "a keying run of {:.0} s is more than the keyer box's duty budget",
+                on_box.as_secs_f32()
+            )));
+        }
+        let st = self.status()?;
+        // The budget is earned back 1 ms for each ms the key is up.
+        let on_box_wait = st.rest_left.max(on_box.saturating_sub(st.budget));
+        let wait = on_box_wait.div_f32(scale).max(self.duty_rest(keying)?);
+        if !wait.is_zero() {
+            log::info!(
+                "keyer: a keying run of {:.1} s needs {:.1} s on receive first (the box's rest \
+                 and duty budget, keyer.max_duty_percent)",
+                on_box.as_secs_f32(),
+                wait.mul_f32(scale).as_secs_f32()
+            );
+        }
+        Ok(wait)
     }
 
     fn transmit_detail(&mut self) -> Option<String> {

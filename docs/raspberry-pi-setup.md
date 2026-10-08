@@ -167,7 +167,8 @@ Set these on the radio and write down what you set. Unless noted they are under
 **MENU > SET > Connectors** (IC-7300 Full Manual, pp. 12-10 and 12-11). Item names
 can differ slightly between firmware versions; check each against the manual for
 yours. The node never changes any of these over CI-V. Before it writes anything to
-the radio it reads the transmit-related ones and refuses to go on if one is wrong;
+the radio it reads the transmit-related ones and refuses to go on if one is wrong
+(`hfnode radio rx` excepted: it only stops the keyer and switches to receive);
 `hfnode radio --config <file> check` prints what it reads, without writing.
 
 **CI-V:**
@@ -185,7 +186,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 
 | Item | Set to | Why |
 |---|---|---|
-| USB SEND | **OFF** (default) | Set to DTR or RTS, that serial control line puts the radio on transmit (p. 12-11). Opening a serial port raises both lines (section 4). The node does not use them, and refuses to write to the radio unless this is OFF. |
+| USB SEND | **OFF** (default) | Set to DTR or RTS, that serial control line puts the radio on transmit (p. 12-11). Opening a serial port raises both lines (section 4). The node does not use them, and refuses to write to the radio unless this is OFF (but for `radio rx`, which only sends the stop and receive commands). |
 | USB Keying (CW) | **OFF** (default) | Same: a DTR or RTS line would hold the CW key down. The node keys with CI-V command 17 instead, and refuses to write to the radio unless this is OFF. |
 | USB Keying (RTTY) | **OFF** (default) | Same: a DTR or RTS line would key RTTY (FSK). Checked like the two above. |
 | Inhibit Timer at USB Connection | **ON** (default) | When the USB connection is made, delays a SEND or Keying signal by a few seconds (p. 12-11). It only delays it, so the three items above must still be OFF. |
@@ -210,10 +211,11 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder. The node warns if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
 
-**Transmit backstop** (MENU > SET > Function, p. 12-5):
+**Transmit backstop and tuner** (MENU > SET > Function, p. 12-5):
 
 | Item | Set to | Why |
 |---|---|---|
+| PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it. It does not read this item yet, so check it on the radio's screen. |
 | Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `hfnode run` refuses to start while it is OFF. |
 
 **Display** (MENU > SET > Display, p. 12-12):
