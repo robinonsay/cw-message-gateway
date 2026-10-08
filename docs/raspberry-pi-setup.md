@@ -83,6 +83,11 @@ again afterwards):
 sudo usermod -aG dialout,audio "$USER"
 ```
 
+The bench tests use `/var/lib/hfnode` as their state directory too, so that a
+transmit inhibit a test latches also stops the node: the [hardware test
+plan](hardware-test-plan.md#before-you-start) has you make it yours for the tests
+and give it back to `hfnode` afterwards.
+
 Create the secret key. It must be readable by the `hfnode` user and nobody else:
 
 ```sh

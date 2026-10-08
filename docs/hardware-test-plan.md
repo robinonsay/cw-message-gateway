@@ -237,10 +237,26 @@ In `~/bench.toml` set:
 - `station.power_watts = 10` (raised only in step 9; the software refuses more
   until stage `keying`);
 - `station.commissioned = "none"` (see [Bring-up stages](#bring-up-stages));
-- `state_dir` to a scratch directory, for example `"~/bench-state"` (on Windows
-  `'~\bench-state'`, in single quotes), and `auth.key_file` to a scratch key made
-  with `hfnode keygen --out ~/bench.key` (on Windows `--out $HOME\bench.key`). Do
-  not test with the node's real key and state, because test exchanges use up codes.
+- `state_dir` to the state directory the node itself will use, not a scratch one:
+  `"/var/lib/hfnode"` on a Pi (as in the example), `"~/Library/Application
+  Support/hfnode/state"` on a Mac, `'~\AppData\Local\hfnode\state'` on Windows (in
+  single quotes), as in the setup guide. `tx-inhibited` is kept there, so the bench
+  and the node share it: an inhibit latched during a test must also stop the node
+  when it starts later, and no test may key while the node's inhibit is there.
+  (`hfnode` refuses a relative `state_dir`, and its commands that key refuse one
+  they cannot write.) The tests also leave `last_seq`, the inbox and the health
+  log there, and the node carries on from them: its code sheet, printed in step
+  13, starts after the last line the tests used.
+- `auth.key_file` to a scratch key made with `hfnode keygen --out ~/bench.key` (on
+  Windows `--out $HOME\bench.key`). Do not test with the node's real key: the code
+  sheets printed for the tests would then work on the node.
+
+On a Pi, `/var/lib/hfnode` belongs to the `hfnode` user, and the bench commands run
+as you. Make it yours until step 13, which gives it back:
+
+```sh
+sudo chown -R "$USER" /var/lib/hfnode
+```
 
 **Radio settings.** Set the IC-7300 menu settings listed in
 [raspberry-pi-setup.md, section 6](raspberry-pi-setup.md#6-ic-7300-settings),
@@ -903,7 +919,7 @@ fault: it never makes a transmission longer.
 
 A complete transaction with no signal on the air: the field rig transmits into its
 own dummy load a few metres from the node, at its lowest power, so the node hears it
-by leakage. Use the bench key and state.
+by leakage. Use the bench key.
 
 In `~/bench.toml` leave `schedule.always = true` (the default) and set
 `schedule.check_minutes = 1` for this step, configure one `[[contacts]]` entry
@@ -931,10 +947,11 @@ set -a; . <(sudo cat /etc/hfnode/env); set +a     # or export HFNODE_EMAIL_PASSW
 ```
 
 First check the inhibit alert, with nothing transmitted: make the node start as if
-an earlier fault had stopped it.
+an earlier fault had stopped it. `S` is the `state_dir` in `~/bench.toml`.
 
 ```sh
-echo "$(date +%s) bench alert test" > ~/bench-state/tx-inhibited
+S=/var/lib/hfnode     # on a Mac: S=~/"Library/Application Support/hfnode/state"
+echo "$(date +%s) bench alert test" > "$S/tx-inhibited"
 hfnode run --config $C
 ```
 
@@ -943,8 +960,9 @@ PowerShell writes UTF-16, which the node cannot read (the email would say
 `Reason: not recorded`).
 
 ```powershell
+$S = "$HOME\AppData\Local\hfnode\state"
 "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) bench alert test" |
-    Set-Content -Encoding ascii "$HOME\bench-state\tx-inhibited"
+    Set-Content -Encoding ascii "$S\tx-inhibited"
 hfnode run --config $C
 ```
 
@@ -955,7 +973,7 @@ clear it. Nothing tunes or keys. Once that line is logged, Ctrl-C, and:
 
 ```sh
 hfnode radio --config $C rx
-rm ~/bench-state/tx-inhibited
+rm "$S/tx-inhibited"
 hfnode run --config $C
 ```
 
@@ -1019,6 +1037,14 @@ transmitting: add ferrite chokes on the USB cable and check grounding before
 continuing.
 
 ## Step 13: end-to-end exchange on the air
+
+On a Pi, first give the state directory back to the node: it was yours for the
+bench (see [Before you start](#before-you-start)), with any `tx-inhibited` a test
+left in it.
+
+```sh
+sudo chown -R hfnode:hfnode /var/lib/hfnode
+```
 
 Use the real configuration now (on a Pi `/etc/hfnode/hfnode.toml`; on a Mac or
 Windows PC the one in the node's folder), the real key, and a freshly printed table

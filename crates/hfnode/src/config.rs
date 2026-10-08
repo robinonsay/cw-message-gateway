@@ -896,6 +896,20 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // A relative state_dir would be found from the folder each command is started
+        // in: the service and a command run by hand would keep tx-inhibited in two
+        // places, and an inhibit one of them latched would not stop the other (the
+        // safety audit's K6). A leading `~` has been expanded by now (`Config::load`
+        // does that first). On Windows a path from the root of the current drive
+        // (`\hfnode`, which is how a Unix path such as the example's reads there) is
+        // let through: it depends on the drive, not on the folder.
+        if !self.state_dir.has_root() {
+            bail!(
+                "state_dir {}: use a full path or one starting with ~; a relative one \
+                 depends on the folder hfnode is started from",
+                self.state_dir.display()
+            );
+        }
         let s = &self.station;
         if s.node_call.trim().is_empty() {
             bail!("station.node_call is required");
@@ -1662,6 +1676,36 @@ mod tests {
             cfg.imessage.unwrap().db,
             Path::new("/home/op").join("Library/Messages/chat.db")
         );
+    }
+
+    #[test]
+    fn state_dir_must_be_a_full_path() {
+        // The service and a command run by hand must keep tx-inhibited in one place:
+        // a relative state_dir is found from the folder each is started in (the
+        // safety audit's K6).
+        let mut cfg = example();
+        for relative in ["state", "./state", "hfnode/state", ""] {
+            cfg.state_dir = relative.into();
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(
+                e.starts_with(&format!("state_dir {relative}: use a full path")),
+                "{e}"
+            );
+        }
+        #[cfg(windows)]
+        {
+            // A drive with no root: the folder last used on that drive.
+            cfg.state_dir = r"C:hfnode\state".into();
+            assert!(cfg.validate().is_err());
+            cfg.state_dir = r"C:\hfnode\state".into();
+            cfg.validate().unwrap();
+        }
+        cfg.state_dir = "/var/lib/hfnode".into();
+        cfg.validate().unwrap();
+        // As loaded: `~` is the home directory by then.
+        cfg.state_dir = "~/hfnode/state".into();
+        cfg.expand_paths(Some(PathBuf::from("/home/op"))).unwrap();
+        cfg.validate().unwrap();
     }
 
     #[test]

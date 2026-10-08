@@ -10,7 +10,7 @@ use hfnode::handheld::{self, Handheld};
 use hfnode::inbox::Inbox;
 use hfnode::keyer;
 use hfnode::session::{Outcome, Services};
-use hfnode::station::{InhibitLatch, Station, StationConfig};
+use hfnode::station::{check_state_dir, InhibitLatch, Station, StationConfig};
 use hfnode::storm::StormHold;
 use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
@@ -959,8 +959,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 _ => Action::Cw,
             };
             // The health log and any transmit inhibit are written there.
-            std::fs::create_dir_all(&cfg.state_dir)
-                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+            check_state_dir(&cfg.state_dir)?;
             let rig = open_for(cfg, needs)?;
             let mut st = Station::new(
                 rig,
@@ -1103,8 +1102,8 @@ fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
 }
 
 fn run(config: &Path, cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)
-        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+    // Before anything else, whichever radio it is: see `check_state_dir`.
+    check_state_dir(&cfg.state_dir)?;
     // First, so the first check is likely back before the first window.
     let storm = start_storm_watch(cfg)?;
     let alerts = alert::Alerts::start(cfg, config);
@@ -1294,8 +1293,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                 check_key_length(&sanitize(text), k.commissioned)?;
             }
             // The health log and any transmit inhibit are written there.
-            std::fs::create_dir_all(&cfg.state_dir)
-                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+            check_state_dir(&cfg.state_dir)?;
             let (rig, _cap) = open_keyer(cfg, Some(needs))?;
             let sc = StationConfig::from_config(&cfg.station);
             let id = sc.station_id.clone();
@@ -1418,6 +1416,7 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
             println!("receive (confirmed)");
         }
         HandheldCmd::Key { .. } | HandheldCmd::Linktest => {
+            check_state_dir(&cfg.state_dir)?;
             let rig = open_handheld(cfg, Some(handheld::Action::Key))?;
             let mut st = handheld_station(cfg, rig)?;
             match action {
@@ -1482,11 +1481,10 @@ fn handheld_settings(rig: &mut Handheld, cfg: &Config) -> usize {
     wrong
 }
 
-/// The station's safety layer on `rig`, with the radio checked.
+/// The station's safety layer on `rig`, with the radio checked. The caller checked
+/// the state directory, where the health log and any transmit inhibit are written,
+/// before it opened the port ([`check_state_dir`]).
 fn handheld_station(cfg: &Config, rig: Handheld) -> Result<Station<Handheld>> {
-    // The health log and any transmit inhibit are written there.
-    std::fs::create_dir_all(&cfg.state_dir)
-        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     let st = Station::new(
         rig,
         StationConfig::from_config(&cfg.station),
@@ -1511,11 +1509,13 @@ fn send_text(st: &mut Station<Handheld>, text: &str) -> Result<()> {
 /// `hfnode handheld hangtest`: the firmware's watchdog must end a transmission
 /// when the firmware hangs (docs/handheld.md, "Bring-up").
 fn handheld_hang_test(cfg: &Config) -> Result<()> {
-    let inhibit = cfg.state_dir.join(hfnode::station::INHIBIT_FILE);
-    if inhibit.exists() {
+    check_state_dir(&cfg.state_dir)?;
+    // Keyed outside a station at first, so the inhibit is checked here, as a station
+    // would: one that cannot be checked counts as there.
+    if InhibitLatch::in_dir(&cfg.state_dir).is_set() {
         bail!(
             "transmitting is inhibited ({}): see why in the log before clearing it",
-            inhibit.display()
+            cfg.state_dir.join(hfnode::station::INHIBIT_FILE).display()
         );
     }
     let mut rig = open_handheld(cfg, Some(handheld::Action::Hang))?;
@@ -1871,6 +1871,17 @@ mod tests {
     /// A configuration for the keyer box on a port that does not exist, with the
     /// bring-up stage at `commissioned`.
     fn keyer_cfg(dir: &Path, commissioned: &str) -> Config {
+        rig_cfg(
+            dir,
+            "rig = \"keyer\"\nfrequency_hz = 7030000\nmax_key_seconds = 60",
+            &format!("[keyer]\ncommissioned = \"{commissioned}\""),
+        )
+    }
+
+    /// A configuration on a port that does not exist, with `station` added to the
+    /// `[station]` section (the rig, its frequency and keying limit) and `sections`
+    /// after it; written to `dir`/hfnode.toml and loaded from there.
+    fn rig_cfg(dir: &Path, station: &str, sections: &str) -> Config {
         let path = dir.join("hfnode.toml");
         std::fs::write(
             &path,
@@ -1881,15 +1892,12 @@ state_dir = '{}'
 [station]
 node_call = "N0DE"
 field_calls = ["N0CALL"]
-frequency_hz = 7030000
 key_speed_wpm = 20
-max_key_seconds = 60
-rig = "keyer"
 serial_port = "/dev/does-not-exist"
+{station}
 [audio]
 device = "default"
-[keyer]
-commissioned = "{commissioned}"
+{sections}
 [auth]
 key_file = '{}'
 "#,
@@ -1948,6 +1956,102 @@ key_file = '{}'
         check_key_length(&piece, Stage::Listen).unwrap();
         check_key_length(&long, Stage::Done).unwrap();
         assert!(check_key_length(&long, Stage::Keying).is_err());
+    }
+
+    #[test]
+    fn every_keying_command_needs_a_state_directory_it_can_write_first() {
+        // A node that cannot write tx-inhibited must not key (the safety audit's K6),
+        // and opening a port can itself key some radios: each command that can key
+        // refuses before it opens one. The error must be the state directory's, and
+        // not the port's, the bring-up stage's or the missing [storm] section's,
+        // which come after it.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("hfnode.toml");
+        let ic7300 = rig_cfg(
+            dir.path(),
+            "frequency_hz = 7030000\ncommissioned = \"done\"",
+            "",
+        );
+        let keyer = keyer_cfg(dir.path(), "done");
+        let handheld = rig_cfg(
+            dir.path(),
+            "rig = \"handheld\"\nfrequency_hz = 144060000",
+            "[handheld]\ncommissioned = \"done\"",
+        );
+        // A regular file cannot be written in, also by root.
+        std::fs::write(&ic7300.state_dir, "not a directory").unwrap();
+        let mut unwritable = vec![ic7300.state_dir.clone()];
+        // Nor can Linux's /proc, a directory that is there: creating it, as before
+        // this check, is not enough.
+        if cfg!(target_os = "linux") {
+            unwritable.push("/proc".into());
+        }
+        for state in unwritable {
+            let with = |cfg: &Config| Config {
+                state_dir: state.clone(),
+                ..cfg.clone()
+            };
+            let (ic7300, keyer, handheld) = (with(&ic7300), with(&keyer), with(&handheld));
+            let refused = |what: &str, result: Result<()>| {
+                let e = format!("{:#}", result.expect_err(what));
+                let want = format!("state_dir {} cannot be written", state.display());
+                assert!(e.starts_with(&want), "{what}: {e}");
+            };
+            let text = || "E".to_string();
+            refused("radio setup", radio(&ic7300, RadioCmd::Setup));
+            refused("radio tune", radio(&ic7300, RadioCmd::Tune));
+            refused("radio cw", radio(&ic7300, RadioCmd::Cw { text: text() }));
+            refused(
+                "keyer key",
+                keyer_cmd(&keyer, KeyerCmd::Key { text: text() }),
+            );
+            refused("keyer sidetone", keyer_cmd(&keyer, KeyerCmd::Sidetone));
+            refused("keyer hangtest", keyer_cmd(&keyer, KeyerCmd::Hangtest));
+            refused("keyer stucktest", keyer_cmd(&keyer, KeyerCmd::Stucktest));
+            refused("keyer linktest", keyer_cmd(&keyer, KeyerCmd::Linktest));
+            refused(
+                "handheld key",
+                handheld_cmd(&handheld, HandheldCmd::Key { text: text() }),
+            );
+            refused(
+                "handheld linktest",
+                handheld_cmd(&handheld, HandheldCmd::Linktest),
+            );
+            refused(
+                "handheld hangtest",
+                handheld_cmd(&handheld, HandheldCmd::Hangtest),
+            );
+            for cfg in [&ic7300, &keyer, &handheld] {
+                refused("run", run(&config, cfg));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_handheld_hang_test_reads_the_inhibit_as_a_station_does() {
+        // It keys outside a station at first, so it checks the inhibit itself: in the
+        // same way, with anything at that name counting as the file (here a link to
+        // nowhere, which `Path::exists` would call absent). Refused before the port.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = rig_cfg(
+            dir.path(),
+            "rig = \"handheld\"\nfrequency_hz = 144060000",
+            "[handheld]\ncommissioned = \"done\"",
+        );
+        std::fs::create_dir_all(&cfg.state_dir).unwrap();
+        let file = cfg.state_dir.join(hfnode::station::INHIBIT_FILE);
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &file).unwrap();
+        let e = handheld_cmd(&cfg, HandheldCmd::Hangtest)
+            .expect_err("inhibited")
+            .to_string();
+        assert!(e.starts_with("transmitting is inhibited"), "{e}");
+        // Without it, it gets as far as the port.
+        std::fs::remove_file(&file).unwrap();
+        let e = handheld_cmd(&cfg, HandheldCmd::Hangtest)
+            .expect_err("the port does not exist")
+            .to_string();
+        assert!(!e.contains("inhibited"), "{e}");
     }
 
     #[test]

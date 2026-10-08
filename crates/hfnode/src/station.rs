@@ -305,7 +305,7 @@ pub struct InhibitLatch(Arc<Inhibit>);
 
 impl InhibitLatch {
     /// The latch that keeps [`INHIBIT_FILE`] in `state_dir`. Reads it: if it is
-    /// already there, the latch starts set.
+    /// already there, or this user cannot tell whether it is, the latch starts set.
     pub fn in_dir(state_dir: &Path) -> Self {
         Self(Arc::new(Inhibit::new(Some(state_dir.join(INHIBIT_FILE)))))
     }
@@ -348,7 +348,9 @@ fn force_receive_or_inhibit<R: Rig>(rig: &Mutex<R>, inhibit: &Inhibit) -> Result
 }
 
 /// Written to the state directory (beside the health log) when transmitting is
-/// inhibited; while it exists, nothing is transmitted, across restarts.
+/// inhibited; while it exists, nothing is transmitted, across restarts. A node that
+/// cannot tell whether it exists counts it as there ([`inhibit_on_disk`]), and one
+/// that cannot write it does not key ([`check_state_dir`]).
 pub const INHIBIT_FILE: &str = "tx-inhibited";
 
 /// Transmitting has been inhibited: why and when, for telling the owner.
@@ -376,6 +378,82 @@ fn parse_inhibit_file(text: &str) -> (Option<u64>, String) {
     }
 }
 
+/// The inhibit kept in `file` when this process starts, if there is one.
+///
+/// Only a file that is certainly not there lets the node transmit. Anything at that
+/// name counts as the file, a dangling link too, and so does a file that cannot be
+/// looked for: `Path::exists` answers "no" for a state directory this user may not
+/// search, and a command run as the wrong user then keyed with the inhibit in place
+/// (the safety audit's K6). Such an error inhibits transmitting here, with a reason
+/// that says which file could not be checked and why, for the log and the email.
+fn inhibit_on_disk(file: &Path) -> Option<InhibitNotice> {
+    let (at, reason) = match std::fs::symlink_metadata(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Ok(_) => {
+            let why = std::fs::read_to_string(file).unwrap_or_default();
+            log::error!(
+                "transmit inhibited by {} ({}): once the radio has been checked, stop the node, \
+                 remove the file and start it again",
+                file.display(),
+                why.trim()
+            );
+            parse_inhibit_file(&why)
+        }
+        Err(e) => {
+            let why = format!(
+                "could not check for {} ({e}), so it is taken as there",
+                file.display()
+            );
+            log::error!(
+                "transmit inhibited: {why}: run hfnode as the user that owns the state \
+                 directory, or make the directory readable by this one"
+            );
+            (None, why)
+        }
+    };
+    Some(InhibitNotice {
+        at,
+        reason,
+        from_file: true,
+        file: Some(file.to_path_buf()),
+    })
+}
+
+/// Check that `dir` can keep [`INHIBIT_FILE`], creating it if it is not there yet:
+/// a file must be created, written and removed in it. Every command that can key
+/// the radio calls this before it opens any port, and refuses to go on if it fails.
+///
+/// A node that cannot write the inhibit there must not key: a stop that cannot
+/// confirm receive would then leave nothing behind, and the next start would key
+/// again. Nor can it be sure of reading an inhibit already there (see
+/// [`inhibit_on_disk`]). Opening the port can itself key some radios (it pulses
+/// DTR on Linux), so the check comes first.
+pub fn check_state_dir(dir: &Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let probe = dir.join(format!(".write-check-{}", std::process::id()));
+    std::fs::create_dir_all(dir)
+        .and_then(|()| {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&probe)?;
+            // A full disk shows only once something is written.
+            let written = f.write_all(b"hfnode\n").and_then(|()| f.sync_all());
+            drop(f);
+            let removed = std::fs::remove_file(&probe);
+            written.and(removed)
+        })
+        .with_context(|| {
+            format!(
+                "state_dir {} cannot be written: nothing is keyed without somewhere to keep \
+                 {INHIBIT_FILE}. Run hfnode as the user that owns it, or make it writable \
+                 by this one",
+                dir.display()
+            )
+        })
+}
+
 /// The latch that stops all transmitting, in memory and in [`INHIBIT_FILE`].
 struct Inhibit {
     set: AtomicBool,
@@ -392,26 +470,9 @@ struct Notify {
 
 impl Inhibit {
     fn new(file: Option<PathBuf>) -> Self {
-        let on_disk = file.as_deref().filter(|f| f.exists());
-        let mut latched = None;
-        if let Some(f) = on_disk {
-            let why = std::fs::read_to_string(f).unwrap_or_default();
-            log::error!(
-                "transmit inhibited by {} ({}): once the radio has been checked, stop the node, \
-                 remove the file and start it again",
-                f.display(),
-                why.trim()
-            );
-            let (at, reason) = parse_inhibit_file(&why);
-            latched = Some(InhibitNotice {
-                at,
-                reason,
-                from_file: true,
-                file: Some(f.to_path_buf()),
-            });
-        }
+        let latched = file.as_deref().and_then(inhibit_on_disk);
         Self {
-            set: AtomicBool::new(on_disk.is_some()),
+            set: AtomicBool::new(latched.is_some()),
             file,
             notice: Mutex::new(Notify { latched, to: None }),
         }
@@ -519,7 +580,8 @@ pub(crate) fn append_health(path: &Path, event: &str, value: &str) {
 
 impl<R: Rig + 'static> Station<R> {
     /// `health_log` is a file in the state directory; [`INHIBIT_FILE`] is kept
-    /// beside it, and if it is already there nothing will be transmitted.
+    /// beside it, and if it is already there (or cannot be checked) nothing will be
+    /// transmitted.
     pub fn new(rig: R, cfg: StationConfig, health_log: Option<PathBuf>) -> Self {
         let inhibit_file = health_log
             .as_deref()
@@ -2042,6 +2104,73 @@ mod tests {
         assert!(state.join(INHIBIT_FILE).exists());
         let st = Station::new(fast_rig(), cfg(), Some(state.join("health.csv")));
         assert!(st.tx_inhibited());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_inhibit_that_cannot_be_checked_counts_as_there() {
+        // `Path::exists` says "no" when the state directory cannot be searched, and
+        // a command run as another user keyed with the inhibit in place (the safety
+        // audit's K6). Root may search any directory, so the error here is another
+        // one that root gets too: a "state directory" that is a regular file.
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::write(&state, "not a directory").unwrap();
+        let latch = InhibitLatch::in_dir(&state);
+        assert!(latch.is_set());
+        let file = state.join(INHIBIT_FILE);
+        let mut st = Station::new(fast_rig(), cfg(), Some(state.join("health.csv")));
+        let (to, notices) = mpsc::channel();
+        st.notify_inhibit(to);
+        let n = notices.try_recv().expect("notice at start-up");
+        assert!(n.from_file && n.at.is_none(), "{n:?}");
+        assert_eq!(n.file.as_deref(), Some(file.as_path()));
+        assert!(
+            n.reason
+                .starts_with(&format!("could not check for {}", file.display())),
+            "{n:?}"
+        );
+        st.configure().unwrap();
+        assert!(st.start_window().is_err());
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
+        assert!(st.rig().lock().unwrap().sent.is_empty());
+        drop(st);
+        // Anything at that name is the file, a link to nowhere too.
+        let state = dir.path().join("linked");
+        std::fs::create_dir(&state).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), state.join(INHIBIT_FILE)).unwrap();
+        assert!(InhibitLatch::in_dir(&state).is_set());
+        // Nothing there, in a directory that does not exist yet: not inhibited.
+        assert!(!InhibitLatch::in_dir(&dir.path().join("not-yet")).is_set());
+    }
+
+    #[test]
+    fn a_state_directory_must_take_a_file_before_anything_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        // Made if it is not there, and left as it was found.
+        let state = dir.path().join("a/b/state");
+        check_state_dir(&state).unwrap();
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 0);
+        check_state_dir(&state).unwrap();
+        // Under a regular file there is no directory to write in, also for root.
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        for bad in [file.clone(), file.join("state")] {
+            let e = format!("{:#}", check_state_dir(&bad).unwrap_err());
+            assert!(
+                e.starts_with(&format!("state_dir {} cannot be written", bad.display())),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_state_directory_that_takes_no_files_is_refused() {
+        // A directory that is there but cannot be written: Linux's /proc takes no new
+        // files even from root, which ignores a directory's mode bits.
+        let e = format!("{:#}", check_state_dir(Path::new("/proc")).unwrap_err());
+        assert!(e.starts_with("state_dir /proc cannot be written"), "{e}");
     }
 
     /// A [`SimRig`] with things a real radio may do, among them: cut its output
