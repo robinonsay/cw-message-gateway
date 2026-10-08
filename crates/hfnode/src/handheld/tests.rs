@@ -737,13 +737,16 @@ fn ids_stay_on_time_under_the_duty_cycle_with_runs_that_overrun() {
     }
 }
 
-/// The most the whole test process may stop, in any [`PAUSE_WINDOW`] of a
-/// transmission, for the ID test to judge it: under the least slack the test's
-/// timing leaves, the 100 ms `run_slack` the node allows past a run's text less the
-/// 30 ms overrun (a longer stop as a run ends has the node stop it for going on too
-/// long), with room for the node's own polling and the firmware's replies. The IDs
-/// leave more: on an idle machine each ends about 1.4 s after the one before, for
-/// the 1.6 s allowed.
+/// How long the machine may hold the node up for the ID test to judge a run: the
+/// whole test process stopped for less than this in any [`PAUSE_WINDOW`], and the
+/// end of every run read back by the node less than this late. Under what a
+/// hold-up as a run ends must last to fail a correct node: about 75 ms for the node
+/// to stop the run as going on past its text (its deadline is 76 ms or more past
+/// the run's end at the 30 ms overrun), or about 90 ms, at the piece before an ID,
+/// for that run's time on the air to be read back so long that the ID waits out a
+/// duty rest. Elsewhere a hold-up adds its own length to an ID interval, and the
+/// IDs end about 1.4 s after the one before on an idle machine, for the 1.6 s
+/// allowed.
 const PAUSE_LIMIT: Duration = Duration::from_millis(50);
 /// Longer than anything the ID test times: an ID interval with the 100 ms it
 /// allows (1.6 s), or a run up to the node's deadline for it.
@@ -755,8 +758,8 @@ const PAUSE_TICK: Duration = Duration::from_millis(5);
 /// window on a CI runner running the other tests alongside, and leave no run
 /// judged before the last.
 const PAUSE_FLOOR: Duration = Duration::from_millis(20);
-/// Times the ID test runs a transmission again after one the machine paused in.
-/// The last run is judged, paused or not.
+/// Times the ID test runs a transmission again after one the machine held up.
+/// The last run is judged, held up or not.
 const NOT_JUDGED_RERUNS: usize = 2;
 
 /// Measures how long the whole test process stops running, as the self-test's
@@ -764,7 +767,8 @@ const NOT_JUDGED_RERUNS: usize = 2;
 /// clock every [`PAUSE_TICK`] and keeps the gaps past that. Nothing the node does
 /// holds it up; only the machine can (a CI runner stops the whole process for
 /// tens to hundreds of milliseconds now and then). It cannot see a stop that holds
-/// up only the node's threads: a failure with no pause measured may be one.
+/// up only the node's threads (one virtual CPU of a runner held up): the ID test
+/// times the node's read-back of each run's end for that.
 struct PauseMeter {
     stop: Arc<AtomicBool>,
     /// Every pause of [`PAUSE_FLOOR`] or more: when it ended, and how long.
@@ -774,11 +778,12 @@ struct PauseMeter {
 impl PauseMeter {
     fn start() -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        // From before the thread starts: a slow start counts as a pause.
+        let mut last = Instant::now();
         let thread = {
             let stop = stop.clone();
             thread::spawn(move || {
                 let mut pauses = Vec::new();
-                let mut last = Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     thread::sleep(PAUSE_TICK);
                     let now = Instant::now();
@@ -842,29 +847,31 @@ fn most_paused_in(pauses: &[(Instant, Duration)], window: Duration) -> Duration 
         .unwrap_or_default()
 }
 
-/// Runs the ID test's transmission until one is judged: a run the machine paused in
-/// for [`PAUSE_LIMIT`] or more in any [`PAUSE_WINDOW`] is not judged and runs
-/// again, up to [`NOT_JUDGED_RERUNS`] times; the last run is judged whatever it
-/// measured. A paused run that passed is not judged either: here a pause can favour
-/// the node as well as hold it up (one just before the station weighs an ID has it
-/// key the ID a piece sooner, and one between the station noting an ID's start and
-/// the radio keying it shortens the next interval as measured). Each run's pauses
-/// are printed; those of a run not judged also when the test passes.
+/// Runs the ID test's transmission until one is judged: a run the machine held up
+/// for [`PAUSE_LIMIT`] or more ([`Held`]) is not judged and runs again, up to
+/// [`NOT_JUDGED_RERUNS`] times; the last run is judged whatever it measured. A run
+/// held up that passed is not judged either: here a hold-up can favour the node as
+/// well as delay it (one just before the station weighs an ID has it key the ID a
+/// piece sooner, and one between the station noting an ID's start and the radio
+/// keying it shortens the next interval as measured). Each run's measurements are
+/// printed; those of a run not judged also when the test passes.
 fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
     for run in 0..=NOT_JUDGED_RERUNS {
-        let (result, pauses) = ids_on_time_once(overrun);
-        let longest = pauses.iter().map(|p| p.1).max().unwrap_or_default();
-        let most = most_paused_in(&pauses, PAUSE_WINDOW);
-        let paused = most >= PAUSE_LIMIT;
+        let (result, held) = ids_on_time_once(overrun);
+        let longest = held.pauses.iter().map(|p| p.1).max().unwrap_or_default();
+        let most = most_paused_in(&held.pauses, PAUSE_WINDOW);
+        let paused = most >= PAUSE_LIMIT || held.read_back >= PAUSE_LIMIT;
         let measured = format!(
             "overrun {overrun:?}, run {} of at most {}: the test process stopped {} times, \
-             longest {:.3} s, {:.3} s in any {:.0} s (limit {:.3} s)",
+             longest {:.3} s, {:.3} s in any {:.0} s; the node read a run's end back at most \
+             {:.3} s late (limit {:.3} s)",
             run + 1,
             NOT_JUDGED_RERUNS + 1,
-            pauses.len(),
+            held.pauses.len(),
             longest.as_secs_f32(),
             most.as_secs_f32(),
             PAUSE_WINDOW.as_secs_f32(),
+            held.read_back.as_secs_f32(),
             PAUSE_LIMIT.as_secs_f32()
         );
         let judged = !paused || run == NOT_JUDGED_RERUNS;
@@ -894,9 +901,21 @@ fn ids_stay_on_time_under_the_duty_cycle(overrun: Duration) {
     }
 }
 
-/// One transmission of the ID test, with the pauses of the test process while it
-/// was under way: an error says what was late, or what failed.
-fn ids_on_time_once(overrun: Duration) -> (Result<String, String>, Vec<(Instant, Duration)>) {
+/// How the machine held up one transmission of the ID test.
+struct Held {
+    /// Every pause of the whole test process while it was under way: when it ended,
+    /// and how long.
+    pauses: Vec<(Instant, Duration)>,
+    /// The longest from the end of a run that ended by itself to the node's next
+    /// line to the firmware: a few ms (the station asks every 2 ms as a run ends),
+    /// unless the machine held up the node's thread. Read back late, a run counts
+    /// as longer on the air.
+    read_back: Duration,
+}
+
+/// One transmission of the ID test, and how the machine held it up: an error says
+/// what was late, or what failed.
+fn ids_on_time_once(overrun: Duration) -> (Result<String, String>, Held) {
     let mut set = settings();
     // 0.5 s on the air (real) in any 1 s, and an ID due every 1.5 s.
     set.duty = 0.5;
@@ -927,7 +946,17 @@ fn ids_on_time_once(overrun: Duration) -> (Result<String, String>, Vec<(Instant,
             (to > from).then(|| (to, to - from))
         })
         .collect();
-    (on_time(sent, &fw.runs(), start, interval), pauses)
+    let (runs, received) = (fw.runs(), fw.received());
+    let read_back = runs
+        .iter()
+        .filter_map(|r| match r.off {
+            Some((end, Off::Done)) => received.iter().find(|l| l.0 >= end).map(|l| l.0 - end),
+            _ => None,
+        })
+        .max()
+        .unwrap_or_default();
+    let held = Held { pauses, read_back };
+    (on_time(sent, &runs, start, interval), held)
 }
 
 /// Whether a transmission `sent` from `start` went out whole, and keyed the ID
