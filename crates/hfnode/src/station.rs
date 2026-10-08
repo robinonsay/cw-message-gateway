@@ -2674,6 +2674,9 @@ mod tests {
         st.configure().unwrap();
         assert!(st.tx_inhibited());
         assert!(!st.can_transmit());
+        // Set up with semi break-in off, so a key held at the radio does not
+        // transmit either (the safety audit's K8).
+        assert!(!st.rig().lock().unwrap().break_in);
         assert!(st.start_window().is_err());
         assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::Inhibited));
         assert!(notices.try_recv().is_err(), "once per start");
@@ -2934,8 +2937,9 @@ mod tests {
         blind_after: Option<usize>,
         /// The tuner starts, but the reply to the command is lost.
         tune_reply_lost: bool,
-        /// Stop-CW commands received.
+        /// Stop-CW commands received, and when the first came.
         stops: u32,
+        first_stop: Option<Instant>,
         /// The tuner reads "tuning" for ever.
         tuner_stuck: bool,
         /// Whether the tuner matched cannot be read after a tune.
@@ -3003,6 +3007,7 @@ mod tests {
                 blind_after: None,
                 tune_reply_lost: false,
                 stops: 0,
+                first_stop: None,
                 tuner_stuck: false,
                 matched_unreadable: false,
                 tuner_unreadable_after_stop: false,
@@ -3148,6 +3153,7 @@ mod tests {
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
             self.stops += 1;
+            self.first_stop.get_or_insert_with(Instant::now);
             self.stopped_since_tune |= self.tune_started;
             if let Some(lag) = self.stop_lag.take() {
                 thread::sleep(lag);
@@ -4422,11 +4428,19 @@ mod tests {
                     hold.set(Some("thunder".into()));
                 })
             };
+            st.rig().lock().unwrap().first_stop = None;
             let t0 = Instant::now();
             let e = st.start_window().unwrap_err().to_string();
             setter.join().unwrap();
             assert!(e.contains("storm stand-down"), "{e}");
-            // Stopped well before the tune's 1.5 s, but waited for the tuner to stop.
+            // Receive forced soon after the hold came on, well before the tune's
+            // 1.5 s were up; then it waited for the tuner to stop.
+            let stopped = st.rig().lock().unwrap().first_stop.expect("receive forced");
+            assert!(
+                stopped.duration_since(t0) < Duration::from_millis(1000),
+                "{:?}",
+                stopped.duration_since(t0)
+            );
             assert!(!st.tuned());
             assert!(
                 t0.elapsed() >= Duration::from_millis(1400),
