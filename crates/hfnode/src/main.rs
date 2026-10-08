@@ -1009,8 +1009,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
 }
 
 /// `radio setup`: turn the radio's TX Inhibit (16 66) off again, which the node
-/// turns on when it cannot confirm the radio back on receive
-/// ([`civ::Rig::inhibit_transmit`]), but only once [`INHIBIT_FILE`] is gone from the
+/// turns on when it inhibits transmitting ([`civ::Rig::inhibit_transmit`]), but only once [`INHIBIT_FILE`] is gone from the
 /// state directory: someone has checked the radio and removed it. Until then
 /// nothing is written, and every command that can transmit is refused by the
 /// preflight as well as by the file.
@@ -1030,7 +1029,10 @@ fn release_tx_inhibit<P: civ::ic7300::Port>(
         return Ok(());
     }
     rig.release_tx_inhibit()?;
-    log::warn!("the radio's TX Inhibit was ON (the node turns it on when it cannot confirm receive): turned OFF");
+    log::warn!(
+        "the radio's TX Inhibit was ON (the node turns it on when it inhibits transmitting): \
+         turned OFF"
+    );
     Ok(())
 }
 

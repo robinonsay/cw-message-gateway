@@ -174,9 +174,10 @@ pub trait Rig: Send {
     fn rf_power_watts(&mut self) -> Result<Option<f32>> {
         Ok(None)
     }
-    /// After the radio could not be confirmed back on receive: everything the rig
-    /// can still send to stop the radio transmitting again, on top of stopping the
-    /// keyer and switching to receive (the IC-7300: break-in off, so that neither a
+    /// When the node inhibits transmitting, and after the radio could not be
+    /// confirmed back on receive: everything the rig can still send to stop the
+    /// radio transmitting again, on top of stopping the keyer and switching to
+    /// receive (the IC-7300: break-in off, so that neither a
     /// keyer message nor a key held closed transmits, and its TX Inhibit function
     /// on). Rigs with nothing more to send do nothing.
     fn inhibit_transmit(&mut self) -> Result<()> {

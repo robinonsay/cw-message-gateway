@@ -147,7 +147,7 @@ mod cmd {
     /// Inhibit” is displayed and cannot transmit" (p. 13-6; lines 7505-7506;
     /// described there for the IC-PW2's transmitter lockout, and not yet checked on
     /// the radio). A function, not a menu item: the preflight reads it, the node
-    /// turns it on when it cannot confirm receive ([`Rig::inhibit_transmit`]), and
+    /// turns it on when it inhibits transmitting ([`Rig::inhibit_transmit`]), and
     /// only `hfnode radio setup` turns it off.
     pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
 
