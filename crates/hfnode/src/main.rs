@@ -928,13 +928,20 @@ fn verify_setup(cfg: &Config, st: &Station<civ::ic7300::Ic7300>) -> Result<()> {
     Ok(())
 }
 
-fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
-    use civ::Rig;
-    match cfg.station.rig {
-        RigKind::Ic7300 => {}
+/// What `hfnode radio <action>` runs for the configured rig.
+#[derive(Debug, PartialEq)]
+enum RadioRoute {
+    Ic7300,
+    /// `hfnode keyer rx`.
+    KeyerRx,
+}
+
+fn radio_route(rig: RigKind, action: &RadioCmd) -> Result<RadioRoute> {
+    match rig {
+        RigKind::Ic7300 => Ok(RadioRoute::Ic7300),
         // What the systemd unit and the supervise scripts run after every stop or
         // crash, whichever the rig (the safety audit's KB-12).
-        RigKind::Keyer if matches!(action, RadioCmd::Rx) => return keyer_rx(cfg),
+        RigKind::Keyer if matches!(action, RadioCmd::Rx) => Ok(RadioRoute::KeyerRx),
         RigKind::Keyer => bail!(
             "station.rig is \"keyer\": the radio itself is not controlled; use `hfnode keyer \
              --config C ...` (docs/keyer.md)"
@@ -942,6 +949,13 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         RigKind::Handheld => {
             bail!("station.rig is \"handheld\": use `hfnode handheld ...` (docs/handheld.md)")
         }
+    }
+}
+
+fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
+    use civ::Rig;
+    if radio_route(cfg.station.rig, &action)? == RadioRoute::KeyerRx {
+        return keyer_rx(cfg);
     }
     match action {
         RadioCmd::Status => {
@@ -1983,22 +1997,24 @@ key_file = '{}'
     fn radio_rx_checks_the_keyer_box() {
         // The systemd unit's ExecStopPost and the supervise scripts run `hfnode
         // radio rx` after every stop or crash (the safety audit's KB-12): with
-        // rig = "keyer" it is the box's rx, at any bring-up stage, since it keys
-        // nothing. No sound card or port here, so it fails at one of those, not at
-        // a refusal.
-        let dir = tempfile::tempdir().unwrap();
-        for stage in ["none", "done"] {
-            let cfg = keyer_cfg(dir.path(), stage);
-            let e = format!("{:#}", radio(&cfg, RadioCmd::Rx).unwrap_err());
-            assert!(
-                !e.contains("not controlled") && !e.contains("bring-up stage"),
-                "{e}"
-            );
-        }
+        // rig = "keyer" it is `hfnode keyer rx`, which keys nothing and so needs no
+        // bring-up stage. Decided before anything is opened, so no test here opens
+        // a sound card.
+        assert_eq!(
+            radio_route(RigKind::Keyer, &RadioCmd::Rx).unwrap(),
+            RadioRoute::KeyerRx
+        );
         // Everything else on `radio` is still refused for the keyer.
-        let cfg = keyer_cfg(dir.path(), "done");
-        let e = radio(&cfg, RadioCmd::Status).unwrap_err().to_string();
-        assert!(e.contains("not controlled"), "{e}");
+        for action in [RadioCmd::Status, RadioCmd::Check, RadioCmd::Tune] {
+            let e = radio_route(RigKind::Keyer, &action)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("not controlled"), "{e}");
+        }
+        assert_eq!(
+            radio_route(RigKind::Ic7300, &RadioCmd::Rx).unwrap(),
+            RadioRoute::Ic7300
+        );
     }
 
     #[test]

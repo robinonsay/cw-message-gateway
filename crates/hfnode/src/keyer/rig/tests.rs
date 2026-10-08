@@ -54,8 +54,12 @@ fn the_link_test_sees_the_box_open_its_key_on_its_own() {
         .count();
     assert_eq!(stops, 0, "{:?}", st.lines);
     drop(st);
-    // And the run's keying still counts against the duty window.
-    assert!(lock(&rig).rest_needed(Duration::from_secs(1)).unwrap() > Duration::ZERO);
+    // And the run's keying still counts against the duty window: a run that
+    // would just fit an empty window has to wait. (Not the box's rest, which is
+    // over 0.1 s of real time after `link_test` returns, however slow the machine.)
+    let r = lock(&rig);
+    let allows = r.s.duty_window.div_f32(r.s.scale).mul_f32(r.s.duty);
+    assert!(r.duty_rest(allows - Duration::from_millis(50)).unwrap() > Duration::ZERO);
 }
 
 #[test]

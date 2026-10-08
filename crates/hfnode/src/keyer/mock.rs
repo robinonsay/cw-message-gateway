@@ -234,6 +234,9 @@ pub struct BoxState {
     /// A fault: it keys every run at this speed, whatever it was asked, so that a
     /// run lasts longer than the node expects (a box with a wrong clock).
     pub slow_wpm: Option<u32>,
+    /// A fault: after its watchdog fires, `STATUS` reports no trip, as firmware
+    /// without the safety audit's KB-7 did (`HELLO` still says `WATCHDOG`).
+    pub hides_watchdog_trip: bool,
 }
 
 impl BoxState {
@@ -251,6 +254,7 @@ impl BoxState {
             resets: 0,
             deaf_to_silence: false,
             slow_wpm: None,
+            hides_watchdog_trip: false,
         }
     }
 
@@ -485,6 +489,20 @@ fn rewrite_wpm(line: &str, wpm: u32) -> String {
         .map_or_else(same, |l| l.as_str().to_string())
 }
 
+/// A `STATUS` reply with a `WATCHDOG` trip reported as none, keeping its id.
+fn hide_watchdog_trip(reply: &str) -> String {
+    let same = || reply.to_string();
+    let Ok((id, body)) = keyer_core::frame::decode(reply.as_bytes()) else {
+        return same();
+    };
+    if !body.starts_with("OK STATUS ") {
+        return same();
+    }
+    let body = body.replace(" WATCHDOG ", " NONE ");
+    keyer_core::frame::encode(id, format_args!("{body}"))
+        .map_or_else(same, |l| l.as_str().to_string())
+}
+
 fn gone() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotConnected,
@@ -527,7 +545,12 @@ impl Transport for MockTransport {
                     });
                 }
             }
-            s.replies.push_back(r.to_string());
+            let r = if s.hides_watchdog_trip {
+                hide_watchdog_trip(r)
+            } else {
+                r.to_string()
+            };
+            s.replies.push_back(r);
         }
         Ok(())
     }
