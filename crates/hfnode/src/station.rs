@@ -921,9 +921,13 @@ pub struct Station<R: Rig + 'static> {
     /// Keying handed to the keyer so far in the current transmission (pieces
     /// sent, whether or not their replies came back); zero between transmissions.
     tx_keying: Duration,
-    /// The carrier of a piece that failed, recorded once `transmit` has forced
-    /// receive; zero otherwise.
+    /// Carrier keyed but not yet counted toward the duty budget: a piece that
+    /// failed, or a tune, recorded once the radio is back on receive
+    /// ([`Station::report`]); zero otherwise.
     unrecorded: Duration,
+    /// Found while keying or tuning, written down once the radio is back on
+    /// receive ([`Station::report`]).
+    unreported: Vec<Unreported>,
     /// A tune is under way: the watchdog times it against `tune_timeout`, not
     /// `max_key`. Set before `keying_since` as the tune starts, and dropped with
     /// `keying_since` held once the window start is done with the tune; the
@@ -931,6 +935,18 @@ pub struct Station<R: Rig + 'static> {
     tuning: Arc<AtomicBool>,
     /// For [`StationConfig::duty`].
     duty: DutyLog,
+}
+
+/// A fault found while keying or tuning, written down only once the radio is back
+/// on receive ([`Station::report`]): a busy disk can hold a write up for longer
+/// than the radio may be left on transmit, or than the watchdog's limit.
+enum Unreported {
+    /// A health log line: event and value.
+    Health(&'static str, String),
+    /// A fault ([`Station::fault`]): what it was.
+    Fault(String),
+    /// Transmitting inhibited at once ([`Station::latch`]): why.
+    Latch(String),
 }
 
 /// Append `<unix time>,<event>,<value>` to the health log at `path`.
@@ -983,6 +999,7 @@ impl<R: Rig + 'static> Station<R> {
             fault_keying: Duration::ZERO,
             tx_keying: Duration::ZERO,
             unrecorded: Duration::ZERO,
+            unreported: Vec::new(),
             tuning: Arc::new(AtomicBool::new(false)),
             duty,
         };
@@ -1432,10 +1449,40 @@ impl<R: Rig + 'static> Station<R> {
         let matched = self
             .tune(t0)
             .and_then(|()| self.with_rig(|r| r.tuner_matched()));
-        let result = match matched {
+        let took = t0.elapsed();
+        // Stopped for the storm stand-down: not a fault of the radio's.
+        let storm = matched.as_ref().err().and_then(|_| self.storm_reason());
+        // The radio may have taken 1C 01 02 even if its reply was lost, or still be
+        // tuning: after a tune that failed, make sure it is back on receive, and
+        // that the tuner has stopped, before anything else. A tune that gave its
+        // answer has been seen back on receive.
+        let stopped = match matched {
+            Ok(_) => Ok(()),
+            Err(_) => self
+                .force_rx()
+                .and_then(|()| self.confirm_tuner_stopped(t0)),
+        };
+        let inhibited = self.tx_inhibited();
+        let mut since = lock(&self.keying_since);
+        if !inhibited {
+            // Not confirmed on receive leaves it to the watchdog to keep trying.
+            *since = None;
+        }
+        // Only now, with the keying above cleared or left to the watchdog, and in
+        // the same hold of it: had the tune ended first, a watchdog tick in between
+        // would time the tune's keying against `max_key` and force receive after a
+        // good tune.
+        self.tuning.store(false, Ordering::SeqCst);
+        drop(since);
+        // Written only now, with the tune's keying over: timed as the tune while a
+        // busy disk held a write up, a good tune was forced to receive once the
+        // write took it past the tune's limit, and a failed one was forced there
+        // only once the write was done.
+        self.report();
+        match matched {
             Ok(true) => {
                 self.tuned = true;
-                self.health("tune", &format!("{}ms", t0.elapsed().as_millis()));
+                self.health("tune", &format!("{}ms", took.as_millis()));
                 Ok(())
             }
             Ok(false) => {
@@ -1451,36 +1498,18 @@ impl<R: Rig + 'static> Station<R> {
                 // A tune that cannot be trusted, whatever the radio did: locked out
                 // until the next one, which is not put off as if this one had done.
                 self.swr_lockout = true;
-                match self.storm_reason() {
-                    // Stopped for the storm stand-down: not a fault of the radio's.
+                match storm {
                     Some(why) => log::warn!("storm stand-down during the tune ({why})"),
                     None => {
                         log::error!("tune failed ({e}): silent until the next tune");
                         self.fault(&format!("the tune failed ({e})"));
                     }
                 }
-                // The radio may have taken 1C 01 02 even if its reply was lost, or
-                // still be tuning: make sure it is back on receive, and that the
-                // tuner has stopped, before going on.
-                self.force_rx()
-                    .and_then(|()| self.confirm_tuner_stopped(t0))
+                stopped
                     .map_err(|e| RigError::Protocol(e.to_string()))
                     .and(Err(e))
             }
-        };
-        let inhibited = self.tx_inhibited();
-        let mut since = lock(&self.keying_since);
-        if !inhibited {
-            // Not confirmed on receive leaves it to the watchdog to keep trying.
-            *since = None;
         }
-        // Only now, with the keying above cleared or left to the watchdog, and in
-        // the same hold of it: had the tune ended first, a watchdog tick in between
-        // would time the tune's keying against `max_key` and force receive after a
-        // good tune.
-        self.tuning.store(false, Ordering::SeqCst);
-        drop(since);
-        result
     }
 
     /// Whether the last [`Station::start_window`] finished, so that the node can
@@ -1537,7 +1566,8 @@ impl<R: Rig + 'static> Station<R> {
     /// from the tune command, against `tune_timeout` and the stuck margin rather
     /// than `max_key` (a tune may take 15 s, p. 16-3; manual text line 8119); it
     /// stops for the storm stand-down. Its whole time counts as carrier for
-    /// [`StationConfig::duty`].
+    /// [`StationConfig::duty`], recorded once the window start is done with the
+    /// tune ([`Station::report`]).
     fn tune(&mut self, t0: Instant) -> civ::Result<()> {
         // Tuning transmits: whoever calls this, not during a storm stand-down.
         if let Some(why) = self.storm_reason() {
@@ -1549,11 +1579,11 @@ impl<R: Rig + 'static> Station<R> {
         // `tuning` stays set until the window start is done with the tune
         // (start_window): the watchdog times all of it against the tune's limit.
         let result = self.run_tuner(t0);
-        self.record_carrier(t0.elapsed());
+        self.unrecorded += t0.elapsed();
         result
     }
 
-    fn run_tuner(&self, t0: Instant) -> civ::Result<()> {
+    fn run_tuner(&mut self, t0: Instant) -> civ::Result<()> {
         self.with_rig(|r| r.start_tune())?;
         // The manual does not say how soon 1C 01 reads 02 ("tuning") after the
         // command: allow a moment for it, so that a tune is not taken as finished
@@ -1591,7 +1621,8 @@ impl<R: Rig + 'static> Station<R> {
                 break;
             }
             if t0.elapsed() > self.cfg.tune_timeout {
-                self.health("tune", "timeout");
+                self.unreported
+                    .push(Unreported::Health("tune", "timeout".into()));
                 return Err(civ::RigError::Timeout);
             }
             if done == 0 {
@@ -1652,10 +1683,14 @@ impl<R: Rig + 'static> Station<R> {
         let result = self
             .transmit_inner(tx)
             .or_else(|e| self.force_rx().and(Err(e)));
-        let carrier = std::mem::take(&mut self.unrecorded);
-        if !carrier.is_zero() {
-            self.record_carrier(carrier);
+        // Back on receive, or not confirmed there: only now is anything written.
+        if result != Err(TxError::Inhibited) {
+            *lock(&self.keying_since) = None;
+        } else {
+            // Not confirmed on receive: leave the watchdog something to retry.
+            lock(&self.keying_since).get_or_insert_with(Instant::now);
         }
+        self.report();
         match &result {
             // A transmission that went out whole, keying for as long as the one that
             // faulted at least: the faults before it are behind.
@@ -1695,15 +1730,6 @@ impl<R: Rig + 'static> Station<R> {
         }
         if let Err(e) = &result {
             self.health("tx-failed", &e.to_string());
-        }
-        if result != Err(TxError::Inhibited) {
-            *self.keying_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        } else {
-            // Not confirmed on receive: leave the watchdog something to retry.
-            self.keying_since
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_insert_with(Instant::now);
         }
         result
     }
@@ -1824,6 +1850,31 @@ impl<R: Rig + 'static> Station<R> {
     /// Count `carrier`, just keyed, toward the duty budget.
     fn record_carrier(&mut self, carrier: Duration) {
         self.duty.record(carrier, self.cfg.duty_window);
+    }
+
+    /// Write down what was held back while the radio was keying or tuning, now
+    /// that it is back on receive or has been forced there: each fault found, as
+    /// its health log line and the fault it counts or the inhibit it latches, and
+    /// the carrier keyed.
+    fn report(&mut self) {
+        for found in std::mem::take(&mut self.unreported) {
+            match found {
+                Unreported::Health(event, value) => self.health(event, &value),
+                Unreported::Fault(what) => self.fault(&what),
+                Unreported::Latch(why) => self.latch(&why),
+            }
+        }
+        let carrier = std::mem::take(&mut self.unrecorded);
+        if !carrier.is_zero() {
+            self.record_carrier(carrier);
+        }
+    }
+
+    /// A fault found while a piece keyed ([`Station::fault`] for `what`), with its
+    /// health log line, written down once `transmit` has forced receive.
+    fn fault_found(&mut self, event: &'static str, value: String, what: String) {
+        self.unreported
+            .extend([Unreported::Health(event, value), Unreported::Fault(what)]);
     }
 
     /// Whether to key the ID `id` before `piece` ([`Station::id_due`] over `ahead`),
@@ -2034,9 +2085,12 @@ impl<R: Rig + 'static> Station<R> {
         self.sleep_until(sent + keying)?;
         self.wait_for_receive(stuck_at)?;
         if self.with_rig(|r| r.keying_confirmed())? == Some(false) {
-            self.health("keying", "not-heard");
             log::error!("the radio was not heard keying: silent until the next window start");
-            self.fault("the radio was not heard keying");
+            self.fault_found(
+                "keying",
+                "not-heard".into(),
+                "the radio was not heard keying".into(),
+            );
             return Err(TxError::NotHeard);
         }
         Ok(())
@@ -2090,36 +2144,45 @@ impl<R: Rig + 'static> Station<R> {
             })?;
             let po = before.max(after);
             if po > self.cfg.po_limit {
-                self.health("po", &format!("{po:.0}"));
                 log::error!(
                     "Po {po:.0}% above {:.0}% for {} W set: silent until the next tune",
                     self.cfg.po_limit,
                     self.cfg.power_watts
                 );
-                self.fault(&format!(
-                    "output {po:.0}% of full, above what {} W gives",
-                    self.cfg.power_watts
-                ));
+                self.fault_found(
+                    "po",
+                    format!("{po:.0}"),
+                    format!(
+                        "output {po:.0}% of full, above what {} W gives",
+                        self.cfg.power_watts
+                    ),
+                );
                 return Err(TxError::HighPower(po));
             }
             if before.min(after) >= min_po {
                 if !tx {
-                    self.health("tx-status", "rx-with-output");
-                    self.latch(
-                        "radio reads receive (1C 00) while the Po meter shows output: its \
-                         transmit status cannot be trusted",
-                    );
+                    self.unreported.extend([
+                        Unreported::Health("tx-status", "rx-with-output".into()),
+                        Unreported::Latch(
+                            "radio reads receive (1C 00) while the Po meter shows output: \
+                             its transmit status cannot be trusted"
+                                .into(),
+                        ),
+                    ]);
                     return Err(TxError::Inhibited);
                 }
                 self.swr_measured = true;
                 self.swr_worst = Some(self.swr_worst.map_or(swr, |w| w.max(swr)));
                 if swr > self.cfg.swr_limit {
-                    self.health("swr", &format!("{swr:.2}"));
                     log::error!(
                         "SWR {swr:.2} above {:.1}: silent until the next tune",
                         self.cfg.swr_limit
                     );
-                    self.fault(&format!("SWR {swr:.2} above {:.1}", self.cfg.swr_limit));
+                    self.fault_found(
+                        "swr",
+                        format!("{swr:.2}"),
+                        format!("SWR {swr:.2} above {:.1}", self.cfg.swr_limit),
+                    );
                     return Err(TxError::HighSwr(swr));
                 }
             }
@@ -2160,9 +2223,12 @@ impl<R: Rig + 'static> Station<R> {
 
     /// Lock out for [`TxError::NoOutput`].
     fn no_output(&mut self) -> TxError {
-        self.health("swr", "no-output");
         log::error!("no output on the Po meter while keying: silent until the next tune");
-        self.fault("no output on the Po meter while keying");
+        self.fault_found(
+            "swr",
+            "no-output".into(),
+            "no output on the Po meter while keying".into(),
+        );
         TxError::NoOutput
     }
 
@@ -3113,6 +3179,9 @@ mod tests {
         /// Stop-CW commands received, and when the first came.
         stops: u32,
         first_stop: Option<Instant>,
+        /// Set by a stop-CW command, for a thread that must not wait for the radio's
+        /// lock to see it.
+        stopped: Arc<AtomicBool>,
         /// The tuner reads "tuning" for ever.
         tuner_stuck: bool,
         /// Whether the tuner matched cannot be read after a tune.
@@ -3165,6 +3234,10 @@ mod tests {
         /// The station's tune flag, and what it read as the tuner's answer was read.
         tuning: Option<Arc<AtomicBool>>,
         tuning_at_match: Option<bool>,
+        /// No meters, as a keyer box or a handheld has none, and what the rig says
+        /// when asked whether it saw the radio key ([`Rig::keying_confirmed`]).
+        no_meters: bool,
+        heard: Option<bool>,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -3191,6 +3264,7 @@ mod tests {
                 tune_reply_lost: false,
                 stops: 0,
                 first_stop: None,
+                stopped: Arc::default(),
                 tuner_stuck: false,
                 matched_unreadable: false,
                 tuner_unreadable_after_stop: false,
@@ -3214,6 +3288,8 @@ mod tests {
                 latch_at_dot: None,
                 tuning: None,
                 tuning_at_match: None,
+                no_meters: false,
+                heard: None,
             }
         }
 
@@ -3356,6 +3432,7 @@ mod tests {
         }
         fn stop_cw(&mut self) -> civ::Result<()> {
             self.stops += 1;
+            self.stopped.store(true, Ordering::SeqCst);
             self.first_stop.get_or_insert_with(Instant::now);
             self.stopped_since_tune |= self.tune_started;
             if let Some(lag) = self.stop_lag.take() {
@@ -3401,6 +3478,12 @@ mod tests {
         }
         fn inhibit_transmit(&mut self) -> civ::Result<()> {
             self.sim.inhibit_transmit()
+        }
+        fn has_meters(&self) -> bool {
+            !self.no_meters
+        }
+        fn keying_confirmed(&mut self) -> civ::Result<Option<bool>> {
+            Ok(self.heard)
         }
     }
 
@@ -3630,6 +3713,242 @@ mod tests {
         assert_eq!(sent, Err(TxError::Stuck));
         assert!(forced, "receive forced before the duty file was written");
         assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
+    }
+
+    /// A file whose first write waits until something reads it, as a disk that
+    /// holds the write up does: a pipe, read only once receive has been forced on
+    /// the radio (from now on) and `hold` has passed since, or two seconds have
+    /// passed without it (well inside `max_key`, so the watchdog does not force it
+    /// meanwhile). Later writes go through at once.
+    #[cfg(unix)]
+    struct HeldUp {
+        file: PathBuf,
+        done: Arc<AtomicBool>,
+        reader: thread::JoinHandle<(bool, String)>,
+    }
+
+    #[cfg(unix)]
+    impl HeldUp {
+        fn new(file: PathBuf, rig: &Arc<Mutex<Radio>>, hold: Duration) -> Self {
+            let made = std::process::Command::new("mkfifo").arg(&file).status();
+            assert!(made.unwrap().success(), "mkfifo {}", file.display());
+            // Seen without the radio's lock, which the station may hold while it
+            // writes.
+            let stopped = Arc::new(AtomicBool::new(false));
+            rig.lock().unwrap().stopped = stopped.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let reader = {
+                let (file, done) = (file.clone(), done.clone());
+                thread::spawn(move || {
+                    let until = Instant::now() + Duration::from_secs(2);
+                    let forced = loop {
+                        if stopped.load(Ordering::SeqCst) {
+                            break true;
+                        }
+                        if Instant::now() >= until {
+                            break false;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    };
+                    if forced {
+                        thread::sleep(hold);
+                    }
+                    // Held open from here on: no later write waits.
+                    let mut pipe = std::fs::File::open(&file).unwrap();
+                    let mut written = String::new();
+                    loop {
+                        let before = written.len();
+                        std::io::Read::read_to_string(&mut pipe, &mut written).unwrap();
+                        if written.len() == before && done.load(Ordering::SeqCst) {
+                            return (forced, written);
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                })
+            };
+            Self { file, done, reader }
+        }
+
+        /// Whether receive had been forced before the first write went through,
+        /// and all that was written.
+        fn read(self) -> (bool, String) {
+            // Opened before the reader is told to stop: a reader still waiting for
+            // a writer takes this one, which writes nothing.
+            let last = std::fs::OpenOptions::new().write(true).open(&self.file);
+            self.done.store(true, Ordering::SeqCst);
+            drop(last);
+            self.reader.join().unwrap()
+        }
+    }
+
+    /// A fault found while a piece keys is written down (its health log line, and
+    /// the fault it counts or the inhibit it latches) only once the radio has been
+    /// forced to receive, however long the disk takes. Written first, a held-up
+    /// write kept a radio keying into a bad load, or with no output, on transmit for
+    /// as long.
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_health_log_write_does_not_hold_up_forcing_receive_after_a_fault() {
+        type Setup = fn(&mut Radio);
+        let faults: [(&str, Setup, Transmission, TxError, &str); 5] = [
+            (
+                "high SWR",
+                |r| r.sim.swr = 3.5,
+                tx(&["TEST"]),
+                TxError::HighSwr(3.5),
+                ",swr,3.50",
+            ),
+            (
+                "too much output",
+                |r| r.sim.po_override = Some(90.0),
+                tx(&["TEST"]),
+                TxError::HighPower(90.0),
+                ",po,90",
+            ),
+            (
+                "no output",
+                |r| r.dead_after = Some(1),
+                four_pieces(),
+                TxError::NoOutput,
+                ",swr,no-output",
+            ),
+            (
+                "receive with output",
+                |r| r.status_blind = true,
+                tx(&["TEST"]),
+                TxError::Inhibited,
+                ",tx-status,rx-with-output",
+            ),
+            (
+                "not heard, on a rig without meters",
+                |r| (r.no_meters, r.heard) = (true, Some(false)),
+                tx(&["TEST"]),
+                TxError::NotHeard,
+                ",keying,not-heard",
+            ),
+        ];
+        for (what, set, sent, failed, line) in faults {
+            let dir = tempfile::tempdir().unwrap();
+            let health = dir.path().join("health.csv");
+            let mut rig = Radio::new(fast_rig());
+            set(&mut rig);
+            let mut st = Station::new(rig, cfg(), Some(health.clone()));
+            st.configure().unwrap();
+            let held = HeldUp::new(health, &st.rig(), Duration::ZERO);
+            assert_eq!(st.transmit(&sent), Err(failed), "{what}");
+            let (forced, written) = held.read();
+            assert!(written.contains(line), "{what}: {written}");
+            assert!(
+                forced,
+                "{what}: receive forced before the health log was written"
+            );
+            assert!(!st.can_transmit(), "{what}: locked out");
+        }
+    }
+
+    /// The second fault in a row latches the inhibit only once the radio has been
+    /// forced to receive, however long the disk takes to write the inhibit file.
+    /// Written first, with the radio's lock held, a held-up write kept a radio
+    /// keying into a bad load on transmit for as long, and kept the watchdog from
+    /// reaching it too.
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_inhibit_file_write_does_not_hold_up_forcing_receive_at_a_second_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rig = Radio::new(fast_rig());
+        rig.sim.swr = 3.5;
+        let mut st = Station::new(rig, cfg(), Some(dir.path().join("health.csv")));
+        st.configure().unwrap();
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        st.start_window().unwrap();
+        let held = HeldUp::new(dir.path().join(INHIBIT_FILE), &st.rig(), Duration::ZERO);
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        let (forced, written) = held.read();
+        assert!(written.contains("2 faults in a row"), "{written}");
+        assert!(forced, "receive forced before the inhibit file was written");
+        assert!(st.tx_inhibited());
+        assert!(st.rig().lock().unwrap().sim.tx_inhibit, "at the radio too");
+    }
+
+    /// Once a fault has forced the radio to receive, writing the fault down is not
+    /// timed as keying, however long the disk takes: the watchdog does not force
+    /// receive a second time.
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_health_log_write_after_a_fault_is_not_keying() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = dir.path().join("health.csv");
+        let mut c = cfg();
+        c.max_key = Duration::from_secs(1);
+        let mut rig = Radio::new(fast_rig());
+        rig.sim.swr = 3.5;
+        let mut st = Station::new(rig, c, Some(health.clone()));
+        st.configure().unwrap();
+        // Held up for two seconds after the forced receive, twice `max_key`.
+        let held = HeldUp::new(health, &st.rig(), Duration::from_secs(2));
+        assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighSwr(3.5)));
+        let (forced, written) = held.read();
+        assert!(written.contains(",swr,3.50"), "{written}");
+        assert!(forced);
+        assert!(
+            !st.watchdog_fired.load(Ordering::SeqCst),
+            "the watchdog forced receive again"
+        );
+    }
+
+    /// A tune seen back on receive has stopped keying, however long the disk then
+    /// takes to write its carrier to the duty file. Timed as the tune while the file
+    /// was written, a good tune was forced to receive once the write had taken it
+    /// past the tune's limit (mock scenarios with that write held up 2.5 s:
+    /// `pending-timeout`, `lost-result`, 17 FF sent twice).
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_duty_file_write_after_a_tune_is_not_keying() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg();
+        // SimRig's tune takes 150 ms at `fast_rig`'s speed, timed against 1.3 s.
+        c.tune_timeout = Duration::from_secs(1);
+        let mut st = Station::new(
+            Radio::new(fast_rig()),
+            c,
+            Some(dir.path().join("health.csv")),
+        );
+        st.configure().unwrap();
+        // The tune's carrier goes to the duty file two seconds after the tune began,
+        // past the tune's limit.
+        let tmp = dir.path().join(DUTY_FILE).with_extension("tmp");
+        let held = HeldUp::new(tmp, &st.rig(), Duration::ZERO);
+        let tuned = st.start_window();
+        let (_, written) = held.read();
+        assert!(!written.is_empty(), "the duty file went through the pipe");
+        assert!(tuned.is_ok(), "{tuned:?}");
+        assert!(st.tuned() && st.can_transmit());
+        assert_eq!(st.rig().lock().unwrap().stops, 0, "receive was not forced");
+    }
+
+    /// A tune that failed is forced to receive before anything about it is
+    /// written, however long the disk takes. Written first, a held-up write kept a
+    /// tuner run past its time limit transmitting for as long.
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_health_log_write_does_not_hold_up_forcing_receive_after_a_failed_tune() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = dir.path().join("health.csv");
+        let mut rig = Radio::new(fast_rig());
+        (rig.tuner_stuck, rig.tune_ends_on_stop) = (true, true);
+        let mut c = cfg();
+        c.tune_timeout = Duration::from_millis(600);
+        // The watchdog's limit for the tune, 5.6 s: it does not force receive while
+        // the write is held up.
+        c.stuck_margin = Duration::from_secs(5);
+        let mut st = Station::new(rig, c, Some(health.clone()));
+        st.configure().unwrap();
+        let held = HeldUp::new(health, &st.rig(), Duration::ZERO);
+        assert!(st.start_window().is_err());
+        let (forced, written) = held.read();
+        assert!(written.contains(",tune,timeout"), "{written}");
+        assert!(forced, "receive forced before the health log was written");
+        assert!(!st.can_transmit() && !st.tx_inhibited(), "locked out");
     }
 
     #[test]
