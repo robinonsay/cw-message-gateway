@@ -44,9 +44,12 @@ uncommitted gets in), at one fixed path, `/tmp/pico2-keyer-build`, with the
 commit's first eight characters as `KEYER_BUILD_ID`, and writes `pico2-keyer.uf2`,
 its `pico2-keyer.uf2.sha256` and `pico2-keyer.elf` into `firmware/pico2-keyer`. The
 UF2 comes out byte for byte the same as CI's for that commit, so its SHA-256 is
-the one CI and the safety audit publish. CI checks that, building each commit from
-two checkouts in different places. A Mac should give the same file; that has not
-been checked.
+the one CI and the safety audit publish. CI builds each commit this way twice, from
+checkouts in two places, and fails if the two files differ. That is all on Linux:
+on a Mac, `build.sh` has never been compared with CI's build. A match there shows
+the download is what the commit builds to; a difference shows nothing about the
+download. Either way, the file to flash is CI's, checked against the hash the
+audit publishes ([docs/keyer.md](../../docs/keyer.md), "Flashing the firmware").
 
 A plain `cargo build` does not: keyer-core is outside this crate's workspace, so
 cargo puts its absolute path into the hash in every symbol name, and the code's

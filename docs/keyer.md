@@ -131,14 +131,22 @@ and stamps the commit into the firmware, which the box reports in `HELLO`. Set
 commit; the CI log and summary print it) and the node refuses to talk to a box
 running anything else.
 
-The build is reproducible: built from the same commit with
-`firmware/pico2-keyer/build.sh`, as in
-[firmware/pico2-keyer/README.md](../firmware/pico2-keyer/README.md), "Building it
-yourself", a UF2 comes out byte for byte the same as CI's, with the same SHA-256,
-wherever the checkout is. So you can check CI's file independently, or flash your
-own. A plain `cargo build` is not that build: it can lay the code out differently
-depending on where the checkout is, and without the build id the box reports `-`.
-Fine for development, not for operating.
+The file you flash is always the CI download, checked against the SHA-256 the
+audit published (step 2). Rebuilding the firmware yourself is a way to check that
+hash, not a way around it:
+
+- **On Linux, `sh firmware/pico2-keyer/build.sh COMMIT`** (in
+  [firmware/pico2-keyer/README.md](../firmware/pico2-keyer/README.md), "Building it
+  yourself") gives a UF2 byte for byte the same as CI's for that commit, wherever
+  your checkout is. It builds the commit at one fixed path,
+  `/tmp/pico2-keyer-build`, which is how CI and the audit build it. No other way of
+  building is checked to give CI's file.
+- **On a Mac,** a build, `build.sh` included, has never been compared with CI's.
+  If its SHA-256 matches, the download is what that commit builds to. If it
+  differs, that says nothing about the download: go by the audit's hash.
+- **A plain `cargo build`** lays the code out differently depending on where the
+  checkout is, and without the build id the box reports `-`. Fine for
+  development, never for operating.
 
 ## Setting up the radio
 
