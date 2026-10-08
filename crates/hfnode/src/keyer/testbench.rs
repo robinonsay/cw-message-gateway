@@ -85,6 +85,16 @@ pub fn bench(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
 /// [`bench`] with radio time running `scale` times faster than real time: 1 for
 /// what depends on real-time waits.
 pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+    bench_with(scale, tweak, |_| {})
+}
+
+/// [`bench_at`], with `before_open` done to the box, the radio already listening
+/// to it, before the node's rig opens it.
+pub fn bench_with(
+    scale: f32,
+    tweak: impl FnOnce(&mut RadioSettings),
+    before_open: impl FnOnce(&MockBox),
+) -> Bench {
     let clock = Clock::new(scale);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
@@ -99,6 +109,7 @@ pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
     let mut rs = RadioSettings::new(8000, 600.0);
     tweak(&mut rs);
     let radio = MockRadio::start(rs, keyer_box.clone(), monitor.clone(), None, None);
+    before_open(&keyer_box);
     let rig = KeyerRig::open(
         keyer_box.transport(),
         monitor,

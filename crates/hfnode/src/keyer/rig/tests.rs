@@ -1,8 +1,8 @@
 //! The keyer rig with the mock box and radio, under the station's safety layer.
 
 use super::*;
-use crate::keyer::mock::RadioSettings;
-use crate::keyer::testbench::{bench, bench_at, radio_secs, tx};
+use crate::keyer::mock::{MockBox, RadioSettings};
+use crate::keyer::testbench::{bench, bench_at, bench_with, radio_secs, tx, SCALE};
 use crate::station::TxError;
 
 #[test]
@@ -288,15 +288,24 @@ fn a_box_whose_control_loop_hangs_is_reset_by_its_watchdog() {
         "{longest} ms"
     );
     drop(st);
-    // The node learns the run ended early, and then, once the audio covers the
-    // time the box went quiet, that the key is open.
+    // The node learns the run ended early; and the box came back tripped
+    // (`WATCHDOG`) with its key open, so that every status read is an error from
+    // then on, for the station to inhibit on.
     let first = r.is_transmitting();
     assert!(first.is_err(), "{first:?}");
     let deadline = Instant::now() + radio_secs(4.0);
-    while r.is_transmitting().unwrap() {
-        assert!(Instant::now() < deadline, "{:?}", r.transmit_detail());
+    let st = loop {
+        if let Ok(st) = r.status() {
+            break st;
+        }
+        assert!(Instant::now() < deadline, "the box did not come back");
         thread::sleep(radio_secs(0.1));
-    }
+    };
+    assert_eq!(st.trip, Trip::Watchdog);
+    assert!(!st.busy());
+    let e = r.is_transmitting().unwrap_err();
+    assert!(e.to_string().contains("watchdog fired"), "{e}");
+    assert!(r.send_cw("TEST").is_err());
 }
 
 #[test]
@@ -480,6 +489,74 @@ fn a_box_that_trips_inhibits_transmitting() {
     );
     let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
     assert!(why.contains("tripped"), "{why}");
+}
+
+/// Send the box `lines` with no node attached, as if the node had stopped since.
+fn tell_box(kb: &MockBox, lines: &[&str]) {
+    let mut t = kb.transport();
+    for (id, body) in (1..).zip(lines) {
+        let l = keyer_core::frame::encode(id, format_args!("{body}")).unwrap();
+        t.write_line(l.as_str()).unwrap();
+    }
+}
+
+fn wait_for_box(kb: &MockBox, what: &str, done: impl Fn(&MockBox) -> bool) {
+    let deadline = Instant::now() + radio_secs(5.0);
+    while !done(kb) {
+        assert!(Instant::now() < deadline, "the box did not {what}");
+        thread::sleep(radio_secs(0.1));
+    }
+}
+
+#[test]
+fn a_box_tripped_before_the_node_opens_it_inhibits_and_keys_nothing() {
+    // A box that tripped while no node was attached (the node stopped and was
+    // started again, as systemd does after a crash) is opened, so that the station
+    // latches its inhibit and emails the owner, rather than `run` failing to start
+    // without a word; and nothing is keyed (rubric H4).
+    fn stuck(kb: &MockBox) {
+        tell_box(kb, &["CW 20 PARIS PARIS", "TEST ARM", "TEST STUCK"]);
+        wait_for_box(kb, "trip", |kb| kb.now().trip() == Trip::Down);
+    }
+    fn hung(kb: &MockBox) {
+        tell_box(kb, &["CW 20 PARIS PARIS", "TEST ARM", "TEST HANG"]);
+        wait_for_box(kb, "come back from its watchdog", |kb| {
+            let st = kb.now();
+            st.resets == 1 && st.trip() == Trip::Watchdog && st.connected()
+        });
+    }
+    type Before = fn(&MockBox);
+    let cases: [(&str, Before); 2] = [
+        ("tripped (its key stayed down", stuck),
+        ("watchdog fired", hung),
+    ];
+    for (why, before) in cases {
+        let mut b = bench_with(SCALE, |_| {}, before);
+        let lines = b.keyer_box.now().lines.len();
+        {
+            let rig = b.station.rig();
+            let mut r = lock(&rig);
+            let refusal = r.refusal().map(str::to_string);
+            assert!(
+                refusal.as_deref().is_some_and(|w| w.contains(why)),
+                "{refusal:?}"
+            );
+            assert!(r.is_transmitting().is_err());
+        }
+        assert_eq!(
+            b.station.transmit(&tx(&["DE N0DE K"])),
+            Err(TxError::Inhibited)
+        );
+        let inhibit = std::fs::read_to_string(b.inhibit_file()).unwrap();
+        assert!(inhibit.contains(why), "{inhibit}");
+        let st = b.keyer_box.now();
+        assert!(
+            st.lines[lines..].iter().all(|l| !l.contains(" CW ")),
+            "{:?}",
+            &st.lines[lines..]
+        );
+        assert!(!st.key_down());
+    }
 }
 
 #[test]

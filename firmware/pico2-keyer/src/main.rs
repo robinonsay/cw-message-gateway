@@ -20,23 +20,40 @@
 //! - The loop watches the key pin by its own clock readings and trips the box if it
 //!   has been high for the key-down limit, whatever the `Keyer`'s own timeline says
 //!   (`keyer_core::control::PinGuard`).
-//! - A panic opens the key and stops the loop, so the watchdog resets the box.
+//! - The loop checks its clock (TIMER0, on the crystal's microsecond tick, which
+//!   no debugger can pause) against the processor's own count (SysTick on
+//!   `clk_sys`): if the clock stops while the processor runs on, it opens the key,
+//!   trips the box and stops feeding the watchdog
+//!   (`keyer_core::control::ClockCheck`).
+//! - Every pass leaves the box's trip, key and duty budget in the watchdog's
+//!   scratch registers, which a watchdog reset keeps and unplugging clears: a box
+//!   that tripped stays tripped, and a restart neither clears a trip nor refills
+//!   the duty budget (`keyer_core::keyer::Saved`). After a watchdog reset the box
+//!   comes up tripped.
+//! - A panic, a HardFault or any unexpected exception opens the key first, then
+//!   turns off every PWM output, then stops, so the watchdog resets the box
+//!   ([`safe_state`]).
 
 #![no_std]
 #![no_main]
 
 use api::common::Write;
 use api::gpio::Gpio;
-use keyer_core::control::{Control, Hardware};
-use keyer_core::keyer::{Boot, Keyer, Limits};
+use keyer_core::control::{CPU_CYCLES_MASK, Control, Hardware};
+use keyer_core::keyer::{Boot, Keyer, Limits, Saved};
 use pico2::clocks::Rp2350Clocks;
 use pico2::common::board::Rp2350;
 use pico2::gpio::gpio::{Rp2350Gpio, Rp2350GpioOut};
+use pico2::pwm::Rp2350Pwm;
+use pico2::systick::{self, Rp2350SysTick};
 use pico2::timer::Rp2350Timer;
 use pico2::usb::{Rp2350Usb, UsbDeviceConfig};
-use pico2::watchdog::{ChipResetCause, ResetReason, Rp2350Watchdog};
+use pico2::watchdog::{ChipResetCause, ResetReason, Rp2350Watchdog, Scratch};
 
-pico2::entry!(main);
+pico2::entry!(main, safe_state = safe_state);
+
+// The loop's clock check counts the processor's cycles modulo the SysTick's 24 bits.
+const _: () = assert!(CPU_CYCLES_MASK == systick::CYCLES_MASK);
 
 /// The key pin, GP16 (the Pico 2's pin 21). Also in `panic` below, and in
 /// docs/keyer.md's wiring.
@@ -67,6 +84,7 @@ const BUILD: &str = match option_env!("KEYER_BUILD_ID") {
 /// The board: the one place that touches the chip.
 struct Board {
     timer: Rp2350Timer,
+    systick: Rp2350SysTick,
     usb: Rp2350Usb,
     watchdog: Rp2350Watchdog,
     key: Rp2350GpioOut<KEY_GPIO>,
@@ -74,8 +92,19 @@ struct Board {
 }
 
 impl Hardware for Board {
+    const CPU_CYCLES_PER_MS: u32 = systick::CYCLES_PER_MS;
+
     fn now_ms(&self) -> u64 {
         self.timer.now() / 1000
+    }
+
+    fn cpu_cycles(&self) -> u32 {
+        self.systick.cycles()
+    }
+
+    fn save(&mut self, words: [u32; 2]) {
+        self.watchdog.set_scratch(Scratch::Scratch0, words[0]);
+        self.watchdog.set_scratch(Scratch::Scratch1, words[1]);
     }
 
     fn usb_poll(&mut self) {
@@ -117,7 +146,13 @@ fn main() -> ! {
 
     let clocks = Rp2350Clocks::new(board.clocks);
     let timer = Rp2350Timer::new(board.timer, &clocks);
+    let systick = Rp2350SysTick::new(board.systick, &clocks);
     let mut watchdog = Rp2350Watchdog::new(board.watchdog, &clocks);
+    // What the box saved before it restarted: nothing after a power-up.
+    let saved = Saved::decode([
+        watchdog.scratch(Scratch::Scratch0),
+        watchdog.scratch(Scratch::Scratch1),
+    ]);
     // Holds the USB pull-up off for about 10 ms so that the host sees a fresh
     // attach: before the watchdog starts.
     let usb = Rp2350Usb::new(board.usb, &clocks, &timer, USB);
@@ -136,26 +171,52 @@ fn main() -> ! {
 
     let mut hw = Board {
         timer,
+        systick,
         usb,
         watchdog,
         key,
         led,
     };
-    let keyer = Keyer::new(Limits::BOX, boot, hw.now_ms()).with_build(BUILD);
+    let keyer = Keyer::restore(Limits::BOX, boot, hw.now_ms(), saved).with_build(BUILD);
     let mut control = Control::new(keyer, &hw);
     loop {
         control.pass(&mut hw);
     }
 }
 
-/// Open the key and stop. The watchdog, if it has started, resets the box; if
-/// not, it stays here with the key open until it is unplugged.
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+/// What a panic, a HardFault and any unexpected exception do (the panic handler
+/// below, and rustos's fault handlers through `entry!`'s `safe_state`) before
+/// they stop and the watchdog, if it has started, resets the box: open the key
+/// FIRST, with one register write and nothing before it, then turn off every
+/// PWM output. This firmware drives no PWM output; the second step is there so
+/// that one added later (an MCW tone) is covered too, and it comes after the
+/// key so that it can never delay it. This firmware never takes the PWM block
+/// out of reset; rustos's `silence_all` reads `RESET_DONE` and writes nothing
+/// while the block is held in reset, and otherwise only stores `CC` = 0, which
+/// turns outputs off. `check_faults.py` checks the order in the built image:
+/// the first store each handler makes is the one that opens the key.
+fn safe_state() {
+    key_open();
+    // SAFETY: called only from the panic and fault handlers, after which no
+    // owner of a PWM output runs again.
+    unsafe { Rp2350Pwm::silence_all() };
+}
+
+/// Open the key: one register write, no driver, no lock, nothing that can
+/// fault.
+fn key_open() {
     // SIO GPIO_OUT_CLR (RP2350 datasheet, SIO registers: 0xd0000000 + 0x020):
     // drives GP16 low if it is an output; harmless if it is not yet.
     const SIO_GPIO_OUT_CLR: *mut u32 = 0xd000_0020 as *mut u32;
     unsafe { SIO_GPIO_OUT_CLR.write_volatile(1 << KEY_GPIO) };
+}
+
+/// Open the key, turn off the PWM outputs and stop. The watchdog, if it has
+/// started, resets the box; if not, it stays here with the key open until it
+/// is unplugged.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    safe_state();
     loop {
         core::hint::spin_loop();
     }

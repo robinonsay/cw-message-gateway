@@ -12,7 +12,7 @@
 //! | Command | Reply |
 //! |---|---|
 //! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <rest ms> <duty budget s> <uptime ms> <boot> <build> <name>` |
-//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms>` |
+//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms>`; `<trip>` is `NONE`, `DOWN`, `PIN`, `SLOW`, `CLOCK` or `WATCHDOG` |
 //! | `CW <wpm> <text>` | `OK CW`, keying from that moment |
 //! | `STOP` | `OK STOP` |
 //! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG` or `TEST STUCK` within 2 s is taken |
@@ -54,7 +54,9 @@ impl Limits {
 pub enum Boot {
     /// Powered up (plugged in), or reset by its button or the debugger.
     Power,
-    /// Its hardware watchdog reset it: the control loop stalled.
+    /// Its hardware watchdog reset it: the control loop stalled, `TEST HANG`
+    /// stopped it, or it stopped feeding the watchdog on purpose after a `CLOCK`
+    /// trip. The box comes up tripped (`WATCHDOG`, or the trip it saved).
     Watchdog,
     Other,
 }
@@ -125,7 +127,8 @@ impl Ended {
     }
 }
 
-/// A fault that stops the box keying until it is power-cycled.
+/// A fault that stops the box keying until it is power-cycled. A trip survives
+/// a restart that is not a power-up ([`Saved`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trip {
     None,
@@ -137,22 +140,105 @@ pub enum Trip {
     /// A pass of the firmware's control loop took longer than
     /// [`limits::SLOW_PASS_MS`] with the key pin high.
     Slow,
+    /// The control loop's clock stopped or slowed against the processor's own
+    /// count, or that count stopped against the clock ([`crate::control`]):
+    /// no time limit can be trusted.
+    Clock,
+    /// The box restarted because its watchdog fired: its control loop stopped,
+    /// with the key in a state nothing recorded.
+    Watchdog,
 }
 
 impl Trip {
+    const ALL: [Self; 6] = [
+        Self::None,
+        Self::Down,
+        Self::Pin,
+        Self::Slow,
+        Self::Clock,
+        Self::Watchdog,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "NONE",
             Self::Down => "DOWN",
             Self::Pin => "PIN",
             Self::Slow => "SLOW",
+            Self::Clock => "CLOCK",
+            Self::Watchdog => "WATCHDOG",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [Self::None, Self::Down, Self::Pin, Self::Slow]
+        Self::ALL.into_iter().find(|t| t.as_str() == s)
+    }
+}
+
+/// What the box leaves for its next boot, in two words that survive a watchdog
+/// reset but not a power-up (the RP2350's watchdog scratch registers): its trip,
+/// whether its key was down, and its duty budget, as of the last pass of its
+/// control loop ([`Keyer::saved`], [`Keyer::restore`]).
+///
+/// So a box that tripped stays tripped until it is unplugged, and a host that
+/// makes the box restart (`TEST HANG`, or a fault) cannot get a fresh duty
+/// budget out of it: a restart carries the budget over, with the key-down that
+/// nobody saw taken off it ([`limits::RESTART_CHARGE_MS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+    pub trip: Trip,
+    /// The key was down.
+    pub key: bool,
+    /// The duty budget, ms; below zero after a run held longer than it planned.
+    pub budget: i32,
+}
+
+impl Saved {
+    /// The top half of the first word: what marks the words as the box's.
+    const MAGIC: u32 = 0x4b59;
+
+    /// The two words: `MAGIC`, the flags (the trip's index, the key in bit 3)
+    /// and a check byte in the first; the budget in the second.
+    pub fn encode(&self) -> [u32; 2] {
+        let trip = Trip::ALL.iter().position(|&t| t == self.trip).unwrap_or(0) as u32;
+        let flags = trip | (u32::from(self.key) << 3);
+        let budget = self.budget as u32;
+        let head = (Self::MAGIC << 16) | (flags << 8);
+        [head | u32::from(Self::check(head, budget)), budget]
+    }
+
+    /// The state in `words`, if they hold one: not if they are zero (as after a
+    /// power-up), left by other firmware, or damaged.
+    pub fn decode(words: [u32; 2]) -> Option<Self> {
+        let [head, budget] = words;
+        if head >> 16 != Self::MAGIC || head & 0xff != u32::from(Self::check(head & !0xff, budget))
+        {
+            return None;
+        }
+        let flags = (head >> 8) & 0xff;
+        if flags & !0xf != 0 {
+            return None;
+        }
+        Some(Self {
+            trip: *Trip::ALL.get((flags & 0x7) as usize)?,
+            key: flags & 0x8 != 0,
+            budget: budget as i32,
+        })
+    }
+
+    /// A byte that changes with any one changed bit of `head`'s top three bytes
+    /// or of `budget`.
+    fn check(head: u32, budget: u32) -> u8 {
+        let mut c: u8 = 0xa5;
+        for b in (head >> 8)
+            .to_be_bytes()
             .into_iter()
-            .find(|t| t.as_str() == s)
+            .skip(1)
+            .chain(budget.to_be_bytes())
+        {
+            c = c.rotate_left(1) ^ b;
+        }
+        c
     }
 }
 
@@ -220,7 +306,9 @@ pub struct Keyer {
 impl Keyer {
     /// A box that started at `now` for `boot`, key up. Its duty budget starts full
     /// only after a power-up: a box that keeps restarting earns its budget again
-    /// before it keys.
+    /// before it keys. After a watchdog reset it starts tripped (`WATCHDOG`):
+    /// whatever stopped its control loop, it keys nothing more until it is
+    /// unplugged.
     pub fn new(limits: Limits, boot: Boot, now: u64) -> Self {
         Self {
             limits,
@@ -239,9 +327,44 @@ impl Keyer {
             armed_until: None,
             last_line: now,
             ended: Ended::None,
-            trip: Trip::None,
+            trip: match boot {
+                Boot::Watchdog => Trip::Watchdog,
+                _ => Trip::None,
+            },
             hang: Hang::No,
             now,
+        }
+    }
+
+    /// [`Keyer::new`], then what the box saved before it restarted, if it did
+    /// ([`Saved`]): its trip, if it had one, stays; its duty budget is the lower
+    /// of the new start's and the saved one, less [`limits::RESTART_CHARGE_MS`]
+    /// if its key was down; and it rests ([`limits::REST_MS`]) before its first
+    /// run, as after any run.
+    pub fn restore(limits: Limits, boot: Boot, now: u64, saved: Option<Saved>) -> Self {
+        let mut k = Self::new(limits, boot, now);
+        if let Some(s) = saved {
+            if s.trip != Trip::None {
+                k.trip = s.trip;
+            }
+            let charge = if s.key {
+                i64::from(limits::RESTART_CHARGE_MS)
+            } else {
+                0
+            };
+            k.budget = k.budget.min(i64::from(s.budget) - charge);
+            k.run_ended_at = Some(now);
+        }
+        k
+    }
+
+    /// What to leave for the next boot at `now` ([`Saved`]).
+    pub fn saved(&self, now: u64) -> Saved {
+        let budget = self.budget_then(now.max(self.budget_at));
+        Saved {
+            trip: self.trip,
+            key: self.key,
+            budget: budget.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
         }
     }
 

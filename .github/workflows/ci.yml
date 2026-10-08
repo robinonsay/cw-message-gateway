@@ -138,11 +138,12 @@ jobs:
 
       # The version firmware/pico2-keyer/rust-toolchain.toml pins, which is what
       # cargo uses there: keep the two the same.
+      # llvm-tools: llvm-objdump, for check_faults.py below.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
           targets: thumbv8m.main-none-eabihf
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -161,6 +162,12 @@ jobs:
           id="$(git rev-parse --short=8 HEAD)"
           echo "KEYER_BUILD_ID=$id" >>"$GITHUB_ENV"
           KEYER_BUILD_ID="$id" cargo build --release --locked
+
+      # The fault and panic handlers open the key before anything else (the
+      # audit's KB-9), read from the machine code: nothing on a computer can run
+      # them.
+      - name: fault handlers open the key first
+        run: python3 check_faults.py target/thumbv8m.main-none-eabihf/release/pico2-keyer
 
       - name: UF2 and its SHA-256
         run: |

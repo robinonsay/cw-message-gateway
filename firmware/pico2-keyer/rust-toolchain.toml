@@ -5,4 +5,5 @@
 [toolchain]
 channel = "1.97.0"
 targets = ["thumbv8m.main-none-eabihf"]
-components = ["rustfmt", "clippy"]
+# llvm-tools: llvm-objdump, for check_faults.py.
+components = ["rustfmt", "clippy", "llvm-tools"]

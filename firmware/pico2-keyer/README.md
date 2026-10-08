@@ -9,10 +9,19 @@ hfnode (`station.rig = "keyer"`). How to wire, flash and bring it up is in
   [crates/keyer-core](../../crates/keyer-core), which hfnode's tests and
   `hfnode selftest` run as a mock box; this file moves USB bytes and the key pin.
 - It runs on [rustos](https://github.com/robinonsay/rustos), a bare-metal Rust
-  runtime for the Pico 2 with no outside crates: its clocks, timer, watchdog, GPIO
-  and USB serial drivers.
+  runtime for the Pico 2 with no outside crates: its clocks, timer, SysTick,
+  watchdog, GPIO, PWM and USB serial drivers, and the fault handlers, which call
+  this firmware's `safe_state` (the key open first) before they stop.
 - `uf2.py`: turns the built ELF file into `pico2-keyer.uf2`, the file you copy onto
   the Pico 2, after checking that the RP2350 would boot it.
+- `check_faults.py`: reads the built ELF's HardFault, default exception and panic
+  handlers and checks that the first store each makes opens the key (GP16). No
+  computer can run those handlers, so CI checks the machine code instead. It needs
+  `llvm-objdump`, which `rust-toolchain.toml` installs (`llvm-tools`):
+
+  ```sh
+  python3 check_faults.py target/thumbv8m.main-none-eabihf/release/pico2-keyer
+  ```
 
 ## Getting it
 

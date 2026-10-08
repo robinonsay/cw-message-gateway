@@ -110,6 +110,14 @@ fn hangtest_sees_the_watchdog_open_the_key() {
         .lines
         .iter()
         .any(|l| l.contains("CW 20 DE N0DE")));
+    // It came back tripped, so nothing more is keyed, and the node's stop latches
+    // its inhibit, as after `stucktest`.
+    assert_eq!(b.keyer_box.now().trip(), Trip::Watchdog);
+    assert!(key(&mut b.station, "DE N0DE").is_err());
+    let file = b.inhibit_file();
+    drop(b.station);
+    let why = std::fs::read_to_string(file).unwrap();
+    assert!(why.contains("watchdog"), "{why}");
 }
 
 #[test]

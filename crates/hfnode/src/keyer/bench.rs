@@ -460,7 +460,8 @@ fn rest(st: &Station<KeyerRig>, keying: Duration) -> Result<()> {
 }
 
 /// `hfnode keyer hangtest`: the box's control loop hangs mid-run with its key
-/// down; its watchdog must reset it and open the key within its 0.5 s.
+/// down; its watchdog must reset it and open the key within its 0.5 s, and it must
+/// come back tripped (`WATCHDOG`), keying nothing until it is plugged in again.
 ///
 /// The node identifies first, so that the sidetone is measured before the key is
 /// held down, and the rig lock is free between each look at the box: the operator's
@@ -482,11 +483,21 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
         ));
     }
     // The node finds out: the run ended early, the box came back from its reset.
+    // Not `is_transmitting`, which reads the tripped box it comes back as an error,
+    // for the station to inhibit on: here the restart is what the test is for.
     let end = t0 + TEST_SPAN.div_f32(scale);
     let open = loop {
-        match lock(&rig).is_transmitting() {
-            Ok(false) => break Instant::now(),
-            Ok(true) => {}
+        let status = lock(&rig).status();
+        match status {
+            Ok(st) if !st.busy() => match lock(&m).key_state() {
+                KeyState::Open => break Instant::now(),
+                KeyState::Held(why) => {
+                    notes.push(format!("node: {why}"));
+                    break Instant::now();
+                }
+                KeyState::Unsure => {}
+            },
+            Ok(_) => {}
             Err(e) => notes.push(format!("node: {e}")),
         }
         if Instant::now() >= end {
@@ -518,16 +529,30 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
     if !restarted {
         notes.push("the box did not report a watchdog restart".into());
     }
+    let trip = if hello.is_some() {
+        lock(&rig).status().ok().map(|st| st.trip)
+    } else {
+        None
+    };
+    let tripped = trip == Some(Trip::Watchdog);
+    if tripped {
+        notes.push(
+            "the box came back from its watchdog reset tripped (WATCHDOG), as it must: unplug it \
+             and plug it in again before keying"
+                .into(),
+        );
+    } else {
+        notes.push(format!(
+            "the box came back from its reset {}, not tripped WATCHDOG: after its watchdog fires \
+             it must key nothing until it is plugged in again",
+            trip.map_or("unread", |t| t.as_str())
+        ));
+    }
     let measured = check_measured(longest, span, &mut notes);
-    notes.push(
-        "unplug the box and plug it in again before keying: its watchdog reset is not a power-up, \
-         and the trip it came back from is not kept"
-            .into(),
-    );
     Ok(TestReport {
         longest,
         limit,
-        passed: restarted && measured && longest <= limit,
+        passed: restarted && tripped && measured && longest <= limit,
         notes,
     })
 }

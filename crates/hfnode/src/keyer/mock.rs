@@ -170,7 +170,10 @@ impl BoxState {
                     run.end = Some(reset);
                     run.ended = keyer_core::keyer::Ended::None;
                 }
-                self.keyer = Keyer::new(Limits::BOX, Boot::Watchdog, reset);
+                // As the firmware: what the last pass before the hang saved comes
+                // back, and a watchdog restart comes up tripped.
+                let saved = self.keyer.saved(at);
+                self.keyer = Keyer::restore(Limits::BOX, Boot::Watchdog, reset, Some(saved));
                 self.hung_at = None;
                 self.resets += 1;
                 self.replies.clear();
@@ -214,6 +217,11 @@ impl BoxState {
 
     pub fn trip(&self) -> keyer_core::keyer::Trip {
         self.keyer.trip()
+    }
+
+    /// Plugged in and enumerated: the node can talk to it.
+    pub fn connected(&self) -> bool {
+        self.usb == Usb::Up
     }
 
     /// The key-down stretches that overlap `from..to` (box ms); one still down

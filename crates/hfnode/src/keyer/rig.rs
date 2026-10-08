@@ -9,9 +9,10 @@
 //! if either says so, or if the audio cannot yet show its key open after a run.
 //!
 //! Once the audio has shown the radio's key held with the box's open, or the box
-//! has come back from its watchdog firing (outside `hfnode keyer hangtest`), the
-//! rig never again reads the radio as on receive: every status read is an error,
-//! and the station latches its transmit inhibit, which only the owner clears.
+//! has come back from its watchdog firing (outside `hfnode keyer hangtest`), or
+//! was tripped when the rig opened it, the rig never again reads the radio as on
+//! receive: every status read is an error, and the station latches its transmit
+//! inhibit, which only the owner clears, and emails the owner.
 //!
 //! Before each run the rig waits ([`Rig::rest_needed`]) for the box's rest after
 //! its last run and its duty budget, and for `[keyer] max_duty_percent` of the
@@ -20,7 +21,7 @@
 use super::link::{refused, Link, Transport};
 use super::monitor::{KeyState, Monitor, MAX_LAG, STUCK_AFTER_RUN};
 use super::proto::{Command, Hello, Reply, Status};
-use super::{check_hello, REPLY_TIMEOUT};
+use super::{check_hello, trip_text, REPLY_TIMEOUT};
 use anyhow::{anyhow, bail};
 use civ::{Result, Rig, RigError};
 use keyer_core::keyer::{Boot, Ended, Trip};
@@ -202,11 +203,20 @@ impl KeyerRig {
         link.request(&Command::Stop)
             .map_err(|e| anyhow!("keyer box: STOP: {e}"))?;
         let st = status(&mut link).map_err(|e| anyhow!("keyer box: STATUS: {e}"))?;
-        if st.trip != Trip::None {
-            bail!(
-                "the keyer box has tripped (its key stayed down past its limit): unplug it \
-                 and plug it in again"
+        if st.trip != Trip::None && fault.is_none() {
+            // Its key is open, but something went wrong that only a person can look
+            // into: the rig keys nothing and reads every status as an error, so that
+            // a station on it latches its inhibit and tells the owner (as when the box
+            // trips while the node runs), rather than the node failing to start
+            // without a word. A box back from its watchdog is tripped too; the fault
+            // above already says why.
+            let msg = format!(
+                "the keyer box is tripped ({}): look at the radio and the box, then unplug \
+                 the box and plug it in again",
+                trip_text(st.trip)
             );
+            log::error!("{msg}");
+            fault = Some(msg);
         }
         if st.busy() {
             bail!("the keyer box still reads its key down after STOP");
@@ -701,11 +711,11 @@ impl Rig for KeyerRig {
             // and it tripped because a key-down went on past its limit: an error each
             // time, so that the station inhibits transmitting and tells the owner.
             Ok(st) if st.trip != Trip::None => {
-                return Err(RigError::Protocol(
-                    "the keyer box has tripped (a key-down went on past its limit): check \
-                     it, then unplug it and plug it in again"
-                        .into(),
-                ))
+                return Err(RigError::Protocol(format!(
+                    "the keyer box has tripped ({}): check it, then unplug it and plug it in \
+                     again",
+                    trip_text(st.trip)
+                )))
             }
             Ok(_) => false,
             Err(e) => {
