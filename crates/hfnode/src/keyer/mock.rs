@@ -118,9 +118,9 @@ pub struct BoxState {
     /// A fault: it keys every run at this speed, whatever it was asked, so that a
     /// run lasts longer than the node expects (a box with a wrong clock).
     pub slow_wpm: Option<u32>,
-    /// A fault: a watchdog reset brings it back as if plugged in, keeping nothing
-    /// (firmware without the saved state of the safety audit's KB-7).
-    pub forgets_on_reset: bool,
+    /// A fault: after its watchdog fires, `STATUS` reports no trip, as firmware
+    /// without the safety audit's KB-7 did (`HELLO` still says `WATCHDOG`).
+    pub hides_watchdog_trip: bool,
 }
 
 impl BoxState {
@@ -136,7 +136,7 @@ impl BoxState {
             resets: 0,
             deaf_to_silence: false,
             slow_wpm: None,
-            forgets_on_reset: false,
+            hides_watchdog_trip: false,
         }
     }
 
@@ -176,12 +176,8 @@ impl BoxState {
                 }
                 // As the firmware: what the last pass before the hang saved comes
                 // back, and a watchdog restart comes up tripped.
-                self.keyer = if self.forgets_on_reset {
-                    Keyer::new(Limits::BOX, Boot::Power, reset)
-                } else {
-                    let saved = self.keyer.saved(at);
-                    Keyer::restore(Limits::BOX, Boot::Watchdog, reset, Some(saved))
-                };
+                let saved = self.keyer.saved(at);
+                self.keyer = Keyer::restore(Limits::BOX, Boot::Watchdog, reset, Some(saved));
                 self.hung_at = None;
                 self.resets += 1;
                 self.replies.clear();
@@ -337,6 +333,20 @@ fn rewrite_wpm(line: &str, wpm: u32) -> String {
         .map_or_else(same, |l| l.as_str().to_string())
 }
 
+/// A `STATUS` reply with a `WATCHDOG` trip reported as none, keeping its id.
+fn hide_watchdog_trip(reply: &str) -> String {
+    let same = || reply.to_string();
+    let Ok((id, body)) = keyer_core::frame::decode(reply.as_bytes()) else {
+        return same();
+    };
+    if !body.starts_with("OK STATUS ") {
+        return same();
+    }
+    let body = body.replace(" WATCHDOG ", " NONE ");
+    keyer_core::frame::encode(id, format_args!("{body}"))
+        .map_or_else(same, |l| l.as_str().to_string())
+}
+
 fn gone() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotConnected,
@@ -377,7 +387,13 @@ impl Transport for MockTransport {
                     });
                 }
             }
-            s.replies.push_back(r.as_str().to_string());
+            let r = r.as_str().to_string();
+            let r = if s.hides_watchdog_trip {
+                hide_watchdog_trip(&r)
+            } else {
+                r
+            };
+            s.replies.push_back(r);
         }
         Ok(())
     }
