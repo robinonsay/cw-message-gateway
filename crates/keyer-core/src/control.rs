@@ -13,9 +13,10 @@
 //! 3. take the lines that arrived, queueing their replies;
 //! 4. bring the keyer up to now;
 //! 5. check the pins ([`PinGuard`]): trip the box if the key or the tone has been
-//!    on for the key-down limit, or the PTT down for the PTT limit (the box's own,
-//!    [`limits::PTT_MS`], or the keyer's if shorter; an off shorter than
-//!    [`limits::MIN_GAP_MS`] does not break either), or if this pass came more
+//!    on for the key-down limit, or the PTT down for the PTT limit (each the box's
+//!    own, [`limits::KEY_DOWN_MS`] and [`limits::PTT_MS`], or the keyer's if
+//!    shorter; an off shorter than [`limits::MIN_GAP_MS`] does not break either),
+//!    or if this pass came more
 //!    than [`limits::SLOW_PASS_MS`] after the last with the key or the tone on.
 //!    This times the pins by the loop's own clock readings, not by the keyer's
 //!    timeline;
@@ -332,9 +333,9 @@ impl Control {
             reader: LineReader::new(),
             out: Outbox::new(),
             epoch: hw.link_epoch(),
-            guard: PinGuard::new(now, l.key_down_ms),
-            // Never longer than the box's PTT limit, whatever limits the keyer
-            // was given: this watch does not rely on the keyer's.
+            // Never longer than the box's own limits, whatever limits the keyer
+            // was given: these watches do not rely on the keyer's.
+            guard: PinGuard::new(now, l.key_down_ms.min(limits::KEY_DOWN_MS)),
             ptt_guard: PinGuard::ptt(now, l.ptt_ms.min(limits::PTT_MS)),
             pins: Outputs::OFF,
             clock: ClockCheck::new(now, hw.cpu_cycles(), H::CPU_CYCLES_PER_MS),

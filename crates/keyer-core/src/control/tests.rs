@@ -534,6 +534,41 @@ fn mcw_holds_the_ptt_pin_and_keys_the_tone_pin() {
     assert!(b.replies().contains(&"OK MCW".to_string()));
 }
 
+/// The pin guard on the key, as `Control::new` builds it: the keyer's timeline is
+/// wrong (limits made for the test let it hold the key down for 10 s), but the
+/// loop's own watch on the key pin trips the box at the box's key-down limit.
+#[test]
+fn the_key_pin_guard_trips_at_the_key_down_limit_whatever_the_keyer_says() {
+    let loose = Limits {
+        key_down_ms: 10_000,
+        ..Limits::BOX
+    };
+    let mut b = Board::new();
+    let mut c = Control::new(Keyer::new(loose, Boot::Power, 0), &b);
+    c.pass(&mut b);
+    b.send(1, "CW 20 EEEEEEEEEE");
+    let mut key = PinRecord::default();
+    for t in 1..=70u64 {
+        b.t = t;
+        c.pass(&mut b);
+        key.pass(b.key);
+    }
+    // Mid-gap: the next element is the one held.
+    b.send(2, "TEST ARM");
+    b.send(3, "TEST STUCK");
+    for t in 71..=15_000u64 {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(9, "STATUS");
+        }
+        c.pass(&mut b);
+        key.pass(b.key);
+    }
+    assert_eq!(key.longest, 1000, "{} ms", key.longest);
+    assert_eq!(c.keyer().trip(), Trip::Pin);
+    assert!(!b.key && !b.tone && !b.ptt);
+}
+
 /// The pin guard on the PTT, as `Control::new` builds it: the keyer's timeline is
 /// wrong (limits made for the test let it hold the PTT for two minutes), but the
 /// loop's own watch on the PTT pin trips the box at the box's PTT limit.

@@ -312,8 +312,8 @@ Fastest first:
    (720 ms). A key-down past 1 s opens the key and trips the box: it refuses to key
    until it is unplugged and plugged in again, and the node latches its transmit
    inhibit. The loop also times the key **pin** by its own clock readings, apart
-   from its Morse timeline, so runs sent back to back cannot hold the pin high past
-   that limit, and a pass of the loop that comes more than 10 ms late with the key
+   from its Morse timeline and at the box's own 1 s whatever limits the keyer was
+   given, so runs sent back to back cannot hold the pin high past that limit, and a pass of the loop that comes more than 10 ms late with the key
    down trips the box too.
 2. **The box's rest and duty budget.** It refuses a new run until the key has been
    up for a second, and refuses one whose key-down time is more than its budget: the
