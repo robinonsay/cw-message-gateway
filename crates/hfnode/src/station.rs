@@ -921,6 +921,9 @@ pub struct Station<R: Rig + 'static> {
     /// Keying handed to the keyer so far in the current transmission (pieces
     /// sent, whether or not their replies came back); zero between transmissions.
     tx_keying: Duration,
+    /// The carrier of a piece that failed, recorded once `transmit` has forced
+    /// receive; zero otherwise.
+    unrecorded: Duration,
     /// A tune is under way: the watchdog times it against `tune_timeout`, not
     /// `max_key`.
     tuning: Arc<AtomicBool>,
@@ -977,6 +980,7 @@ impl<R: Rig + 'static> Station<R> {
             faults: 0,
             fault_keying: Duration::ZERO,
             tx_keying: Duration::ZERO,
+            unrecorded: Duration::ZERO,
             tuning: Arc::new(AtomicBool::new(false)),
             duty,
         };
@@ -1632,6 +1636,10 @@ impl<R: Rig + 'static> Station<R> {
         let result = self
             .transmit_inner(tx)
             .or_else(|e| self.force_rx().and(Err(e)));
+        let carrier = std::mem::take(&mut self.unrecorded);
+        if !carrier.is_zero() {
+            self.record_carrier(carrier);
+        }
         match &result {
             // A transmission that went out whole, keying for as long as the one that
             // faulted at least: the faults before it are behind.
@@ -1978,15 +1986,21 @@ impl<R: Rig + 'static> Station<R> {
             Ok(()) if meters => self.watch_piece(at, keying, stuck_at),
             Ok(()) => self.watch_unmetered(at, keying, stuck_at),
         };
-        // Seen back on receive: the keying is over. Cleared before the duty file is
-        // written below, which a busy disk can hold up for longer than the watchdog's
-        // limit: timed as keying, a good piece was forced to receive and the
-        // transmission stopped before its next one.
-        if watched.is_ok() {
-            *lock(&self.keying_since) = None;
+        // All of its carrier, also if it was cut off: a lost reply may still have
+        // keyed it. The duty file it is written to can be held up by a busy disk for
+        // longer than the watchdog's limit, so not while the radio may be keying.
+        match watched {
+            // Seen back on receive: the keying is over. Timed as keying while the
+            // file was written, a good piece was forced to receive and the
+            // transmission stopped before its next one.
+            Ok(()) => {
+                *lock(&self.keying_since) = None;
+                self.record_carrier(carrier);
+            }
+            // Recorded once `transmit` has forced receive: written first, it held up
+            // the forced receive of a radio stuck on transmit.
+            Err(_) => self.unrecorded += carrier,
         }
-        // All of it, also if it was cut off: a lost reply may still have keyed it.
-        self.record_carrier(carrier);
         watched
     }
 
@@ -3540,6 +3554,56 @@ mod tests {
         let r = rig.lock().unwrap();
         assert_eq!(r.sim.sent, ["E", "E"]);
         assert_eq!(r.stops, 0, "receive was not forced");
+    }
+
+    /// A radio stuck on transmit is forced to receive before the duty file is
+    /// written, however long the disk takes. Written first, a held-up write kept it
+    /// on transmit for as long (Windows CI: `fault-stuck-last-over`, on transmit
+    /// 7.5 s after the last element against a 4.6 s limit).
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_duty_file_write_does_not_hold_up_forcing_a_stuck_radio_to_receive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = Station::new(
+            Radio::new(fast_rig()),
+            cfg(),
+            Some(dir.path().join("health.csv")),
+        );
+        st.configure().unwrap();
+        st.rig().lock().unwrap().sim.stuck_key = true;
+        // The next write of the duty file waits until something reads it.
+        let tmp = dir.path().join(DUTY_FILE).with_extension("tmp");
+        let made = std::process::Command::new("mkfifo").arg(&tmp).status();
+        assert!(made.unwrap().success(), "mkfifo {}", tmp.display());
+        let reader = {
+            let (tmp, rig) = (tmp.clone(), st.rig());
+            thread::spawn(move || {
+                // Read only once receive has been forced, or not for two seconds,
+                // well inside `max_key`: the watchdog does not force it meanwhile.
+                let until = Instant::now() + Duration::from_secs(2);
+                let forced = loop {
+                    if rig.lock().unwrap().stops > 0 {
+                        break true;
+                    }
+                    if Instant::now() >= until {
+                        break false;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                };
+                (forced, std::fs::read(tmp))
+            })
+        };
+        let sent = st.transmit(&tx(&["E"]));
+        // Whatever happened, let the reader go: a pipe still there takes a writer.
+        let _ = std::fs::OpenOptions::new().write(true).open(&tmp);
+        let (forced, written) = reader.join().unwrap();
+        assert!(
+            !written.unwrap().is_empty(),
+            "the duty file went through the pipe"
+        );
+        assert_eq!(sent, Err(TxError::Stuck));
+        assert!(forced, "receive forced before the duty file was written");
+        assert!(!st.rig().lock().unwrap().is_transmitting().unwrap());
     }
 
     #[test]
