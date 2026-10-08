@@ -176,11 +176,12 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Item | Set to | Why |
 |---|---|---|
 | CI-V Address | **94h** (default) | Must equal `station.civ_address` (02h to DFh). Instructions written for the IC-7300MK2 use B6h; do not copy them. |
-| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node warns if it is linked. |
+| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node refuses to write to the radio if it is linked. |
 | CI-V USB Baud Rate | **115200** | Must equal `station.baud`. Set it explicitly rather than Auto. |
 | CI-V USB Echo Back | **OFF** (default) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
 | CI-V Transceive | **OFF** (default is ON) | Stops the radio sending unsolicited status frames whenever a setting changes. The driver ignores frames not addressed to it, so ON also works. |
 | USB Serial Function | **CI-V** (default) | The USB serial port must carry CI-V, not decoded RTTY. |
+| CI-V Output (for ANT) | **OFF** (default) | ON sends the radio's status (frequency and so on) unasked for an antenna controller (p. 12-10). The node warns while it is ON. |
 
 **Transmit control over USB, keep OFF:**
 
@@ -199,7 +200,8 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | ACC/USB AF Output Level | Start at 50% (default) and adjust | Receive audio to the Pi. Adjust so the strongest signals do not clip (test plan, step 2). |
 | ACC/USB AF SQL | **OFF (OPEN)** (default) | The decoder needs audio all the time, not gated by squelch. |
 | ACC/USB AF Beep/Speech... Output | **OFF** (default) | Keeps beeps and voice announcements out of the decoder. |
-| USB MOD Level, DATA OFF MOD | Leave as is | The node does not transmit audio. |
+| USB MOD Level | Leave as is | The node does not transmit audio. |
+| DATA OFF MOD, DATA MOD | **MIC,ACC** and **ACC** (defaults), not USB | With USB in either, sound the computer plays to the radio is transmitted in that mode (p. 12-10). The node sends no audio; it warns if either includes USB. |
 
 **CW** (in CW mode, from the Multi-function menu):
 
@@ -208,15 +210,17 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | CW PITCH | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
 | BKIN D (break-in delay) | Leave to the node | Holds transmit between characters and words. The node sets it to 10.0 dots (fixed, not a config key: 3 dots longer than a word gap, so the radio stays on transmit for a whole keyer message) at start-up and at the start of each listening window, and reads it back at start-up. |
 | Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on), and reads it back. It never selects full break-in. |
-| Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder. The node warns if it is anything else. |
+| Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder; the node times its keying at 1:1:3.0. The node refuses to write to the radio if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
 
 **Transmit backstop and tuner** (MENU > SET > Function, p. 12-5):
 
 | Item | Set to | Why |
 |---|---|---|
-| PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it. It does not read this item yet, so check it on the radio's screen. |
-| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `hfnode run` refuses to start while it is OFF. |
+| PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it, and refuses to write to the radio unless it is OFF. |
+| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `radio tune`, `radio cw` and `hfnode run` refuse to start unless it is 3 min. |
+| VOX (VOX/BK-IN key) | **OFF** | With VOX ON, sound at the microphone transmits (p. 4-10). The node refuses to write to the radio unless it is off. |
+| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it. `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON; `radio check` and `radio setup` warn. |
 
 **Display** (MENU > SET > Display, p. 12-12):
 
@@ -233,7 +237,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 **Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
 With it ON the radio streams waveform data to the port the node uses, which slows
 the node's stop commands. Close any panadapter program before starting the node;
-`radio check` warns while it is ON.
+the node refuses to write to the radio while it is ON.
 
 **On the main screen:** SPLIT off and XIT (∂TX) off. With either on, the radio would
 transmit somewhere other than the frequency the node set; the node refuses to
