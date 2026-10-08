@@ -328,6 +328,8 @@ pub enum Panel {
     /// Set the Time-Out Timer, as CI-V numbers it: "00=OFF, 01=3 min., 02=5 min.,
     /// 03=10min." and so on (1A 05 00 29, p. 19-4; manual text line 8861).
     TimeOutTimer(u8),
+    /// Push [TRANSMIT]: the radio goes on transmit by itself.
+    Transmit,
 }
 
 /// A transaction the operator works on the next two unused lines (from line 42):
@@ -1226,6 +1228,7 @@ impl Air {
                     Panel::Split(tx_hz) => radio.set_split(tx_hz),
                     Panel::DeltaTx(on) => radio.set_delta_tx(on),
                     Panel::TimeOutTimer(v) => radio.configure(|c| c.menu.time_out_timer = v),
+                    Panel::Transmit => radio.push_transmit(),
                 }
                 Ok(())
             }
@@ -3942,6 +3945,25 @@ pub fn scenarios() -> Vec<Scenario> {
             Step::Panel(Panel::Mode(0x01, 0x01)),
             Step::Wait(660.0),
         ];
+        s
+    });
+    v.push({
+        let mut s = base(
+            "front-panel-transmit",
+            "someone at the radio pushes TRANSMIT while the node is idle: its idle watch reads \
+             1C 00 every second, forces receive, turns the radio's TX Inhibit on and latches \
+             the inhibit, long before its next radio check (check_minutes 30 here)",
+        );
+        // The watch reads every second of real time, twice before it acts: at most
+        // a few seconds even at the highest scale, well inside the wait.
+        s.node.check_minutes = 30;
+        s.script = vec![
+            Step::Wait(30.0),
+            Step::Panel(Panel::Transmit),
+            Step::Wait(800.0),
+        ];
+        s.expect.forced_receive = true;
+        s.expect.inhibited = true;
         s
     });
     v.push({

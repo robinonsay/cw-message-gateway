@@ -3124,6 +3124,9 @@ mod tests {
         tuner_read_hang: Option<Duration>,
         /// The next this many SWR reads fail (a reply lost to RF on the USB cable).
         swr_read_fails: u32,
+        /// Latched by the first speed read (14 0C) once a piece has gone out: an
+        /// inhibit latched (by the watchdog, a stop signal) between two pieces.
+        latch_at_dot: Option<Arc<Inhibit>>,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -3170,6 +3173,7 @@ mod tests {
                 jam_on_send: false,
                 tuner_read_hang: None,
                 swr_read_fails: 0,
+                latch_at_dot: None,
             }
         }
 
@@ -3208,6 +3212,11 @@ mod tests {
             self.sim.set_break_in_delay(dots)
         }
         fn dot_duration(&mut self) -> civ::Result<Duration> {
+            if !self.sim.sent.is_empty() {
+                if let Some(inhibit) = self.latch_at_dot.take() {
+                    inhibit.latch("a stop signal");
+                }
+            }
             self.sim.dot_duration()
         }
         fn start_tune(&mut self) -> civ::Result<()> {
@@ -4280,6 +4289,21 @@ mod tests {
         let mut r = rig.lock().unwrap();
         assert_eq!(r.sim.sent.len(), 1, "{:?}", r.sim.sent);
         assert!(!r.is_transmitting().unwrap());
+    }
+
+    /// B2 (the safety audit's pass at 894e995): the rest before each piece checks
+    /// the inhibit, so one latched between two pieces, here as the next piece reads
+    /// the keyer's speed, stops the transmission before that piece is keyed.
+    #[test]
+    fn an_inhibit_latched_between_pieces_stops_the_next_one() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().latch_at_dot = Some(st.tx_inhibit.clone());
+        assert_eq!(st.transmit(&four_pieces()), Err(TxError::Inhibited));
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert!(r.latch_at_dot.is_none(), "latched");
+        assert_eq!(r.sim.sent.len(), 1, "{:?}", r.sim.sent);
     }
 
     /// B2: the settings read the inhibit before taking the radio, so a latch made

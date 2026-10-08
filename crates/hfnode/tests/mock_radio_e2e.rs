@@ -117,6 +117,7 @@ const NAMES: &[&str] = &[
     "front-panel-time-out-timer",
     "front-panel-delta-tx",
     "front-panel-idle",
+    "front-panel-transmit",
     "other-stations",
 ];
 
@@ -227,6 +228,7 @@ scenario_tests! {
     front_panel_time_out_timer => "front-panel-time-out-timer",
     front_panel_delta_tx => "front-panel-delta-tx",
     front_panel_idle => "front-panel-idle",
+    front_panel_transmit => "front-panel-transmit",
     other_stations => "other-stations",
 }
 

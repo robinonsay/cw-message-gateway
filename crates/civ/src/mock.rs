@@ -1336,6 +1336,17 @@ impl MockRadio {
         self.lock().delta_tx = on;
     }
 
+    /// Someone at the radio pushes [TRANSMIT], which "Toggles between transmit and
+    /// receive" (p. 1-2; manual text lines 391-392): the radio transmits by itself,
+    /// as with VOX, a key or a PTT line, until 1C 00 00 puts it back on receive.
+    pub fn push_transmit(&self) {
+        let mut s = self.lock();
+        let now = s.now();
+        if !s.forced.iter().any(|f| f.1 == OPEN) {
+            s.forced.push((now, OPEN));
+        }
+    }
+
     /// Someone at the radio selects a mode and filter: "01 Send mode data
     /// (transceive)" (p. 19-3), with the mode and filter as on p. 19-9.
     pub fn select_mode(&self, mode: u8, filter: u8) {
