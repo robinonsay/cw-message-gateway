@@ -922,7 +922,9 @@ pub struct Station<R: Rig + 'static> {
     /// sent, whether or not their replies came back); zero between transmissions.
     tx_keying: Duration,
     /// A tune is under way: the watchdog times it against `tune_timeout`, not
-    /// `max_key`.
+    /// `max_key`. Set before `keying_since` as the tune starts, and dropped with
+    /// `keying_since` held once the window start is done with the tune; the
+    /// watchdog reads the two with `keying_since` held.
     tuning: Arc<AtomicBool>,
     /// For [`StationConfig::duty`].
     duty: DutyLog,
@@ -1085,14 +1087,19 @@ impl<R: Rig + 'static> Station<R> {
             let (mut at_radio, mut told) = (false, false);
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(WATCHDOG_TICK);
-                let started = *lock(&since);
+                // Read together, with `since` held, as the station changes `tuning`:
+                // never the keying from before a tune ended and the flag from after.
+                let (started, limit) = {
+                    let keying = lock(&since);
+                    let limit = match tuning.load(Ordering::SeqCst) {
+                        true => tune_limit,
+                        false => max,
+                    };
+                    (*keying, limit)
+                };
                 if started.is_some() {
                     (ticks, keyed, failed) = (0, 0, 0);
                 }
-                let limit = match tuning.load(Ordering::SeqCst) {
-                    true => tune_limit,
-                    false => max,
-                };
                 if started.is_some_and(|t| t.elapsed() > limit) {
                     log::error!("watchdog: keying exceeded {limit:?}, forcing receive");
                     fired.store(true, Ordering::SeqCst);
@@ -1457,10 +1464,18 @@ impl<R: Rig + 'static> Station<R> {
                     .and(Err(e))
             }
         };
-        if !self.tx_inhibited() {
+        let inhibited = self.tx_inhibited();
+        let mut since = lock(&self.keying_since);
+        if !inhibited {
             // Not confirmed on receive leaves it to the watchdog to keep trying.
-            *lock(&self.keying_since) = None;
+            *since = None;
         }
+        // Only now, with the keying above cleared or left to the watchdog, and in
+        // the same hold of it: had the tune ended first, a watchdog tick in between
+        // would time the tune's keying against `max_key` and force receive after a
+        // good tune.
+        self.tuning.store(false, Ordering::SeqCst);
+        drop(since);
         result
     }
 
@@ -1527,8 +1542,9 @@ impl<R: Rig + 'static> Station<R> {
         self.watchdog_fired.store(false, Ordering::SeqCst);
         self.tuning.store(true, Ordering::SeqCst);
         *lock(&self.keying_since) = Some(Instant::now());
+        // `tuning` stays set until the window start is done with the tune
+        // (start_window): the watchdog times all of it against the tune's limit.
         let result = self.run_tuner(t0);
-        self.tuning.store(false, Ordering::SeqCst);
         self.record_carrier(t0.elapsed());
         result
     }
@@ -3127,6 +3143,9 @@ mod tests {
         /// Latched by the first speed read (14 0C) once a piece has gone out: an
         /// inhibit latched (by the watchdog, a stop signal) between two pieces.
         latch_at_dot: Option<Arc<Inhibit>>,
+        /// The station's tune flag, and what it read as the tuner's answer was read.
+        tuning: Option<Arc<AtomicBool>>,
+        tuning_at_match: Option<bool>,
     }
 
     /// After `every` keyer pieces other than the ID, anything longer than the ID
@@ -3174,6 +3193,8 @@ mod tests {
                 tuner_read_hang: None,
                 swr_read_fails: 0,
                 latch_at_dot: None,
+                tuning: None,
+                tuning_at_match: None,
             }
         }
 
@@ -3242,6 +3263,9 @@ mod tests {
             Ok(stuck || self.sim.tuner_busy()?)
         }
         fn tuner_matched(&mut self) -> civ::Result<bool> {
+            if let Some(tuning) = &self.tuning {
+                self.tuning_at_match = Some(tuning.load(Ordering::SeqCst));
+            }
             if self.matched_unreadable {
                 return Err(RigError::Timeout);
             }
@@ -4864,6 +4888,23 @@ mod tests {
         );
         assert!(st.tuned() && st.can_transmit());
         assert_eq!(st.rig().lock().unwrap().stops, 0);
+    }
+
+    /// The watchdog times the tune against the tune's limit until the window start
+    /// is done with it: when the tune flag dropped first, a watchdog tick between
+    /// the two timed the tune against `max_key` and forced receive after a good
+    /// tune (Windows CI on main, `a_tune_longer_than_max_key_is_not_cut_off`).
+    #[test]
+    fn the_tune_is_timed_as_a_tune_until_the_window_is_done_with_it() {
+        let mut c = cfg();
+        c.max_key = Duration::from_millis(300);
+        let mut st = Station::new(Radio::new(SimRig::new()), c, None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().tuning = Some(st.tuning.clone());
+        st.start_window().unwrap();
+        assert_eq!(st.rig().lock().unwrap().tuning_at_match, Some(true));
+        assert!(!st.tuning.load(Ordering::SeqCst));
+        assert!(st.keying_since.lock().unwrap().is_none());
     }
 
     #[test]
