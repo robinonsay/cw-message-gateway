@@ -142,6 +142,11 @@ mod cmd {
     /// 02=Send/read to tuning" (p. 19-7).
     pub const TUNER: &[u8] = &[0x1C, 0x01];
     pub const TUNER_TUNE: u8 = 0x02;
+    /// 16 66: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; lines
+    /// 8788-8789). While it is ON, "When the exciter tries to transmit, “TX
+    /// Inhibit” is displayed and cannot transmit" (p. 13-6; lines 7505-7506). A
+    /// function, not a menu item: the preflight reads it.
+    pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
 
     // Read only. Each of these is sent without data, which reads the item; none of
     // them is ever sent with data.
@@ -188,6 +193,23 @@ mod cmd {
     /// 27 11: "Send/read the Scope wave data output (00=OFF, 01=ON)" (p. 19-14);
     /// with it and the scope ON the radio streams 27 00 waveform data unasked.
     pub const SCOPE_DATA_OUTPUT: &[u8] = &[0x27, 0x11];
+    /// 16 46: "VOX function *(00=OFF, 01=ON)" (p. 19-3; manual text line 8766), the
+    /// asterisk meaning "Send/read data" (line 9395). With VOX ON, sound at the
+    /// microphone puts the radio on transmit (p. 4-10; line 2464).
+    pub const VOX: &[u8] = &[0x16, 0x46];
+    /// 1A 05 00 35: "Send/read PTT tune set *(00=OFF, 01=ON)" (p. 19-4; line 8872):
+    /// the tuner's PTT Start item, which "starts to tune when you push PTT" once the
+    /// frequency has moved more than 1% (p. 12-5; lines 6310-6315).
+    pub const PTT_TUNE: &[u8] = &[0x1A, 0x05, 0x00, 0x35];
+    /// 1A 05 00 66: "Send/read MOD input connector during DATA OFF (00=MIC, 01=ACC,
+    /// 02=MIC/ACC, 03=USB, 04=MIC/USB)" (p. 19-5; lines 8953-8956).
+    pub const MOD_INPUT_DATA_OFF: &[u8] = &[0x1A, 0x05, 0x00, 0x66];
+    /// 1A 05 00 67: "Send/read MOD input connector during DATA (00=MIC, 01=ACC,
+    /// 02=MIC/ACC, 03=USB, 04=MIC/USB)" (p. 19-5; lines 8957-8959).
+    pub const MOD_INPUT_DATA: &[u8] = &[0x1A, 0x05, 0x00, 0x67];
+    /// 1A 05 00 73: "Send/read the CI-V Output (for ANT) capability (00=OFF, 01=ON)"
+    /// (p. 19-5; lines 8973-8974).
+    pub const CIV_OUTPUT_ANT: &[u8] = &[0x1A, 0x05, 0x00, 0x73];
 }
 
 /// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
@@ -598,6 +620,37 @@ impl<P: Port> Ic7300<P> {
     /// USB baud rate and echo items apply (p. 12-10, line 6853).
     pub fn civ_usb_unlinked(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_USB_PORT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 16 46: whether the VOX function is on.
+    pub fn vox(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::VOX, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 16 66: whether the TX Inhibit function is on.
+    pub fn tx_inhibit(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::TX_INHIBIT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 35: whether the tuner's PTT Start is on.
+    pub fn ptt_tune(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::PTT_TUNE, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 66: the MOD input connector during DATA OFF, as the raw code
+    /// ("00=MIC, 01=ACC, 02=MIC/ACC, 03=USB, 04=MIC/USB").
+    pub fn mod_input_data_off(&mut self) -> Result<u8> {
+        self.read_byte(cmd::MOD_INPUT_DATA_OFF, 0x00..=0x04)
+    }
+
+    /// 1A 05 00 67: the MOD input connector during DATA, coded as for 00 66.
+    pub fn mod_input_data(&mut self) -> Result<u8> {
+        self.read_byte(cmd::MOD_INPUT_DATA, 0x00..=0x04)
+    }
+
+    /// 1A 05 00 73: whether CI-V Output (for ANT) is on.
+    pub fn civ_output_ant(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::CIV_OUTPUT_ANT, 0x00..=0x01)? == 0x01)
     }
 }
 

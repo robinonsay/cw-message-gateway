@@ -46,10 +46,13 @@
 //!   received. ICOM's default is OFF (p. 12-11); the mock defaults to ON so that the
 //!   driver's skipping of its own echoed frames is exercised.
 //! - The settings [`crate::preflight`] reads before the node writes anything: the
-//!   transceiver ID (19 00, p. 19-4) and the menu items in [`Menu`] (1A 05 ..., 27 11,
-//!   pp. 19-4 to 19-7, 19-14), each answered as set and never written. Defaults are
-//!   the settings the bring-up asks for (docs/hardware-test-plan.md), so a preflight
-//!   passes unless a test changes one.
+//!   transceiver ID (19 00, p. 19-4) and the items in [`Menu`] (16 46, 1A 05 ...,
+//!   27 11, pp. 19-3 to 19-7, 19-14), each answered as set and never written.
+//!   Defaults are the settings the bring-up asks for (docs/hardware-test-plan.md),
+//!   so a preflight passes unless a test changes one.
+//! - TX Inhibit (16 66, "00=OFF, 01=ON", p. 19-4), which the node may set: while it
+//!   is ON the radio "cannot transmit" (p. 13-6), so command 17 and a tuner cycle put
+//!   out no RF. OFF by default.
 //! - CI-V Transceive is ON by default: "When you change a setting on the
 //!   transceiver, the same change is automatically set on other connected
 //!   transceivers", to "the default transceive address", 00h (p. 12-10). A change
@@ -114,11 +117,21 @@ pub struct MockConfig {
     pub transceiver_id: u8,
     /// The menu items the preflight reads.
     pub menu: Menu,
+    /// 16 66 "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; manual
+    /// text lines 8788-8789). Can also be changed with 16 66 00 and 01. While it is
+    /// ON, "When the exciter tries to transmit, “TX Inhibit” is displayed and cannot
+    /// transmit" (p. 13-6; lines 7505-7506): command 17 and 1C 01 02 are answered OK,
+    /// put out no RF and are recorded as a [`Violation`], since the node must not key
+    /// a radio it has read as inhibited. The manual does not say how the radio
+    /// answers them; OK, as for 17 outside the transmit ranges. A transmission
+    /// already under way is not cut short: the manual only speaks of the exciter
+    /// trying to transmit.
+    pub tx_inhibit: bool,
 }
 
-/// Menu settings the preflight reads, as their CI-V data bytes. The node never
-/// writes them; one sent with data is a [`Violation`]. Each default is what the
-/// bring-up asks for, which is the factory default except where noted.
+/// Menu settings (and VOX) the preflight reads, as their CI-V data bytes. The node
+/// never writes them; one sent with data is a [`Violation`]. Each default is what
+/// the bring-up asks for, which is the factory default except where noted.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Menu {
     /// 1A 05 00 29 Time-Out Timer (CI-V), "00=OFF, 01=3 min., 02=5 min., 03=10min.,
@@ -145,6 +158,20 @@ pub struct Menu {
     pub usb_inhibit_timer: u8,
     /// 27 11 Scope wave data output, "00=OFF, 01=ON" (p. 19-14; line 9360). OFF.
     pub scope_data_output: u8,
+    /// 16 46 VOX function, "00=OFF, 01=ON" (p. 19-3; line 8766). OFF: the manual
+    /// gives no default, and turns it ON with the VOX/BK-IN key (p. 4-10; line 2460).
+    pub vox: u8,
+    /// 1A 05 00 35 PTT tune set (the tuner's PTT Start), "00=OFF, 01=ON" (p. 19-4;
+    /// line 8872). OFF, the factory default (line 6310).
+    pub ptt_tune: u8,
+    /// 1A 05 00 66 and 00 67, MOD input connector during DATA OFF and during DATA,
+    /// "00=MIC, 01=ACC, 02=MIC/ACC, 03=USB, 04=MIC/USB" (p. 19-5; lines 8953-8959).
+    /// 02 (MIC,ACC) and 01 (ACC), the factory defaults (lines 6768 and 6777).
+    pub mod_input_data_off: u8,
+    pub mod_input_data: u8,
+    /// 1A 05 00 73 CI-V Output (for ANT), "00=OFF, 01=ON" (p. 19-5; line 8973). OFF,
+    /// the factory default (line 6846).
+    pub civ_output_ant: u8,
 }
 
 impl Default for Menu {
@@ -159,6 +186,11 @@ impl Default for Menu {
             keyer_ratio: 0x30,
             usb_inhibit_timer: 0x01,
             scope_data_output: 0x00,
+            vox: 0x00,
+            ptt_tune: 0x00,
+            mod_input_data_off: 0x02,
+            mod_input_data: 0x01,
+            civ_output_ant: 0x00,
         }
     }
 }
@@ -168,6 +200,10 @@ impl Menu {
     fn item(&self, hi: u8, lo: u8) -> Option<u8> {
         Some(match (hi, lo) {
             (0x00, 0x29) => self.time_out_timer,
+            (0x00, 0x35) => self.ptt_tune,
+            (0x00, 0x66) => self.mod_input_data_off,
+            (0x00, 0x67) => self.mod_input_data,
+            (0x00, 0x73) => self.civ_output_ant,
             (0x00, 0x74) => self.civ_usb_port,
             (0x00, 0x78) => self.usb_send,
             (0x00, 0x79) => self.usb_keying_cw,
@@ -189,13 +225,13 @@ pub fn is_read(body: &[u8]) -> bool {
         [0x03 | 0x04 | 0x0F]
             | [0x14, 0x0A | 0x0C | 0x0F]
             | [0x15, 0x11 | 0x12]
-            | [0x16, 0x47]
+            | [0x16, 0x46 | 0x47 | 0x66]
             | [0x19, 0x00]
             | [
                 0x1A,
                 0x05,
                 0x00,
-                0x29 | 0x71 | 0x74 | 0x75 | 0x78 | 0x79 | 0x80 | 0x84
+                0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73 | 0x74 | 0x75 | 0x78 | 0x79 | 0x80 | 0x84
             ]
             | [0x1A, 0x05, 0x01, 0x61 | 0x97]
             | [0x1C, 0x00 | 0x01 | 0x03]
@@ -221,6 +257,7 @@ impl Default for MockConfig {
             default_filter: 0x02,
             transceiver_id: 0x94,
             menu: Menu::default(),
+            tx_inhibit: false,
         }
     }
 }
@@ -879,6 +916,14 @@ impl State {
                 self.break_in = *v;
                 Ok(vec![OK])
             }
+            // 16 46 "VOX function *(00=OFF, 01=ON)" (p. 19-3), read only here.
+            [0x16, 0x46] => Ok(vec![0x16, 0x46, self.cfg.menu.vox]),
+            // 16 66 "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4).
+            [0x16, 0x66] => Ok(vec![0x16, 0x66, u8::from(self.cfg.tx_inhibit)]),
+            [0x16, 0x66, v @ (0x00 | 0x01)] => {
+                self.cfg.tx_inhibit = *v == 0x01;
+                Ok(vec![OK])
+            }
             [0x17, data @ ..] => self.send_cw(now, data),
             // 1A 05 00 75: "echo back setting for CI-V operation from USB (00=ON,
             // 01=OFF)" (p. 19-5).
@@ -901,11 +946,13 @@ impl State {
             }
             // 27 11 "Send/read the Scope wave data output" (p. 19-14).
             [0x27, 0x11] => Ok(vec![0x27, 0x11, self.cfg.menu.scope_data_output]),
-            [0x1A, 0x05, 0x00, 0x29 | 0x71 | 0x74 | 0x78 | 0x79 | 0x80 | 0x84, _, ..]
+            [0x1A, 0x05, 0x00, 0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73, _, ..]
+            | [0x1A, 0x05, 0x00, 0x74 | 0x78 | 0x79 | 0x80 | 0x84, _, ..]
             | [0x1A, 0x05, 0x01, 0x61 | 0x97, _, ..]
             | [0x27, 0x11, _, ..]
+            | [0x16, 0x46, _, ..]
             | [0x19, 0x00, _, ..] => Err(format!(
-                "{body:02X?}: the node never writes the radio's menu settings (E1)"
+                "{body:02X?}: the node never writes the radio's menu settings or VOX (E1)"
             )),
             // 1C 00 transceiver's status, "00" RX, "01" TX (p. 19-7).
             [0x1C, 0x00] => Ok(vec![0x1C, 0x00, u8::from(self.at(false, now))]),
@@ -937,6 +984,11 @@ impl State {
             [0x1C, 0x01, 0x02] => {
                 if self.keyer_busy(now) {
                     self.violation(now, body, "tune started while the keyer is sending");
+                }
+                if self.cfg.tx_inhibit {
+                    // "cannot transmit" (p. 13-6): no carrier, no tuner cycle.
+                    self.violation(now, body, "tune started with TX Inhibit ON (p. 13-6)");
+                    return Ok(vec![OK]);
                 }
                 if !self.in_tx_range() {
                     // No carrier outside the transmitter's coverage (p. 16-2). The
@@ -970,7 +1022,7 @@ impl State {
             }
             [0x03 | 0x04, ..]
             | [0x15, 0x11 | 0x12, ..]
-            | [0x16, 0x47, ..]
+            | [0x16, 0x47 | 0x66, ..]
             | [0x1A, 0x05, 0x00, 0x75, ..]
             | [0x1C, 0x00 | 0x01, ..] => Err(format!(
                 "{:02X?}: data not allowed for this command (pp. 19-3 to 19-7)",
@@ -1038,13 +1090,21 @@ impl State {
         let cw_mode = matches!(self.mode, 0x03 | 0x07);
         let tx_on = self.forced.iter().any(|f| f.1 == OPEN);
         let in_range = self.in_tx_range();
-        let on_air = cw_mode && (self.break_in != 0x00 || tx_on) && in_range;
+        // With TX Inhibit ON the exciter "cannot transmit" (p. 13-6).
+        let inhibited = self.cfg.tx_inhibit;
+        let on_air = cw_mode && (self.break_in != 0x00 || tx_on) && in_range && !inhibited;
         if !in_range {
             let why = format!(
                 "17 sent on {} Hz, outside the transmit ranges (p. 16-2): not transmitted",
                 self.frequency_hz
             );
             self.violation(now, &raw, why);
+        } else if inhibited {
+            self.violation(
+                now,
+                &raw,
+                "17 sent with TX Inhibit ON (p. 13-6): not transmitted",
+            );
         } else if !on_air {
             self.violation(
                 now,
@@ -1939,38 +1999,104 @@ mod tests {
 
     #[test]
     fn the_preflight_passes_on_the_mock_and_only_reads() {
-        let (m, mut r) = radio(100.0);
-        let rep = crate::preflight::preflight(&mut r, true);
-        assert!(rep.passed(), "{rep}");
-        // Every item answered: no warning for an item it could not read.
-        assert!(
-            rep.checks
-                .iter()
-                .all(|c| c.level != crate::preflight::Level::Warn),
-            "{rep}"
-        );
-        let cmds = m.commands();
-        assert_eq!(cmds.len(), 21);
-        assert!(cmds.iter().all(|(_, b)| is_read(b)), "{cmds:02X?}");
-        assert!(m.report().violations.is_empty());
+        use crate::preflight::{preflight, Level, Purpose};
+        for purpose in [Purpose::Check, Purpose::Setup, Purpose::Transmit] {
+            let (m, mut r) = radio(100.0);
+            let rep = preflight(&mut r, purpose);
+            assert!(rep.passed(), "{rep}");
+            // Every item answered: no warning for an item it could not read.
+            assert!(rep.checks.iter().all(|c| c.level != Level::Warn), "{rep}");
+            let cmds = m.commands();
+            assert_eq!(cmds.len(), 27);
+            assert!(cmds.iter().all(|(_, b)| is_read(b)), "{cmds:02X?}");
+            assert!(m.report().violations.is_empty());
+        }
     }
 
     #[test]
     fn menu_settings_read_as_set_and_are_never_written() {
-        type Change = fn(&mut Menu);
-        let cases: [(&str, Change); 3] = [
-            ("Time-Out Timer (CI-V)", |m| m.time_out_timer = 0x00),
-            ("USB SEND", |m| m.usb_send = 0x01),
-            ("USB Keying (CW)", |m| m.usb_keying_cw = 0x02),
+        use crate::preflight::{preflight, Level, Purpose};
+        type Change = fn(&mut MockConfig);
+        let cases: [(&str, Change, Level); 13] = [
+            (
+                "Time-Out Timer (CI-V)",
+                |c| c.menu.time_out_timer = 0x00,
+                Level::Fail,
+            ),
+            (
+                "Time-Out Timer (CI-V)",
+                |c| c.menu.time_out_timer = 0x02,
+                Level::Fail,
+            ),
+            ("USB SEND", |c| c.menu.usb_send = 0x01, Level::Fail),
+            (
+                "USB Keying (CW)",
+                |c| c.menu.usb_keying_cw = 0x02,
+                Level::Fail,
+            ),
+            ("VOX", |c| c.menu.vox = 0x01, Level::Fail),
+            ("PTT Start (tuner)", |c| c.menu.ptt_tune = 0x01, Level::Fail),
+            ("TX Inhibit", |c| c.tx_inhibit = true, Level::Fail),
+            ("CI-V USB port", |c| c.menu.civ_usb_port = 0x00, Level::Fail),
+            (
+                "keyer dot/dash ratio",
+                |c| c.menu.keyer_ratio = 0x45,
+                Level::Fail,
+            ),
+            (
+                "scope data output",
+                |c| c.menu.scope_data_output = 0x01,
+                Level::Fail,
+            ),
+            (
+                "MOD input (DATA OFF)",
+                |c| c.menu.mod_input_data_off = 0x04,
+                Level::Warn,
+            ),
+            (
+                "MOD input (DATA)",
+                |c| c.menu.mod_input_data = 0x03,
+                Level::Warn,
+            ),
+            (
+                "CI-V Output (for ANT)",
+                |c| c.menu.civ_output_ant = 0x01,
+                Level::Warn,
+            ),
         ];
-        for (name, change) in cases {
+        for (name, change, level) in cases {
             let (m, mut r) = radio(100.0);
-            m.configure(|c| change(&mut c.menu));
-            let rep = crate::preflight::preflight(&mut r, true);
+            m.configure(change);
+            let rep = preflight(&mut r, Purpose::Transmit);
             let check = rep.checks.iter().find(|c| c.name == name).unwrap();
-            assert_eq!(check.level, crate::preflight::Level::Fail, "{rep}");
+            assert_eq!(check.level, level, "{name}\n{rep}");
+            assert_eq!(rep.failures().count(), usize::from(level == Level::Fail));
             assert!(m.commands().iter().all(|(_, b)| is_read(b)));
+            assert!(m.report().violations.is_empty());
         }
+        // Each new item reads back as set, with the manual's data.
+        let (m, _) = radio(100.0);
+        m.configure(|c| {
+            c.menu.vox = 0x01;
+            c.menu.ptt_tune = 0x01;
+            c.menu.mod_input_data_off = 0x03;
+            c.menu.mod_input_data = 0x04;
+            c.menu.civ_output_ant = 0x01;
+        });
+        for read in [
+            &[0x16, 0x46, 0x01][..],
+            &[0x1A, 0x05, 0x00, 0x35, 0x01],
+            &[0x1A, 0x05, 0x00, 0x66, 0x03],
+            &[0x1A, 0x05, 0x00, 0x67, 0x04],
+            &[0x1A, 0x05, 0x00, 0x73, 0x01],
+            &[0x16, 0x66, 0x00],
+        ] {
+            let cmd = &read[..read.len() - 1];
+            assert!(is_read(cmd), "{cmd:02X?}");
+            let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], cmd, &[0xFD]].concat();
+            assert_eq!(raw(&m, &frame).last().unwrap().body, read);
+        }
+        assert!(m.report().violations.is_empty());
         let (m, _) = radio(100.0);
         m.configure(|c| c.transceiver_id = 0xB6);
         assert_eq!(
@@ -1982,6 +2108,12 @@ mod tests {
             &[0x1A, 0x05, 0x00, 0x78, 0x01],
             &[0x1A, 0x05, 0x01, 0x97, 0x00],
             &[0x27, 0x11, 0x01],
+            &[0x16, 0x46, 0x00],
+            &[0x16, 0x46, 0x01],
+            &[0x1A, 0x05, 0x00, 0x35, 0x00],
+            &[0x1A, 0x05, 0x00, 0x66, 0x03],
+            &[0x1A, 0x05, 0x00, 0x67, 0x01],
+            &[0x1A, 0x05, 0x00, 0x73, 0x00],
         ] {
             let (m, _) = radio(100.0);
             let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], write, &[0xFD]].concat();
@@ -1999,6 +2131,41 @@ mod tests {
         ] {
             assert!(!is_read(set), "{set:02X?}");
         }
+    }
+
+    #[test]
+    fn tx_inhibit_is_set_and_read_and_stops_all_rf() {
+        let (m, mut r) = radio(100.0);
+        setup(&mut r);
+        let send = |bytes: &[u8]| {
+            let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], bytes, &[0xFD]].concat();
+            raw(&m, &frame).last().unwrap().body.clone()
+        };
+        // 16 66 01 sets it, 16 66 reads it back; only 00 and 01 are allowed.
+        assert_eq!(send(&[0x16, 0x66, 0x01]), [OK]);
+        assert!(r.tx_inhibit().unwrap());
+        assert!(m.report().violations.is_empty());
+        assert!(!is_read(&[0x16, 0x66, 0x01]));
+        // Inhibited: CW and a tune are answered OK but nothing goes out, and each is
+        // flagged.
+        r.send_cw("TEST").unwrap();
+        r.start_tune().unwrap();
+        let rep = m.report();
+        assert!(!rep.keyed[0].on_air, "{rep:?}");
+        assert!(rep.transmissions.is_empty() && rep.tunes == 0, "{rep:?}");
+        assert!(!r.is_transmitting().unwrap());
+        assert_eq!(r.read_po().unwrap(), 0.0);
+        assert_eq!(rep.violations.len(), 2, "{:?}", rep.violations);
+        // Cleared with 16 66 00, the radio transmits again.
+        assert_eq!(send(&[0x16, 0x66, 0x00]), [OK]);
+        assert!(!r.tx_inhibit().unwrap());
+        r.send_cw("E").unwrap();
+        assert!(m.report().keyed[1].on_air);
+        wait_idle(&m);
+        r.start_tune().unwrap();
+        assert_eq!(m.report().tunes, 1);
+        assert_eq!(send(&[0x16, 0x66, 0x02]), [NG]);
+        assert_eq!(m.report().violations.len(), 3);
     }
 
     #[test]

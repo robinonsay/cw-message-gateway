@@ -216,6 +216,8 @@ pub struct RadioSetup {
     pub keyer: bool,
     /// The IC-7300's menu settings, as the node's preflight reads them.
     pub menu: Menu,
+    /// The IC-7300's TX Inhibit function (16 66) is ON when the node starts.
+    pub tx_inhibit: bool,
 }
 
 impl Default for RadioSetup {
@@ -229,6 +231,7 @@ impl Default for RadioSetup {
             dial_nudges: false,
             keyer: false,
             menu: Menu::default(),
+            tx_inhibit: false,
         }
     }
 }
@@ -1580,11 +1583,12 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         swr: s.radio.swr,
         foldback: s.radio.foldback,
         menu: s.radio.menu,
+        tx_inhibit: s.radio.tx_inhibit,
         ..MockConfig::default()
     });
     // As `hfnode run` opens the radio, on a station past every bring-up stage: the
-    // read-only preflight, with the radio's Time-Out Timer required, before
-    // anything is written.
+    // read-only preflight, with the radio's Time-Out Timer at 3 min and its TX
+    // Inhibit OFF required, before anything is written.
     let opened = commissioning::open_for(Stage::Done, Action::Run, cfg.station.power_watts, || {
         Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
     });
@@ -3475,9 +3479,9 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.inhibited = true;
         s
     });
-    let refused = |name: &str, about: &str, item: &'static str, change: fn(&mut Menu)| {
+    let refused = |name: &str, about: &str, item: &'static str, change: fn(&mut RadioSetup)| {
         let mut s = base(name, about);
-        change(&mut s.radio.menu);
+        change(&mut s.radio);
         s.expect.tunes = 0;
         s.expect.ids = 0;
         s.expect.refused = Some(item);
@@ -3488,14 +3492,42 @@ pub fn scenarios() -> Vec<Scenario> {
         "the radio's Time-Out Timer is OFF (its default): the node refuses to start, having \
          only read from the radio",
         "Time-Out Timer (CI-V)",
-        |m| m.time_out_timer = 0x00,
+        |r| r.menu.time_out_timer = 0x00,
+    ));
+    v.push(refused(
+        "preflight-tot-5-min",
+        "the radio's Time-Out Timer is 5 min, not the 3 min required: the node refuses to \
+         start, having only read from the radio",
+        "Time-Out Timer (CI-V)",
+        |r| r.menu.time_out_timer = 0x02,
     ));
     v.push(refused(
         "preflight-usb-send-dtr",
         "the radio is set to transmit while DTR is up (USB SEND = DTR): the node refuses to \
          start, having only read from the radio",
         "USB SEND",
-        |m| m.usb_send = 0x01,
+        |r| r.menu.usb_send = 0x01,
+    ));
+    v.push(refused(
+        "preflight-vox-on",
+        "the radio's VOX is ON, so sound at its microphone would transmit: the node refuses \
+         to start, having only read from the radio",
+        "VOX",
+        |r| r.menu.vox = 0x01,
+    ));
+    v.push(refused(
+        "preflight-ptt-start-on",
+        "the tuner's PTT Start is ON, so a transmission could start a tuner cycle: the node \
+         refuses to start, having only read from the radio",
+        "PTT Start (tuner)",
+        |r| r.menu.ptt_tune = 0x01,
+    ));
+    v.push(refused(
+        "preflight-tx-inhibit-on",
+        "the radio's TX Inhibit is ON (16 66), so it cannot transmit: the node refuses to \
+         start, having only read from the radio",
+        "TX Inhibit",
+        |r| r.tx_inhibit = true,
     ));
 
     // Listening all the time, as the node does by default.
