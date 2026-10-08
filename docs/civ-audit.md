@@ -422,3 +422,15 @@ a test now:
   at 3.
 - **m06, m07, m08.** No output, or too much, twice in a row latches like high SWR;
   a tune's carrier counts toward the duty budget.
+
+The audit's formal pass then asked for three more tests, each failing when its fix
+is reverted:
+
+- **m03.** `front-panel-transmit`: someone pushes [TRANSMIT] (p. 1-2, manual text
+  lines 391-392) while the node is idle. Through the real driver the idle watch
+  reads `1C 00`, forces receive, sends `16 66 01` and latches the inhibit long
+  before the next radio check.
+- **B2.** An inhibit latched as the next piece reads the keyer's speed stops the
+  transmission at the rest before that piece.
+- **S7.** `radio setup` with a bench config leaves TX Inhibit ON while the Mac
+  node's state directory under this user's home holds tx-inhibited.
