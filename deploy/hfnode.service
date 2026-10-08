@@ -6,7 +6,7 @@
 # Do not enable this until docs/hardware-test-plan.md has been worked through.
 
 [Unit]
-Description=HF CW message gateway node (IC-7300)
+Description=HF CW message gateway node (IC-7300, or any radio through the keyer box)
 Documentation=https://github.com/robinonsay/ic-7300-hf-server
 Wants=network-online.target time-sync.target
 After=network-online.target time-sync.target sound.target
@@ -26,7 +26,9 @@ SupplementaryGroups=dialout audio
 EnvironmentFile=/etc/hfnode/env
 Environment=RUST_LOG=info
 ExecStart=/usr/local/bin/hfnode run --config /etc/hfnode/hfnode.toml
-# After any stop or crash, stop the keyer and force the radio to receive.
+# After any stop or crash, stop the keyer and force the radio to receive (with
+# station.rig = "keyer": check the keyer box's key is open and no sidetone is
+# heard, as `hfnode keyer rx` does, or latch tx-inhibited).
 # The leading "-" means a failure here (radio off, port gone) is not an error.
 ExecStopPost=-/usr/local/bin/hfnode radio --config /etc/hfnode/hfnode.toml rx
 Restart=on-failure
@@ -40,8 +42,9 @@ StateDirectoryMode=0750
 WorkingDirectory=/var/lib/hfnode
 UMask=0027
 
-# Hardening. The node needs: the USB serial port, ALSA capture (via arecord),
-# outbound network (SMTP, IMAP, api.weather.gov, the Claude API), and its state dir.
+# Hardening. The node needs: the USB serial port (the IC-7300's or the keyer
+# box's), ALSA capture (via arecord), outbound network (SMTP, IMAP,
+# api.weather.gov, the Claude API), and its state dir.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -65,11 +68,13 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
-# Devices: only USB serial (the IC-7300's CP210x, also via /dev/serial/by-id or a
-# udev symlink) and ALSA sound devices. Do not use PrivateDevices=, which would
-# hide both.
+# Devices: only USB serial and ALSA sound devices. The IC-7300's CP210x is a
+# ttyUSB device and the keyer box (a Pico 2, USB CDC) a ttyACM one, also when
+# named through /dev/serial/by-id or a udev symlink. Do not use PrivateDevices=,
+# which would hide them all.
 DevicePolicy=closed
 DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
 DeviceAllow=char-alsa rw
 
 [Install]

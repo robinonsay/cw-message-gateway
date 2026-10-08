@@ -10,7 +10,7 @@ Does on Windows what deploy/hfnode.service has systemd do on Linux:
   endless loop of start-up tunes (each of which transmits);
 - does not restart it after a clean stop (exit code 0);
 - after every stop or crash runs `hfnode radio ... rx`, which stops the keyer and
-  makes sure the radio is on receive;
+  makes sure the radio is on receive (with the keyer box, that its key is open);
 - loads secrets from an environment file (KEY=value lines, no quotes);
 - keeps the computer from going to sleep while it runs.
 

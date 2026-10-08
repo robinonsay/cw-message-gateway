@@ -8,7 +8,7 @@
 #   endless loop of start-up tunes (each of which transmits);
 # - does not restart it after a clean stop (exit status 0);
 # - after every stop or crash runs `hfnode radio ... rx`, which stops the keyer and
-#   makes sure the radio is on receive;
+#   makes sure the radio is on receive (with the keyer box, that its key is open);
 # - on a stop signal (launchd sends SIGTERM) passes it on to the node, which puts the
 #   radio on receive itself, then runs the receive check above and exits;
 # - loads secrets from an environment file (KEY=value lines, no quotes, mode 0600);

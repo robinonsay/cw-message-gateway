@@ -928,6 +928,9 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
     use civ::Rig;
     match cfg.station.rig {
         RigKind::Ic7300 => {}
+        // What the systemd unit and the supervise scripts run after every stop or
+        // crash, whichever the rig (the safety audit's KB-12).
+        RigKind::Keyer if matches!(action, RadioCmd::Rx) => return keyer_rx(cfg),
         RigKind::Keyer => bail!(
             "station.rig is \"keyer\": the radio itself is not controlled; use `hfnode keyer \
              --config C ...` (docs/keyer.md)"
@@ -1186,12 +1189,16 @@ fn serve<R: civ::Rig + 'static>(
         storm,
     } = parts;
     node::spawn_inbound(cfg.clone(), inbox, im);
-    let mut station = Station::new(
-        rig,
-        StationConfig::from_config(&cfg.station),
-        Some(cfg.state_dir.join("health.csv")),
-    );
-    guard_station(&station);
+    let mut on_air = OnAir {
+        station: Station::new(
+            rig,
+            StationConfig::from_config(&cfg.station),
+            Some(cfg.state_dir.join("health.csv")),
+        ),
+        audio: cap,
+    };
+    let station = &mut on_air.station;
+    guard_station(station);
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -1204,17 +1211,30 @@ fn serve<R: civ::Rig + 'static>(
         station.set_storm_hold(hold);
     }
     station.configure()?;
-    verify(&station)?;
-    let cap = match cap {
+    verify(station)?;
+    let cap = match &mut on_air.audio {
         Some(c) => c,
-        None => audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?,
+        none => none.insert(audio::Capture::start(
+            &cfg.audio.device,
+            cfg.audio.sample_rate,
+        )?),
     };
     log::info!(
         "{} listening on {} Hz",
         cfg.station.node_call,
         cfg.station.frequency_hz
     );
-    node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+    node::run(cfg, station, &cap.samples, &mut session, &mut svc)
+}
+
+/// The station and the radio's audio it hears, for `run`. A struct's fields are
+/// dropped in the order they are declared, so the station goes first: its last
+/// receive check, when it is dropped, still hears the radio through the capture
+/// (the keyer rig confirms its key open by the sidetone going quiet; the safety
+/// audit's KB-12).
+struct OnAir<S, A> {
+    station: S,
+    audio: Option<A>,
 }
 
 /// The keyer box and the radio's audio, for a command that may key (`needs`, or
@@ -1264,18 +1284,27 @@ fn keyer_section(cfg: &Config) -> Result<&hfnode::config::Keyer> {
     cfg.keyer.as_ref().context("no [keyer] section")
 }
 
+/// `hfnode keyer rx`, and `hfnode radio rx` with rig = "keyer": the box's key open
+/// and no sidetone heard, or the transmit inhibit latched. It keys nothing, so it
+/// needs no bring-up stage.
+fn keyer_rx(cfg: &Config) -> Result<()> {
+    use keyer::bench;
+    keyer_section(cfg)?;
+    let (_cap, monitor) = bench::start_listening(cfg)?;
+    let mut rig = bench::open_rig(cfg, monitor)?;
+    bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
+    println!("key open: the box is idle and no sidetone is heard");
+    Ok(())
+}
+
 fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
     use keyer::bench;
     let k = keyer_section(cfg)?;
     match action {
-        KeyerCmd::Check | KeyerCmd::Rx => {
+        KeyerCmd::Rx => keyer_rx(cfg),
+        KeyerCmd::Check => {
             let (_cap, monitor) = bench::start_listening(cfg)?;
             let mut rig = bench::open_rig(cfg, monitor)?;
-            if matches!(action, KeyerCmd::Rx) {
-                bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
-                println!("key open: the box is idle and no sidetone is heard");
-                return Ok(());
-            }
             let (report, ok) = bench::check(&mut rig, k.min_level_dbfs);
             print!("{report}");
             println!(
@@ -1928,6 +1957,46 @@ key_file = '{}'
             Ok(_) => panic!("the port does not exist"),
         };
         assert!(!e.contains("bring-up stage"), "{e}");
+    }
+
+    #[test]
+    fn radio_rx_checks_the_keyer_box() {
+        // The systemd unit's ExecStopPost and the supervise scripts run `hfnode
+        // radio rx` after every stop or crash (the safety audit's KB-12): with
+        // rig = "keyer" it is the box's rx, at any bring-up stage, since it keys
+        // nothing. No sound card or port here, so it fails at one of those, not at
+        // a refusal.
+        let dir = tempfile::tempdir().unwrap();
+        for stage in ["none", "done"] {
+            let cfg = keyer_cfg(dir.path(), stage);
+            let e = format!("{:#}", radio(&cfg, RadioCmd::Rx).unwrap_err());
+            assert!(
+                !e.contains("not controlled") && !e.contains("bring-up stage"),
+                "{e}"
+            );
+        }
+        // Everything else on `radio` is still refused for the keyer.
+        let cfg = keyer_cfg(dir.path(), "done");
+        let e = radio(&cfg, RadioCmd::Status).unwrap_err().to_string();
+        assert!(e.contains("not controlled"), "{e}");
+    }
+
+    #[test]
+    fn the_station_is_dropped_before_the_audio_it_hears() {
+        // `run`'s last receive check, in the station's Drop, must still hear the
+        // radio (the safety audit's KB-12).
+        struct Mark(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Mark {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        drop(OnAir {
+            station: Mark("station", log.clone()),
+            audio: Some(Mark("audio", log.clone())),
+        });
+        assert_eq!(*log.lock().unwrap(), ["station", "audio"]);
     }
 
     #[test]
