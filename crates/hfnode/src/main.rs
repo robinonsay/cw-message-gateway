@@ -460,7 +460,7 @@ fn on_stop_signal() {
 
 /// What a stop signal does: put the guarded radio back on receive, let the alerts
 /// already queued go out (a stop that latches the inhibit queues its own), for at
-/// most [`alert::EXIT_GRACE`], then `exit` with the exit code while still holding it.
+/// most [`STOP_ALERT_WAIT`], then `exit` with the exit code while still holding it.
 fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     let guarded = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some((radio, inhibit)) = guarded else {
@@ -468,7 +468,7 @@ fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     };
     let (_held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
     let alerts = ALERTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if alerts.is_some_and(|a| !a.wait(alert::EXIT_GRACE)) {
+    if alerts.is_some_and(|a| !a.wait(STOP_ALERT_WAIT)) {
         log::warn!("stopped waiting for an inhibit alert to be sent");
     }
     exit(code)
@@ -478,6 +478,13 @@ fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
 /// a radio that answers takes this long (the CI-V driver gives up on a reply after
 /// half a second, and on a link that stays busy after four times that).
 const STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// Longest a stop signal then waits for its alerts. The service that stops the node
+/// kills it 20 s after asking it to stop (`TimeoutStopSec` in `deploy/hfnode.service`,
+/// `HFNODE_STOP_TIMEOUT` in `deploy/hfnode-supervise.sh`): [`STOP_WAIT`], the
+/// receive check and this fit inside that, so the inhibit is latched and the node
+/// gone before the kill. An alert cut off here is in the log, and the file stays.
+const STOP_ALERT_WAIT: Duration = Duration::from_secs(5);
 
 /// Take the radio, stop the keyer and confirm receive. The radio may first finish
 /// the text already in its keyer (at most 30 characters). Returns the radio, still
@@ -2410,6 +2417,33 @@ key_file = '{}'
         assert!(InhibitLatch::in_dir(&state).is_set());
         // With nothing guarded, the signal only interrupts.
         assert_eq!(stop_guarded(|code| code), 130);
+    }
+
+    #[test]
+    fn a_stop_ends_before_the_service_kills_the_node() {
+        // The safety audit's m02: a stop that waits longer for the radio than the
+        // service waits for the node is killed before it latches the inhibit. Room
+        // for the receive check on a radio that answers: its break-in delay can hold
+        // transmit for 13 dots at 6 wpm, 2.6 s (14 0F and 14 0C, p. 19-3).
+        let stop = STOP_WAIT + Duration::from_secs(3) + STOP_ALERT_WAIT;
+        let limits = [
+            (
+                include_str!("../../../deploy/hfnode.service"),
+                "TimeoutStopSec=",
+            ),
+            (
+                include_str!("../../../deploy/hfnode-supervise.sh"),
+                "stop_timeout=${HFNODE_STOP_TIMEOUT:-",
+            ),
+        ];
+        for (text, key) in limits {
+            let line = text.lines().find_map(|l| l.strip_prefix(key)).unwrap();
+            let secs: u64 = line.trim_end_matches('}').parse().unwrap();
+            assert!(
+                stop <= Duration::from_secs(secs),
+                "{key}{secs} is less than {stop:?}"
+            );
+        }
     }
 
     #[test]

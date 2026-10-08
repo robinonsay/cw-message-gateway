@@ -325,6 +325,9 @@ pub enum Panel {
     Split(Option<u64>),
     /// Switch ∂TX on or off.
     DeltaTx(bool),
+    /// Set the Time-Out Timer, as CI-V numbers it: "00=OFF, 01=3 min., 02=5 min.,
+    /// 03=10min." and so on (1A 05 00 29, p. 19-4; manual text line 8861).
+    TimeOutTimer(u8),
 }
 
 /// A transaction the operator works on the next two unused lines (from line 42):
@@ -1222,6 +1225,7 @@ impl Air {
                     Panel::Mode(mode, filter) => radio.select_mode(mode, filter),
                     Panel::Split(tx_hz) => radio.set_split(tx_hz),
                     Panel::DeltaTx(on) => radio.set_delta_tx(on),
+                    Panel::TimeOutTimer(v) => radio.configure(|c| c.menu.time_out_timer = v),
                 }
                 Ok(())
             }
@@ -3876,6 +3880,29 @@ pub fn scenarios() -> Vec<Scenario> {
                 Step::Panel(Panel::Split(Some(FREQUENCY_HZ + 10_000))),
                 Step::Unanswered { text, tries: 2 },
                 Step::Panel(Panel::Split(None)),
+            ],
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = tx(
+            "front-panel-time-out-timer",
+            "someone at the radio sets its Time-Out Timer to 10 minutes after the start-up \
+             tune: the node reads it before keying and keys nothing while it is not 3 minutes, \
+             then answers the same open once it is",
+            "MOM",
+            "HOME SUN",
+        );
+        let Step::Open { text, .. } = s.script[0].clone() else {
+            unreachable!()
+        };
+        s.script.splice(
+            0..0,
+            [
+                Step::Panel(Panel::TimeOutTimer(0x03)),
+                Step::Unanswered { text, tries: 2 },
+                Step::Panel(Panel::TimeOutTimer(0x01)),
             ],
         );
         s.expect.forced_receive = true;

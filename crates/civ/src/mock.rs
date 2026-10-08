@@ -1543,6 +1543,37 @@ mod tests {
         }
     }
 
+    /// The Time-Out Timer and RF power as the node checks them before every tune
+    /// and transmission (the safety audit's K9, K11, K12), read through the
+    /// driver: 1A 05 00 29, "00=OFF, 01=3 min., 02=5 min., 03=10min., 04=20 min.,
+    /// 05=30 min." (p. 19-4; manual text lines 8861-8863), and 14 0A, "00 00=max.
+    /// CCW, 02 55=max. CW" (p. 19-3; line 8677).
+    #[test]
+    fn the_driver_reads_the_time_out_timer_and_rf_power_as_set() {
+        for (v, minutes) in [
+            (0x00, 0),
+            (0x01, 3),
+            (0x02, 5),
+            (0x03, 10),
+            (0x04, 20),
+            (0x05, 30),
+        ] {
+            let (m, mut r) = radio(1.0);
+            m.configure(|c| c.menu.time_out_timer = v);
+            assert_eq!(
+                Rig::time_out_timer(&mut r).unwrap(),
+                Some(Duration::from_secs(minutes * 60)),
+                "{v:02X}"
+            );
+        }
+        let (_, mut r) = radio(1.0);
+        for watts in [5, 10, 40, 100] {
+            r.set_rf_power_watts(watts).unwrap();
+            let read = Rig::rf_power_watts(&mut r).unwrap().expect("read back");
+            assert!((read - watts as f32).abs() < 0.5, "{watts} W read {read}");
+        }
+    }
+
     #[test]
     fn the_driver_sets_up_the_radio_without_violations() {
         let (m, mut r) = radio(1.0);

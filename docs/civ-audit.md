@@ -402,8 +402,23 @@ The audit's pre-review of these fixes found more, also fixed here:
 - **S6.** `run` starts with the radio's TX Inhibit ON when the node's own
   tx-inhibited file is there (a warning: it transmits nothing until the file is
   removed with it stopped), so the start-up alert goes out; a stop signal waits up
-  to 30 s for an alert still being sent before it exits.
+  to 5 s for an alert still being sent before it exits, so that with its 10 s for
+  the radio it is done before the service's 20 s stop limit (m02).
 - **S7.** `radio setup` leaves TX Inhibit ON while tx-inhibited is in the state
   directory of its config or in any the setup guides give (`/var/lib/hfnode`,
   `~/Library/Application Support/hfnode/state`, `~\AppData\Local\hfnode\state`),
   so a bench config does not turn it off behind the node's back.
+
+The audit's mutation run on these fixes left eight changes no test caught; each has
+a test now:
+
+- **m01, m02.** The watchdog's wait for the radio (10 s, read from
+  `hfnode.example.toml`) and a stop signal's (10 s, then 5 s for alerts) are pinned:
+  the stop fits in the 20 s that `deploy/hfnode.service` and
+  `deploy/hfnode-supervise.sh` give the node before killing it.
+- **m04, m05.** The driver reads every Time-Out Timer value and the RF power as the
+  mock radio is set; `front-panel-time-out-timer` sets the TOT to 10 minutes at the
+  front panel after the start-up tune, and the node keys nothing until it is back
+  at 3.
+- **m06, m07, m08.** No output, or too much, twice in a row latches like high SWR;
+  a tune's carrier counts toward the duty budget.

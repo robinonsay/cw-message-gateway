@@ -4395,6 +4395,53 @@ mod tests {
         );
     }
 
+    /// K10 (the safety audit's m06 and m07): no output, and too much output, are
+    /// faults as high SWR is: the second in a row, a tune between, latches.
+    #[test]
+    fn no_output_or_too_much_twice_in_a_row_latches() {
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        // No sample reaches the Po threshold.
+        st.cfg.swr_min_po = 1000.0;
+        for _ in 0..FAULTS_TO_LATCH {
+            assert!(!st.tx_inhibited());
+            st.start_window().unwrap();
+            assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::NoOutput));
+        }
+        assert!(st.tx_inhibited());
+        let mut st = Station::new(Radio::new(fast_rig()), cfg(), None);
+        st.configure().unwrap();
+        st.rig().lock().unwrap().sim.po_override = Some(90.0);
+        for _ in 0..FAULTS_TO_LATCH {
+            assert!(!st.tx_inhibited());
+            st.start_window().unwrap();
+            assert_eq!(st.transmit(&tx(&["TEST"])), Err(TxError::HighPower(90.0)));
+        }
+        assert!(st.tx_inhibited());
+    }
+
+    /// K13 (the safety audit's m08): a tune's carrier counts toward the duty
+    /// budget, all of it.
+    #[test]
+    fn a_tune_counts_toward_the_duty_budget() {
+        // SimRig's tune takes 1.5 s.
+        let mut st = Station::new(Radio::new(SimRig::new()), cfg(), None);
+        st.configure().unwrap();
+        st.start_window().unwrap();
+        let used = st.duty.used(st.cfg.duty_window);
+        assert!(used >= Duration::from_millis(1400), "{used:?}");
+    }
+
+    /// K4 (the safety audit's m01): the watchdog waits at most 10 s for a radio that
+    /// a call which has not returned holds, then latches without it.
+    #[test]
+    fn the_watchdog_waits_at_most_10_s_for_the_radio() {
+        let c: crate::config::Config =
+            toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        let wait = StationConfig::from_config(&c.station).radio_wait;
+        assert!(wait <= Duration::from_secs(10), "{wait:?}");
+    }
+
     /// K9: nothing watched the IC-7300 while the node was not keying, so a key held
     /// closed, VOX or someone at the radio went unseen until the next check.
     #[test]
