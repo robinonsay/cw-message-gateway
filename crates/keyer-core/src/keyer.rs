@@ -11,15 +11,17 @@
 //!
 //! | Command | Reply |
 //! |---|---|
-//! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <uptime ms> <boot> <name>` |
-//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip>` |
+//! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <rest ms> <duty budget s> <uptime ms> <boot> <build> <name>` |
+//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms>` |
 //! | `CW <wpm> <text>` | `OK CW`, keying from that moment |
 //! | `STOP` | `OK STOP` |
+//! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG` or `TEST STUCK` within 2 s is taken |
 //! | `TEST HANG` | `OK TEST HANG` (bring-up only) |
 //! | `TEST STUCK` | `OK TEST STUCK` (bring-up only) |
 //!
-//! Errors are `ERR <command> <code>`: `CW` with `TRIP`, `RUN`, `WPM`, `LEN`, `CHAR`
-//! or `LIMIT`; `TEST` with `RUN` or `UNKNOWN`; anything else `ERR <word> UNKNOWN`.
+//! Errors are `ERR <command> <code>`: `CW` with `TRIP`, `RUN`, `WPM`, `LEN`, `CHAR`,
+//! `LIMIT`, `REST` or `DUTY`; `TEST` with `RUN`, `ARM` or `UNKNOWN`; anything else
+//! `ERR <word> UNKNOWN`.
 
 use crate::frame::{self, Line};
 use crate::morse::{self, Segments, TextError};
@@ -32,6 +34,8 @@ pub struct Limits {
     pub key_down_ms: u32,
     pub run_ms: u32,
     pub link_timeout_ms: u32,
+    pub rest_ms: u32,
+    pub duty_budget_ms: u32,
 }
 
 impl Limits {
@@ -40,6 +44,8 @@ impl Limits {
         key_down_ms: limits::KEY_DOWN_MS,
         run_ms: limits::RUN_MS,
         link_timeout_ms: limits::LINK_TIMEOUT_MS,
+        rest_ms: limits::REST_MS,
+        duty_budget_ms: limits::DUTY_BUDGET_MS,
     };
 }
 
@@ -82,9 +88,12 @@ pub enum Ended {
     Link,
     /// The run limit.
     Limit,
-    /// The key-down limit (and the box tripped).
+    /// The box tripped: its key-down limit, or the firmware's own watch on the
+    /// key pin ([`Trip`] says which).
     Down,
-    /// USB unplugged, or the port closed.
+    /// The USB link went away: a bus reset, suspend (which is also how a pulled
+    /// cable looks to the box), or the host deconfiguring it. Closing the port on
+    /// the computer is none of these: the link timeout ends a run then.
     Usb,
 }
 
@@ -122,6 +131,12 @@ pub enum Trip {
     None,
     /// The key stayed down past the key-down limit.
     Down,
+    /// The firmware saw its key pin high for the key-down limit
+    /// ([`crate::control`]), whatever the box's timeline said.
+    Pin,
+    /// A pass of the firmware's control loop took longer than
+    /// [`limits::SLOW_PASS_MS`] with the key pin high.
+    Slow,
 }
 
 impl Trip {
@@ -129,11 +144,13 @@ impl Trip {
         match self {
             Self::None => "NONE",
             Self::Down => "DOWN",
+            Self::Pin => "PIN",
+            Self::Slow => "SLOW",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [Self::None, Self::Down]
+        [Self::None, Self::Down, Self::Pin, Self::Slow]
             .into_iter()
             .find(|t| t.as_str() == s)
     }
@@ -176,9 +193,23 @@ enum Event {
 pub struct Keyer {
     limits: Limits,
     boot: Boot,
+    /// The firmware build, reported by `HELLO`.
+    build: &'static str,
     run: Option<Run>,
     key: bool,
+    /// When the key went down, not counting key-ups shorter than
+    /// [`limits::MIN_GAP_MS`]: what the key-down limit times.
     key_since: u64,
+    /// When the key last went up; `None` if it has never been down.
+    key_up_at: Option<u64>,
+    /// When the last run ended.
+    run_ended_at: Option<u64>,
+    /// The duty budget, ms, as of `budget_at`; below zero after a run that held
+    /// the key longer than it planned (`TEST STUCK`).
+    budget: i64,
+    budget_at: u64,
+    /// `TEST ARM` taken: a test is accepted until then.
+    armed_until: Option<u64>,
     last_line: u64,
     ended: Ended,
     trip: Trip,
@@ -187,20 +218,43 @@ pub struct Keyer {
 }
 
 impl Keyer {
-    /// A box that started at `now` for `boot`, key up.
+    /// A box that started at `now` for `boot`, key up. Its duty budget starts full
+    /// only after a power-up: a box that keeps restarting earns its budget again
+    /// before it keys.
     pub fn new(limits: Limits, boot: Boot, now: u64) -> Self {
         Self {
             limits,
             boot,
+            build: "-",
             run: None,
             key: false,
             key_since: now,
+            key_up_at: None,
+            run_ended_at: None,
+            budget: match boot {
+                Boot::Power => i64::from(limits.duty_budget_ms),
+                _ => 0,
+            },
+            budget_at: now,
+            armed_until: None,
             last_line: now,
             ended: Ended::None,
             trip: Trip::None,
             hang: Hang::No,
             now,
         }
+    }
+
+    /// The firmware build `HELLO` reports: one word of up to 12 letters, digits,
+    /// `.`, `-` or `_` (a git commit), or `?` if it is not.
+    pub fn with_build(mut self, build: &'static str) -> Self {
+        let ok = !build.is_empty()
+            && build.len() <= 12
+            && build
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        self.build = if ok { build } else { "?" };
+        self
     }
 
     pub fn limits(&self) -> Limits {
@@ -284,13 +338,17 @@ impl Keyer {
 
     fn apply(&mut self, at: u64, ev: Event, on_key: &mut impl FnMut(u64, bool)) {
         match ev {
-            Event::KeyDownLimit => {
-                self.trip = Trip::Down;
-                self.stop_run(at, Ended::Down, on_key);
-                self.set_key(at, false, on_key);
-            }
+            Event::KeyDownLimit => self.trip_at(at, Trip::Down, on_key),
             Event::Link => self.stop_run(at, Ended::Link, on_key),
-            Event::RunLimit => self.stop_run(at, Ended::Limit, on_key),
+            Event::RunLimit => {
+                // A run exactly as long as the limit ends with its last element.
+                let done = self
+                    .run
+                    .as_ref()
+                    .is_some_and(|r| r.idx + 1 == r.segs.as_slice().len() && r.seg_end <= at);
+                let why = if done { Ended::Done } else { Ended::Limit };
+                self.stop_run(at, why, on_key)
+            }
             Event::Segment => {
                 let Some(r) = &mut self.run else { return };
                 r.idx += 1;
@@ -306,9 +364,19 @@ impl Keyer {
 
     fn set_key(&mut self, at: u64, down: bool, on_key: &mut impl FnMut(u64, bool)) {
         if down != self.key {
+            self.settle_budget(at);
             self.key = down;
             if down {
-                self.key_since = at;
+                // A key-up too short to be one (at most a pass of the firmware's
+                // loop between two runs) does not restart the key-down limit.
+                let short = self
+                    .key_up_at
+                    .is_some_and(|up| at.saturating_sub(up) < u64::from(limits::MIN_GAP_MS));
+                if !short {
+                    self.key_since = at;
+                }
+            } else {
+                self.key_up_at = Some(at);
             }
             on_key(at, down);
         }
@@ -317,9 +385,40 @@ impl Keyer {
         }
     }
 
+    /// The duty budget at `at`, the key as it has been since it was last settled:
+    /// spent while it was down, earned back while it was up.
+    fn budget_then(&self, at: u64) -> i64 {
+        let dt = i64::try_from(at.saturating_sub(self.budget_at)).unwrap_or(i64::MAX);
+        if self.key {
+            self.budget.saturating_sub(dt)
+        } else {
+            self.budget
+                .saturating_add(dt)
+                .min(i64::from(self.limits.duty_budget_ms))
+        }
+    }
+
+    fn settle_budget(&mut self, at: u64) {
+        self.budget = self.budget_then(at);
+        self.budget_at = self.budget_at.max(at);
+    }
+
+    /// The duty budget at `at`, ms, not below zero.
+    fn budget_at(&self, at: u64) -> u64 {
+        u64::try_from(self.budget_then(at)).unwrap_or(0)
+    }
+
+    /// How long from `at` until the rest after the last run is over.
+    fn rest_left(&self, at: u64) -> u64 {
+        self.run_ended_at.map_or(0, |end| {
+            (end + u64::from(self.limits.rest_ms)).saturating_sub(at)
+        })
+    }
+
     fn stop_run(&mut self, at: u64, why: Ended, on_key: &mut impl FnMut(u64, bool)) {
         if self.run.take().is_some() {
             self.ended = why;
+            self.run_ended_at = Some(at);
         }
         if self.hang == Hang::Pending {
             self.hang = Hang::No;
@@ -327,9 +426,29 @@ impl Keyer {
         self.set_key(at, false, on_key);
     }
 
-    /// USB was unplugged or the port closed at `now`: stop any run.
+    fn trip_at(&mut self, at: u64, why: Trip, on_key: &mut impl FnMut(u64, bool)) {
+        if self.trip == Trip::None {
+            self.trip = why;
+        }
+        self.stop_run(at, Ended::Down, on_key);
+        self.set_key(at, false, on_key);
+    }
+
+    /// The firmware saw a fault on its key pin at `now` ([`crate::control`]): open
+    /// the key and trip, as the key-down limit does. Nothing more is keyed until
+    /// the box is power-cycled.
+    pub fn trip_now(&mut self, now: u64, why: Trip, mut on_key: impl FnMut(u64, bool)) {
+        self.poll_with(now, &mut on_key);
+        if self.hang != Hang::Now {
+            self.trip_at(now.max(self.now), why, &mut on_key);
+        }
+    }
+
+    /// The USB link went away at `now` (bus reset, suspend, deconfigured): stop any
+    /// run.
     pub fn link_lost(&mut self, now: u64, mut on_key: impl FnMut(u64, bool)) {
         self.poll_with(now, &mut on_key);
+        self.armed_until = None;
         if self.hang != Hang::Now && self.run.is_some() {
             self.stop_run(now.max(self.now), Ended::Usb, &mut on_key);
         }
@@ -363,21 +482,30 @@ impl Keyer {
             (_, "HELLO") => frame::encode(
                 id,
                 format_args!(
-                    "OK HELLO {VERSION} {} {} {} {now} {} {NAME}",
+                    "OK HELLO {VERSION} {} {} {} {} {} {now} {} {} {NAME}",
                     self.limits.run_ms / 1000,
                     self.limits.link_timeout_ms,
                     self.limits.key_down_ms,
-                    self.boot.as_str()
+                    self.limits.rest_ms,
+                    self.limits.duty_budget_ms / 1000,
+                    self.boot.as_str(),
+                    self.build
                 ),
             ),
             (_, "STATUS") => frame::encode(
                 id,
                 format_args!(
-                    "OK STATUS {} {} {} {}",
+                    "OK STATUS {} {} {} {} {} {}",
                     u8::from(self.key),
                     u8::from(self.run.is_some()),
                     self.ended.as_str(),
-                    self.trip.as_str()
+                    self.trip.as_str(),
+                    if self.run.is_some() {
+                        0
+                    } else {
+                        self.rest_left(now)
+                    },
+                    self.budget_at(now)
                 ),
             ),
             (_, "STOP") => {
@@ -391,8 +519,19 @@ impl Keyer {
                     Err(code) => frame::encode(id, format_args!("ERR CW {code}")),
                 }
             }
+            (_, "TEST ARM") => {
+                self.armed_until = Some(now + u64::from(limits::ARM_MS));
+                frame::encode(id, format_args!("OK TEST ARM"))
+            }
             (_, "TEST HANG") | (_, "TEST STUCK") if self.run.is_none() => {
                 frame::encode(id, format_args!("ERR TEST RUN"))
+            }
+            // A test is taken only just after `TEST ARM`, and once: a stray line
+            // (a terminal on the port, a script) cannot start one.
+            (_, "TEST HANG") | (_, "TEST STUCK")
+                if self.armed_until.take().is_none_or(|until| now > until) =>
+            {
+                frame::encode(id, format_args!("ERR TEST ARM"))
             }
             (_, "TEST HANG") => {
                 self.hang = Hang::Pending;
@@ -448,6 +587,18 @@ impl Keyer {
         if segs.units() * dot_ms > self.limits.run_ms {
             return Err(CwError::Limit);
         }
+        if self.rest_left(now) > 0 {
+            return Err(CwError::Rest);
+        }
+        let down: u64 = segs
+            .as_slice()
+            .iter()
+            .filter(|s| s.down)
+            .map(|s| u64::from(s.units) * u64::from(dot_ms))
+            .sum();
+        if self.budget_at(now) < down {
+            return Err(CwError::Duty);
+        }
         let first = segs.as_slice()[0];
         self.run = Some(Run {
             segs,
@@ -474,6 +625,10 @@ pub enum CwError {
     Char,
     /// Longer than the run limit at that speed.
     Limit,
+    /// The last run ended less than the rest ([`limits::REST_MS`]) ago.
+    Rest,
+    /// The duty budget holds less than the run's key-down time.
+    Duty,
 }
 
 impl fmt::Display for CwError {
@@ -485,6 +640,8 @@ impl fmt::Display for CwError {
             Self::Len => "LEN",
             Self::Char => "CHAR",
             Self::Limit => "LIMIT",
+            Self::Rest => "REST",
+            Self::Duty => "DUTY",
         })
     }
 }

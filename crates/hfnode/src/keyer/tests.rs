@@ -111,8 +111,11 @@ fn a_box_with_looser_limits_than_the_node_is_refused() {
         run_limit: MAX_RUN_LIMIT,
         link_timeout: MAX_LINK_TIMEOUT,
         key_down_limit: MAX_KEY_DOWN_LIMIT,
+        rest: MIN_REST,
+        duty_budget: MAX_DUTY_BUDGET,
         uptime: Duration::from_secs(5),
         boot: Boot::Power,
+        build: "1a2b3c4d".into(),
         name: keyer_core::NAME.into(),
     };
     check_hello(&ok).unwrap();
@@ -128,6 +131,44 @@ fn a_box_with_looser_limits_than_the_node_is_refused() {
     assert!(bad(|h| h.key_down_limit = Duration::ZERO));
     assert!(bad(|h| h.link_timeout += Duration::from_millis(1)));
     assert!(bad(|h| h.link_timeout = Duration::from_millis(999)));
+    assert!(bad(|h| h.rest -= Duration::from_millis(1)));
+    assert!(bad(|h| h.duty_budget += Duration::from_secs(1)));
+    assert!(bad(|h| h.duty_budget = Duration::ZERO));
+    // Some other device that answers HELLO.
+    assert!(bad(|h| h.name = "NR7Y-CW".into()));
+    // A build is checked only if one is set.
+    check_build(&ok, None).unwrap();
+    check_build(&ok, Some("1a2b3c4d")).unwrap();
+    assert!(check_build(&ok, Some("deadbeef")).is_err());
+}
+
+#[test]
+fn the_keyer_duty_window_is_no_looser_than_half_of_ten_minutes() {
+    let mut cfg = example_keyer();
+    let k = cfg.keyer.as_ref().unwrap();
+    assert_eq!((k.max_duty_percent, k.duty_window_secs), (50, 600));
+    cfg.keyer.as_mut().unwrap().max_duty_percent = 51;
+    assert!(cfg.validate().is_err());
+    let mut cfg = example_keyer();
+    cfg.keyer.as_mut().unwrap().duty_window_secs = 601;
+    assert!(cfg.validate().is_err());
+    // 25% of 200 s is under one run limit.
+    let mut cfg = example_keyer();
+    let k = cfg.keyer.as_mut().unwrap();
+    (k.max_duty_percent, k.duty_window_secs) = (25, 200);
+    let e = cfg.validate().unwrap_err().to_string();
+    assert!(e.contains("allows 50 s"), "{e}");
+    let k = cfg.keyer.as_mut().unwrap();
+    (k.max_duty_percent, k.duty_window_secs) = (20, 300);
+    cfg.validate().unwrap();
+    cfg.keyer.as_mut().unwrap().firmware_build = Some("two words".into());
+    assert!(cfg.validate().is_err());
+    // What any build from a working tree reports: no check at all.
+    cfg.keyer.as_mut().unwrap().firmware_build = Some("-".into());
+    let e = cfg.validate().unwrap_err().to_string();
+    assert!(e.contains("matches any firmware"), "{e}");
+    cfg.keyer.as_mut().unwrap().firmware_build = Some("2f06017c".into());
+    cfg.validate().unwrap();
 }
 
 #[test]

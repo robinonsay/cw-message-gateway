@@ -292,6 +292,52 @@ pub fn force_receive<R: Rig + ?Sized>(r: &mut R) -> civ::Result<()> {
     Err(last)
 }
 
+/// The transmit inhibit on its own, for the stop paths outside a [`Station`]:
+/// `hfnode radio rx`, `hfnode keyer rx`, and the stop-signal handler in `main`.
+///
+/// A stop that cannot confirm the radio back on receive must leave
+/// [`INHIBIT_FILE`] behind, so that nothing transmits after a restart until someone
+/// has looked at the radio. Without that, a node stopped with its key stuck starts
+/// up and keys again (the safety audit's KB-2(iii) for the keyer box, and K5 for the
+/// IC-7300: the same defect on both rigs, which share these paths).
+#[derive(Clone)]
+pub struct InhibitLatch(Arc<Inhibit>);
+
+impl InhibitLatch {
+    /// The latch that keeps [`INHIBIT_FILE`] in `state_dir`. Reads it: if it is
+    /// already there, the latch starts set.
+    pub fn in_dir(state_dir: &Path) -> Self {
+        Self(Arc::new(Inhibit::new(Some(state_dir.join(INHIBIT_FILE)))))
+    }
+
+    /// A latch with nowhere to write: it holds for this process only (a command run
+    /// without a state directory).
+    pub fn in_memory() -> Self {
+        Self(Arc::new(Inhibit::new(None)))
+    }
+
+    /// Stop all transmitting, writing [`INHIBIT_FILE`]; after the first time this
+    /// does nothing.
+    pub fn latch(&self, why: &str) {
+        self.0.latch(why);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.is_set()
+    }
+}
+
+/// [`force_receive`], latching `inhibit` if receive is not confirmed.
+pub fn force_receive_or_latch<R: Rig + ?Sized>(
+    r: &mut R,
+    inhibit: &InhibitLatch,
+) -> civ::Result<()> {
+    force_receive(r).map_err(|e| {
+        inhibit.latch(&format!("radio not confirmed on receive ({e})"));
+        e
+    })
+}
+
 /// [`force_receive`], latching `inhibit` if receive is not confirmed.
 fn force_receive_or_inhibit<R: Rig>(rig: &Mutex<R>, inhibit: &Inhibit) -> Result<(), TxError> {
     let mut r = rig.lock().unwrap_or_else(|e| e.into_inner());
@@ -500,6 +546,11 @@ impl<R: Rig + 'static> Station<R> {
 
     pub fn rig(&self) -> Arc<Mutex<R>> {
         self.rig.clone()
+    }
+
+    /// The station's transmit inhibit, for a stop path outside it to latch.
+    pub fn inhibit_latch(&self) -> InhibitLatch {
+        InhibitLatch(self.tx_inhibit.clone())
     }
 
     /// Stand down whenever `hold` says so (see [`crate::storm`]).

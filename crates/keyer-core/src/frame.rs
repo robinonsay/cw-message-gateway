@@ -235,18 +235,22 @@ mod tests {
             "lower-case hex"
         );
         assert_eq!(decode("07 \u{e9}*00".as_bytes()), Err(FrameError::NotAscii));
-        assert_eq!(decode(&[b'A'; 81]), Err(FrameError::TooLong));
+        assert_eq!(decode(&[b'A'; MAX_LINE + 1]), Err(FrameError::TooLong));
         assert_eq!(decode(b""), Err(FrameError::NoChecksum));
     }
 
     #[test]
     fn encode_refuses_what_does_not_fit() {
-        assert!(encode(1, format_args!("{}", "X".repeat(74))).is_some());
-        assert!(encode(1, format_args!("{}", "X".repeat(75))).is_none());
+        // The id, a space and the checksum take 6.
+        let most = MAX_LINE - 6;
+        assert!(encode(1, format_args!("{}", "X".repeat(most))).is_some());
+        assert!(encode(1, format_args!("{}", "X".repeat(most + 1))).is_none());
         assert!(encode(1, format_args!("TAB\tHERE")).is_none());
         assert_eq!(
-            encode(1, format_args!("{}", "X".repeat(74))).unwrap().len(),
-            80
+            encode(1, format_args!("{}", "X".repeat(most)))
+                .unwrap()
+                .len(),
+            MAX_LINE
         );
     }
 
@@ -264,7 +268,7 @@ mod tests {
         feed(&mut r, b"01 A*00\n02 B*00\r\n");
         feed(&mut r, &[b'X'; 200]);
         feed(&mut r, b"\n03 C*00\n");
-        let long_ok = [b'Y'; 81];
+        let long_ok = [b'Y'; MAX_LINE + 1];
         feed(&mut r, &long_ok);
         feed(&mut r, b"\n");
         assert_eq!(
@@ -273,7 +277,7 @@ mod tests {
                 "01 A*00".to_string(),
                 "02 B*00\r".to_string(),
                 "03 C*00".to_string(),
-                "Y".repeat(81)
+                "Y".repeat(MAX_LINE + 1)
             ]
         );
     }
