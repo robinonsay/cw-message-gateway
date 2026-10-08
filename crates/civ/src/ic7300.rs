@@ -142,6 +142,14 @@ mod cmd {
     /// 02=Send/read to tuning" (p. 19-7).
     pub const TUNER: &[u8] = &[0x1C, 0x01];
     pub const TUNER_TUNE: u8 = 0x02;
+    /// 16 66: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; lines
+    /// 8788-8789). While it is ON, "When the exciter tries to transmit, “TX
+    /// Inhibit” is displayed and cannot transmit" (p. 13-6; lines 7505-7506;
+    /// described there for the IC-PW2's transmitter lockout, and not yet checked on
+    /// the radio). A function, not a menu item: the preflight reads it, the node
+    /// turns it on when it inhibits transmitting ([`Rig::inhibit_transmit`]), and
+    /// only `hfnode radio setup` turns it off.
+    pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
 
     // Read only. Each of these is sent without data, which reads the item; none of
     // them is ever sent with data.
@@ -188,6 +196,23 @@ mod cmd {
     /// 27 11: "Send/read the Scope wave data output (00=OFF, 01=ON)" (p. 19-14);
     /// with it and the scope ON the radio streams 27 00 waveform data unasked.
     pub const SCOPE_DATA_OUTPUT: &[u8] = &[0x27, 0x11];
+    /// 16 46: "VOX function *(00=OFF, 01=ON)" (p. 19-3; manual text line 8766), the
+    /// asterisk meaning "Send/read data" (line 9395). With VOX ON, sound at the
+    /// microphone puts the radio on transmit (p. 4-10; line 2464).
+    pub const VOX: &[u8] = &[0x16, 0x46];
+    /// 1A 05 00 35: "Send/read PTT tune set *(00=OFF, 01=ON)" (p. 19-4; line 8872):
+    /// the tuner's PTT Start item, which "starts to tune when you push PTT" once the
+    /// frequency has moved more than 1% (p. 12-5; lines 6310-6315).
+    pub const PTT_TUNE: &[u8] = &[0x1A, 0x05, 0x00, 0x35];
+    /// 1A 05 00 66: "Send/read MOD input connector during DATA OFF (00=MIC, 01=ACC,
+    /// 02=MIC/ACC, 03=USB, 04=MIC/USB)" (p. 19-5; lines 8953-8956).
+    pub const MOD_INPUT_DATA_OFF: &[u8] = &[0x1A, 0x05, 0x00, 0x66];
+    /// 1A 05 00 67: "Send/read MOD input connector during DATA (00=MIC, 01=ACC,
+    /// 02=MIC/ACC, 03=USB, 04=MIC/USB)" (p. 19-5; lines 8957-8959).
+    pub const MOD_INPUT_DATA: &[u8] = &[0x1A, 0x05, 0x00, 0x67];
+    /// 1A 05 00 73: "Send/read the CI-V Output (for ANT) capability (00=OFF, 01=ON)"
+    /// (p. 19-5; lines 8973-8974).
+    pub const CIV_OUTPUT_ANT: &[u8] = &[0x1A, 0x05, 0x00, 0x73];
 }
 
 /// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
@@ -404,8 +429,12 @@ impl<P: Port> Ic7300<P> {
         self.drain()?;
         // Once anything may have gone out, a failure can leave a reply on its way.
         self.resync = true;
+        // Not followed by flush(): on a serial port that is tcdrain (FlushFileBuffers on
+        // Windows), which has no timeout, and a port that never drains would hold the
+        // radio's lock for good, against the watchdog and the stop signal (the safety
+        // audit's K4). The write has the port's timeout, and what it took goes out
+        // without waiting for it here.
         self.port.write_all(&out)?;
-        self.port.flush()?;
         let sent = Instant::now();
         log::trace!("CI-V > {out:02X?}");
         let deadline = sent + self.timeout;
@@ -542,6 +571,13 @@ impl<P: Port> Ic7300<P> {
         self.read_byte(cmd::TIME_OUT_TIMER, 0x00..=0x05)
     }
 
+    /// 16 66 00: the TX Inhibit function off again, once a person has checked a
+    /// radio the node turned it on in ([`Rig::inhibit_transmit`]). Only `hfnode
+    /// radio setup` sends it.
+    pub fn release_tx_inhibit(&mut self) -> Result<()> {
+        self.set(cmd::TX_INHIBIT, &[0x00])
+    }
+
     /// 1A 05 00 78, 00 79, 00 80: the USB control-line settings.
     pub fn usb_lines(&mut self) -> Result<UsbLines> {
         Ok(UsbLines {
@@ -598,6 +634,37 @@ impl<P: Port> Ic7300<P> {
     /// USB baud rate and echo items apply (p. 12-10, line 6853).
     pub fn civ_usb_unlinked(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_USB_PORT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 16 46: whether the VOX function is on.
+    pub fn vox(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::VOX, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 16 66: whether the TX Inhibit function is on.
+    pub fn tx_inhibit(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::TX_INHIBIT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 35: whether the tuner's PTT Start is on.
+    pub fn ptt_tune(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::PTT_TUNE, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 00 66: the MOD input connector during DATA OFF, as the raw code
+    /// ("00=MIC, 01=ACC, 02=MIC/ACC, 03=USB, 04=MIC/USB").
+    pub fn mod_input_data_off(&mut self) -> Result<u8> {
+        self.read_byte(cmd::MOD_INPUT_DATA_OFF, 0x00..=0x04)
+    }
+
+    /// 1A 05 00 67: the MOD input connector during DATA, coded as for 00 66.
+    pub fn mod_input_data(&mut self) -> Result<u8> {
+        self.read_byte(cmd::MOD_INPUT_DATA, 0x00..=0x04)
+    }
+
+    /// 1A 05 00 73: whether CI-V Output (for ANT) is on.
+    pub fn civ_output_ant(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::CIV_OUTPUT_ANT, 0x00..=0x01)? == 0x01)
     }
 }
 
@@ -721,6 +788,35 @@ impl<P: Port> Rig for Ic7300<P> {
         }
         self.set(cmd::TX_STATUS, &[0x00])
     }
+
+    /// 1C 00 is one short read.
+    fn polls_status_while_idle(&self) -> bool {
+        true
+    }
+
+    /// 1A 05 00 29 "00=OFF, 01=3 min., 02=5 min., 03=10min., 04=20 min., 05=30 min."
+    /// (p. 19-4; manual text lines 8861-8863), which applies to "transmitting
+    /// initiated by a CI-V command or pushing TRANSMIT" (p. 12-5; line 6283).
+    fn time_out_timer(&mut self) -> Result<Option<Duration>> {
+        let minutes = [0, 3, 5, 10, 20, 30][Ic7300::time_out_timer(self)? as usize];
+        Ok(Some(Duration::from_secs(minutes * 60)))
+    }
+
+    /// 14 0A "Send/read [RF PWR] position" (p. 19-3; line 8677), on the scale
+    /// [`power_level`] sends.
+    fn rf_power_watts(&mut self) -> Result<Option<f32>> {
+        Ok(Some(self.rf_power_level()? as f32 * 100.0 / 255.0))
+    }
+
+    /// 16 47 00 "BK-IN OFF" (p. 19-3; line 8776): without break-in a keyer message
+    /// is not transmitted (footnote *2, p. 19-8) and a key held closed only sounds
+    /// the sidetone (p. 4-15; lines 2833-2836). Then 16 66 01, TX Inhibit ON (lines
+    /// 8788-8789). Each is sent whether or not the other was taken.
+    fn inhibit_transmit(&mut self) -> Result<()> {
+        let off = self.set_break_in(false);
+        let inhibit = self.set(cmd::TX_INHIBIT, &[0x01]);
+        off.and(inhibit)
+    }
 }
 
 #[cfg(test)]
@@ -794,7 +890,8 @@ mod tests {
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            // A real port's flush waits, with no timeout, for the bytes to go out.
+            panic!("the driver must not wait for the port to drain (the safety audit's K4)");
         }
     }
 

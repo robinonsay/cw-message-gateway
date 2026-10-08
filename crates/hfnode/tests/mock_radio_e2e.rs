@@ -5,7 +5,9 @@
 //!
 //! The scenarios run time-scaled ([`selftest::DEFAULT_SCALE`] times real time).
 //! On a slow machine, such as a Raspberry Pi, set `HFNODE_E2E_SCALE` lower, for
-//! example `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`.
+//! example `HFNODE_E2E_SCALE=20 cargo test --test mock_radio_e2e`. A run the
+//! machine paused the test in for longer than the scenario's timing allows is not
+//! judged and runs again (its `machine` check, `selftest::run`).
 
 use hfnode::selftest::{self, Outcome};
 
@@ -20,6 +22,13 @@ fn run(name: &str) -> Outcome {
     let s = selftest::scenario(name).unwrap_or_else(|| panic!("no scenario {name}"));
     let out = selftest::run(&s, scale());
     assert!(out.passed(), "\n{}", out.render());
+    // Every scenario that runs the node measures the machine's pauses; one the
+    // preflight refused never starts it.
+    assert!(
+        s.expect.refused.is_some() || out.checks.iter().any(|c| c.name == "machine"),
+        "no pause meter:\n{}",
+        out.render()
+    );
     out
 }
 
@@ -94,14 +103,21 @@ const NAMES: &[&str] = &[
     "fault-tune-hang",
     "fault-tune-lost-reply",
     "fault-inhibited-at-start",
+    "fault-inhibited-at-start-radio-inhibited",
     "preflight-tot-off",
+    "preflight-tot-5-min",
     "preflight-usb-send-dtr",
+    "preflight-vox-on",
+    "preflight-ptt-start-on",
+    "preflight-tx-inhibit-on",
     "retune",
     "fault-high-swr-retune",
     "fault-retune-lost-reply",
     "front-panel-split",
+    "front-panel-time-out-timer",
     "front-panel-delta-tx",
     "front-panel-idle",
+    "front-panel-transmit",
     "other-stations",
 ];
 
@@ -198,14 +214,21 @@ scenario_tests! {
     fault_tune_hang => "fault-tune-hang",
     fault_tune_lost_reply => "fault-tune-lost-reply",
     fault_inhibited_at_start => "fault-inhibited-at-start",
+    fault_inhibited_at_start_radio_inhibited => "fault-inhibited-at-start-radio-inhibited",
     preflight_tot_off => "preflight-tot-off",
+    preflight_tot_5_min => "preflight-tot-5-min",
     preflight_usb_send_dtr => "preflight-usb-send-dtr",
+    preflight_vox_on => "preflight-vox-on",
+    preflight_ptt_start_on => "preflight-ptt-start-on",
+    preflight_tx_inhibit_on => "preflight-tx-inhibit-on",
     retune => "retune",
     fault_high_swr_retune => "fault-high-swr-retune",
     fault_retune_lost_reply => "fault-retune-lost-reply",
     front_panel_split => "front-panel-split",
+    front_panel_time_out_timer => "front-panel-time-out-timer",
     front_panel_delta_tx => "front-panel-delta-tx",
     front_panel_idle => "front-panel-idle",
+    front_panel_transmit => "front-panel-transmit",
     other_stations => "other-stations",
 }
 

@@ -112,8 +112,10 @@ const SIDETONE: f32 = 0.3;
 /// Unix time at radio time zero, for the listening schedule: the top of a UTC hour,
 /// so a scenario starts at the beginning of a window.
 const CLOCK_START: u64 = 1_699_999_200;
-/// The node's frequency in every scenario.
+/// The node's frequency in every scenario but a handheld's.
 const FREQUENCY_HZ: u64 = 7_030_000;
+/// A handheld's, on the keyer box's PTT: in the 2 m MCW segment.
+const HANDHELD_FREQUENCY_HZ: u64 = 144_150_000;
 /// How often someone at the radio nudges the dial, in blocks, with
 /// [`RadioSetup::dial_nudges`].
 const NUDGE_BLOCKS: u64 = 10;
@@ -121,6 +123,23 @@ const NUDGE_BLOCKS: u64 = 10;
 /// safety check does not move with it: a radio left on transmit after its last
 /// element is forced back to receive within the break-in delay plus this.
 const STUCK_MARGIN: Duration = Duration::from_secs(3);
+/// What the safety check allows on top of the break-in delay and the stuck margin
+/// for the station to see a radio left on transmit and stop it: radio time, and
+/// real time for its polling and CI-V round trips (which take `scale` times longer
+/// in radio time).
+const OVERHANG_SLACK: Duration = Duration::from_millis(500);
+const OVERHANG_SLACK_REAL: Duration = Duration::from_millis(20);
+
+/// The longest pause of the whole test process (real time) that a mock IC-7300
+/// scenario is judged through at `scale`: the least slack its timing leaves, the
+/// safety check's for a radio left on transmit. A busy machine that stops the
+/// process for longer while the radio is on transmit makes the station look slow
+/// to force receive (a CI runner once stopped it for about 0.7 s at 20x: 14 s of
+/// radio time). Such a run, if it failed, is not judged and runs again ([`run`],
+/// [`pause_excuses_only_failures`]); the check's own limit stays as it is.
+fn pause_limit(scale: f32) -> Duration {
+    OVERHANG_SLACK.div_f32(scale) + OVERHANG_SLACK_REAL
+}
 /// The station's semi break-in delay in dots, copied likewise.
 const BREAK_IN_DOTS: f32 = 10.0;
 /// Seconds of radio time [`Step::WaitReceive`] waits at most, and real time: the
@@ -214,8 +233,13 @@ pub struct RadioSetup {
     /// heard through a sound card, instead of the mock IC-7300 (the fields above
     /// are the IC-7300's): see [`any_radio`].
     pub keyer: bool,
+    /// With `keyer`: an FM handheld on the box's PTT (`[keyer] output = "ptt"`),
+    /// keyed in MCW on 2 m and heard by its receive noise going quiet.
+    pub ptt: bool,
     /// The IC-7300's menu settings, as the node's preflight reads them.
     pub menu: Menu,
+    /// The IC-7300's TX Inhibit function (16 66) is ON when the node starts.
+    pub tx_inhibit: bool,
 }
 
 impl Default for RadioSetup {
@@ -228,7 +252,9 @@ impl Default for RadioSetup {
             sidetone: false,
             dial_nudges: false,
             keyer: false,
+            ptt: false,
             menu: Menu::default(),
+            tx_inhibit: false,
         }
     }
 }
@@ -299,6 +325,11 @@ pub enum Panel {
     Split(Option<u64>),
     /// Switch ∂TX on or off.
     DeltaTx(bool),
+    /// Set the Time-Out Timer, as CI-V numbers it: "00=OFF, 01=3 min., 02=5 min.,
+    /// 03=10min." and so on (1A 05 00 29, p. 19-4; manual text line 8861).
+    TimeOutTimer(u8),
+    /// Push [TRANSMIT]: the radio goes on transmit by itself.
+    Transmit,
 }
 
 /// A transaction the operator works on the next two unused lines (from line 42):
@@ -343,7 +374,8 @@ pub struct Expect {
     /// The node forced the radio to receive (stopped the keyer with `17 FF`) while
     /// it ran, as it must after any fault and never otherwise.
     pub forced_receive: bool,
-    /// The node inhibited transmitting until restart.
+    /// The node inhibited transmitting until restart (or started inhibited). It
+    /// leaves the radio's semi break-in off and its own TX Inhibit on (16 66 01).
     pub inhibited: bool,
     /// `DE <call>` keyed right after a tune: one per tune that matched when the node
     /// started listening (at start-up or a window's start; a tune before a reply is
@@ -389,6 +421,9 @@ pub struct Outcome {
     pub transcript: Vec<String>,
     /// What happened, beyond the checks.
     pub facts: Facts,
+    /// Earlier runs of the scenario that were not judged, and why: the machine
+    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]).
+    pub not_judged: Vec<String>,
 }
 
 /// What a run did, as the sweep classifies it.
@@ -428,11 +463,19 @@ impl Outcome {
             .filter(|c| !c.pass)
             .map(|c| format!("{}: {}", c.name, c.detail))
             .collect();
-        if failed.is_empty() {
-            "ok".into()
+        let mut s = if failed.is_empty() {
+            "ok".to_string()
         } else {
             failed.join("; ")
+        };
+        if !self.not_judged.is_empty() {
+            let _ = write!(
+                s,
+                " (after {} run(s) not judged: the machine paused)",
+                self.not_judged.len()
+            );
         }
+        s
     }
 
     /// Every check and the transcript.
@@ -444,6 +487,9 @@ impl Outcome {
             self.wall.as_secs_f32(),
             self.radio_time.as_secs_f32()
         );
+        for n in &self.not_judged {
+            let _ = writeln!(s, "  [not judged] an earlier run: {n}");
+        }
         for c in &self.checks {
             let _ = writeln!(
                 s,
@@ -614,6 +660,19 @@ impl<R: Rig> Rig for TimeScaled<R> {
     fn transmit_detail(&mut self) -> Option<String> {
         self.inner.transmit_detail()
     }
+    fn polls_status_while_idle(&self) -> bool {
+        self.inner.polls_status_while_idle()
+    }
+    /// A setting, not a time the station waits: not scaled.
+    fn time_out_timer(&mut self) -> civ::Result<Option<Duration>> {
+        self.inner.time_out_timer()
+    }
+    fn rf_power_watts(&mut self) -> civ::Result<Option<f32>> {
+        self.inner.rf_power_watts()
+    }
+    fn inhibit_transmit(&mut self) -> civ::Result<()> {
+        self.inner.inhibit_transmit()
+    }
 }
 
 /// A scratch directory, removed when dropped.
@@ -702,7 +761,7 @@ enum Heard {
 /// The radio the node drives: the mock IC-7300, or any radio on the keyer box.
 enum AirRadio {
     Ic7300(MockRadio),
-    Keyer(any_radio::KeyerAir),
+    Keyer(Box<any_radio::KeyerAir>),
 }
 
 impl AirRadio {
@@ -1168,6 +1227,8 @@ impl Air {
                     Panel::Mode(mode, filter) => radio.select_mode(mode, filter),
                     Panel::Split(tx_hz) => radio.set_split(tx_hz),
                     Panel::DeltaTx(on) => radio.set_delta_tx(on),
+                    Panel::TimeOutTimer(v) => radio.configure(|c| c.menu.time_out_timer = v),
+                    Panel::Transmit => radio.push_transmit(),
                 }
                 Ok(())
             }
@@ -1311,7 +1372,7 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
         [station]
         node_call = "{NODE_CALL}"
         field_calls = ["{FIELD_CALL}"]
-        frequency_hz = {FREQUENCY_HZ}
+        frequency_hz = {frequency}
         serial_port = "mock"
         power_watts = 40
         key_speed_wpm = {wpm}
@@ -1360,9 +1421,19 @@ fn config(s: &Scenario, dir: &Path, scale: f32) -> Result<Config> {
             true => "rig = \"keyer\"\n        max_key_seconds = 50",
             false => "",
         },
-        keyer = match s.radio.keyer {
-            true => "[keyer]\n        commissioned = \"done\"",
-            false => "",
+        keyer = match (s.radio.keyer, s.radio.ptt) {
+            (true, false) => "[keyer]\n        commissioned = \"done\"",
+            (true, true) => {
+                "[keyer]\n        commissioned = \"done\"\n        output = \"ptt\"\n        \
+                 ptt_contact_volts = 3.3"
+            }
+            (false, _) => "",
+        },
+        // MCW, on 2 m.
+        frequency = if s.radio.ptt {
+            HANDHELD_FREQUENCY_HZ
+        } else {
+            FREQUENCY_HZ
         },
     ))?;
     cfg.state_dir = dir.join("state");
@@ -1383,9 +1454,12 @@ fn station_config(cfg: &Config, scale: f32) -> StationConfig {
         &mut sc.tune_timeout,
         &mut sc.poll,
         &mut sc.id_interval,
+        &mut sc.duty_window,
+        &mut sc.max_transmission,
     ] {
         *d = d.div_f32(scale);
     }
+    // Not `radio_wait`: how long a call to the radio may hold it is real time.
     sc
 }
 
@@ -1490,8 +1564,51 @@ fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
 /// What the node thread hands back when `node::run` returns.
 type Finished<R> = (anyhow::Result<()>, Station<R>, Session, FakeServices);
 
-/// Run one scenario at `scale` times real time.
+/// Times a scenario runs again after a run its `machine` check failed (the machine
+/// paused the test for longer than the scenario's timing allows). A failure of
+/// that check on the last of them stands: the machine could not run the scenario.
+const NOT_JUDGED_RERUNS: usize = 2;
+
+/// Run one scenario at `scale` times real time. A run the machine paused in for
+/// longer than the scenario's timing allows is not judged, pass or fail: it runs
+/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it.
 pub fn run(s: &Scenario, scale: f32) -> Outcome {
+    judged(|| run_once(s, scale))
+}
+
+/// The first run from `once` the machine kept time for, with the ones before it
+/// listed as not judged; or the last allowed, whatever it says.
+fn judged(mut once: impl FnMut() -> Outcome) -> Outcome {
+    let mut not_judged = Vec::new();
+    loop {
+        let mut out = once();
+        let paused = out.checks.iter().find(|c| c.name == "machine" && !c.pass);
+        match paused {
+            Some(c) if not_judged.len() < NOT_JUDGED_RERUNS => {
+                let failed: Vec<&str> = out
+                    .checks
+                    .iter()
+                    .filter(|c| !c.pass && c.name != "machine")
+                    .map(|c| c.name)
+                    .collect();
+                not_judged.push(format!(
+                    "{}; it {}",
+                    c.detail,
+                    match failed.is_empty() {
+                        true => "passed every other check".to_string(),
+                        false => format!("failed {}", failed.join(", ")),
+                    }
+                ));
+            }
+            _ => {
+                out.not_judged = not_judged;
+                return out;
+            }
+        }
+    }
+}
+
+fn run_once(s: &Scenario, scale: f32) -> Outcome {
     let t0 = Instant::now();
     let mut out = Outcome {
         scenario: s.name.clone(),
@@ -1500,6 +1617,7 @@ pub fn run(s: &Scenario, scale: f32) -> Outcome {
         radio_time: Duration::ZERO,
         transcript: Vec::new(),
         facts: Facts::default(),
+        not_judged: Vec::new(),
     };
     if let Err(e) = run_inner(s, scale, &mut out) {
         out.checks.push(check("setup", false, format!("{e:#}")));
@@ -1522,12 +1640,16 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         swr: s.radio.swr,
         foldback: s.radio.foldback,
         menu: s.radio.menu,
+        tx_inhibit: s.radio.tx_inhibit,
         ..MockConfig::default()
     });
     // As `hfnode run` opens the radio, on a station past every bring-up stage: the
-    // read-only preflight, with the radio's Time-Out Timer required, before
-    // anything is written.
-    let opened = commissioning::open_for(Stage::Done, Action::Run, cfg.station.power_watts, || {
+    // read-only preflight, with the radio's Time-Out Timer at 3 min and its TX
+    // Inhibit OFF required (unless tx-inhibited is there), before anything is
+    // written.
+    inhibit_at_start(s, &cfg)?;
+    let limits = commissioning::Limits::of(&cfg.station);
+    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, &cfg.state_dir, || {
         Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
     });
     let inner = match (opened, s.expect.refused) {
@@ -1550,7 +1672,6 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         radio.inject(f.clone());
     }
     let rig = TimeScaled { inner, scale };
-    inhibit_at_start(s, &cfg)?;
     let station = Station::new(
         rig,
         station_config(&cfg, scale),
@@ -1564,12 +1685,24 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
 
     let (tx, rx) = audio::queue(usize::MAX);
     let clock_radio = radio.clone();
+    let pauses = any_radio::PauseMeter::start(crate::keyer::mock::Clock {
+        epoch: radio.epoch(),
+        scale,
+    });
     // The listening schedule runs in radio time.
     let done = spawn_node(&cfg, station, session, svc, rx, move || {
         CLOCK_START + clock_radio.now().as_secs()
     });
     let mut air = air(s, AirRadio::Ic7300(radio.clone()), Some(tx), book, scale);
-    let Some((station, session, svc)) = operate(s, &mut air, &done, out) else {
+    let ran = operate(s, &mut air, &done, out);
+    let (pause, at) = any_radio::longest(&pauses.pauses());
+    out.checks.push(any_radio::machine_check_within(
+        pause,
+        at,
+        scale,
+        pause_limit(scale),
+    ));
+    let Some((station, session, svc)) = ran else {
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
@@ -1617,13 +1750,39 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         },
     ));
 
-    out.checks.push(settings_check(&cfg, &settings));
+    out.checks.push(settings_check(&cfg, s, &settings));
     out.checks.push(forced_receive_check(e, stops, "17 FF"));
     out.checks
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
+    pause_excuses_only_failures(out);
     Ok(())
+}
+
+/// The pause limit of a mock IC-7300 scenario ([`pause_limit`]) is the least slack
+/// its checks leave: a longer pause can only make the node look slow and fail a
+/// check, never pass one it would fail. So a pause excuses a run that failed
+/// ([`judged`] runs it again), but a run that passed every other check stands.
+fn pause_excuses_only_failures(out: &mut Outcome) {
+    if !out.checks.iter().all(|c| c.pass || c.name == "machine") {
+        return;
+    }
+    if let Some(c) = out
+        .checks
+        .iter_mut()
+        .find(|c| c.name == "machine" && !c.pass)
+    {
+        let measured = c
+            .detail
+            .split_once(": the machine")
+            .map_or(&*c.detail, |(m, _)| m);
+        c.detail = format!(
+            "{measured}: longer than the scenario's timing allows, but every other check \
+             passed, which a pause cannot cause"
+        );
+        c.pass = true;
+    }
 }
 
 /// The node refused to start: the preflight named `item`, and only its reads went
@@ -1921,10 +2080,18 @@ fn ends_with_call(text: &str) -> bool {
     }
 }
 
+/// Whether `text` ends with an over prosign (K, KN, SK, ...).
+fn ends_over(text: &str) -> bool {
+    text.split_whitespace()
+        .last()
+        .is_some_and(protocol::is_over)
+}
+
 /// The node's station IDs: `DE <call>` as the first piece after each tune that
 /// matched (`tunes_at`, radio time), the expected number inside overs, and never
 /// longer than the station's ID interval from the start of a transmission (or an
-/// ID) to the end of the next ID. A piece cut short by a fault ends the stretch.
+/// ID) to the end of the next ID. An over cut short by a fault, part-way through a
+/// piece or between two, ends the stretch, which must fit the interval too.
 fn station_id_check(
     keyed: &[civ::mock::Keyed],
     tunes_at: &[Duration],
@@ -1943,13 +2110,17 @@ fn station_id_check(
     let ids = (0..tunes_at.len()).filter(|&i| after_tune(i)).count() as u32;
     let mid_ids = on_air.iter().filter(|k| k.text == id).count() as u32 - ids;
     let (mut longest, mut from) = (Duration::ZERO, None);
-    for k in &on_air {
-        if !k.complete {
-            from = None;
-            continue;
-        }
+    for (i, k) in on_air.iter().enumerate() {
         let start = *from.get_or_insert(k.start);
-        if ends_with_call(&k.text) {
+        // Cut short by a fault: stopped part-way through a piece, or between two
+        // (no over prosign, and nothing more keyed as soon as the transcript waits
+        // for). The node goes silent, so the stretch ends with it.
+        let stopped = !k.complete
+            || !ends_over(&k.text)
+                && on_air
+                    .get(i + 1)
+                    .is_none_or(|n| n.start.saturating_sub(k.end).as_secs_f32() > CUT_AFTER);
+        if k.complete && ends_with_call(&k.text) || stopped {
             longest = longest.max(k.end.saturating_sub(start));
             from = None;
         }
@@ -1975,7 +2146,14 @@ fn station_id_check(
 /// The radio as the node left it: on the configured frequency, in CW with FIL1, semi
 /// break-in, and the power, keyer speed and break-in delay the node sets. Levels are
 /// read back on the mock's own scales (p. 19-3): 0-100 W, 6-48 wpm, 2-13 dots.
-fn settings_check(cfg: &Config, s: &Settings) -> Check {
+/// The radio as the node left it: set up as configured, with semi break-in on
+/// unless the node is inhibited, and the radio's own TX Inhibit on only if the node
+/// latched the inhibit while it ran.
+fn settings_check(cfg: &Config, scenario: &Scenario, s: &Settings) -> Check {
+    let e = &scenario.expect;
+    // Inhibited at start too: the node turns the radio's TX Inhibit on once it
+    // has the radio.
+    let radio_inhibited = e.inhibited;
     let st = &cfg.station;
     let watts = s.rf_power_level as f32 * 100.0 / 255.0;
     let wpm = 6.0 + s.key_speed_level as f32 * 42.0 / 255.0;
@@ -1991,8 +2169,16 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
             s.mode, s.filter
         ));
     }
-    if s.break_in != 0x01 {
-        bad.push(format!("BK-IN {:02X}, not semi", s.break_in));
+    let break_in = if e.inhibited { 0x00 } else { 0x01 };
+    if s.break_in != break_in {
+        bad.push(format!("BK-IN {:02X}, not {break_in:02X}", s.break_in));
+    }
+    if s.tx_inhibit != radio_inhibited {
+        bad.push(format!(
+            "TX Inhibit {}, not {}",
+            on_off(s.tx_inhibit),
+            on_off(radio_inhibited)
+        ));
     }
     // Within half a level of what was asked for.
     if (watts - st.power_watts as f32).abs() > 0.25 {
@@ -2007,13 +2193,28 @@ fn settings_check(cfg: &Config, s: &Settings) -> Check {
         ));
     }
     let detail = format!(
-        "{} Hz, CW FIL{}, {watts:.0} W, {wpm:.1} wpm, semi break-in {dots:.1} dots",
-        s.frequency_hz, s.filter
+        "{} Hz, CW FIL{}, {watts:.0} W, {wpm:.1} wpm, {} break-in {dots:.1} dots, TX Inhibit {}",
+        s.frequency_hz,
+        s.filter,
+        match s.break_in {
+            0x00 => "no",
+            0x01 => "semi",
+            _ => "full",
+        },
+        on_off(s.tx_inhibit)
     );
     if bad.is_empty() {
         check("settings", true, detail)
     } else {
         check("settings", false, format!("{}; {detail}", bad.join("; ")))
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "ON"
+    } else {
+        "OFF"
     }
 }
 
@@ -2093,7 +2294,10 @@ fn safety(
     // which take `scale` times longer in radio time.
     let dot = 1.2 / (6.0 + s.key_speed_level as f32 * 42.0 / 255.0);
     let hang = dot * (2.0 + s.break_in_delay_level as f32 * 11.0 / 255.0);
-    let overhang_limit = Duration::from_secs_f32(hang + 0.5 + 0.02 * scale) + STUCK_MARGIN;
+    let overhang_limit = Duration::from_secs_f32(hang)
+        + OVERHANG_SLACK
+        + OVERHANG_SLACK_REAL.mul_f32(scale)
+        + STUCK_MARGIN;
     let mut overhang = Duration::ZERO;
     for t in &r.transmissions {
         let end = t.end.unwrap_or(r.now);
@@ -3162,26 +3366,35 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     let stuck = |name: &str, about: &str, carrier: bool| {
         let mut s = tx(name, about, "MOM", "HI");
-        // After the first tune and ID: the read-back sticks.
-        s.script.insert(
-            0,
+        // After the first tune and ID: the read-back sticks. Locked out from then
+        // until the next tune (the safety audit's K7), the node commits the OK it
+        // hears but keys nothing, however often it is repeated.
+        s.script = vec![
             Step::Inject(Fault::StickInTx {
                 skip: 0,
                 carrier,
                 recoverable: true,
             }),
-        );
+            s.script[0].clone(),
+            Step::Unanswered {
+                text: "OK 43 {43} K".into(),
+                tries: 2,
+            },
+        ];
+        s.expect.keyed = full(&[&rb_tx(42, "MOM", "HI")]);
         s.expect.forced_receive = true;
         s
     };
     v.push(stuck(
         "fault-stuck-tx",
-        "the radio stays on transmit after the read-back; the node forces receive and carries on",
+        "the radio stays on transmit after the read-back: the node forces receive and keys \
+         nothing more until its next tune, so the OK reaches the gateway and SENT is not keyed",
         false,
     ));
     v.push(stuck(
         "fault-stuck-key",
-        "the key sticks down after the read-back; the node forces receive within the stuck margin",
+        "the key sticks down after the read-back: the node forces receive within the stuck \
+         margin and keys nothing more until its next tune",
         true,
     ));
     v.push({
@@ -3311,53 +3524,91 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.forced_receive = true;
         s
     });
-    let civ = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault, cut: bool| {
-        let mut s = tx(name, about, "MOM", LONG_TEXT);
+    v.push({
+        let mut s = tx(
+            "fault-civ-ng",
+            "the radio answers NG to the first CW message: nothing keyed and no fault, the \
+             operator repeats",
+            "MOM",
+            LONG_TEXT,
+        );
         // After the first tune and ID, which read the meters too.
         s.script.insert(
             0,
+            Step::Inject(Fault::Reply {
+                cmd: vec![0x17],
+                skip: 0,
+                times: 1,
+                kind: ReplyFault::Ng,
+            }),
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    // A reply lost or late while the node keys counts as a fault (the safety
+    // audit's B1: RF on the USB cable from a bad load fails the same way at every
+    // transmission): silent until the next tune, 10 minutes on here, and the next
+    // fault in a row would latch the inhibit.
+    let civ_fault = |name: &str, about: &str, cmd: &[u8], kind: ReplyFault| {
+        let mut s = base(name, about);
+        s.node.retune_minutes = 10;
+        let rb44 = rb_tx(44, "MOM", LONG_TEXT);
+        let done = de("SENT 45");
+        s.script = vec![
+            // After the first tune and ID, which read the meters too.
             Step::Inject(Fault::Reply {
                 cmd: cmd.to_vec(),
                 skip: 0,
                 times: 1,
                 kind,
             }),
-        );
-        if cut {
-            s.expect.keyed.insert(0, Over::Cut(rb_long.clone()));
-        }
+            Step::Unanswered {
+                text: format!("{FIELD_CALL} 42 {{42}} TX MOM {LONG_TEXT} K"),
+                tries: 2,
+            },
+            Step::Wait(600.0),
+            Step::FirstTry,
+            Step::Open {
+                text: format!("{FIELD_CALL} 44 {{44}} TX MOM {LONG_TEXT} K"),
+                read_back: rb44.clone(),
+            },
+            Step::Say {
+                text: "OK 45 {45} K".into(),
+                expect: Some(done.clone()),
+            },
+        ];
+        s.expect.keyed = vec![
+            Over::Cut(rb_long.clone()),
+            Over::Full(rb44),
+            Over::Full(done),
+        ];
+        s.expect.sent = sent("MOM", LONG_TEXT);
+        s.expect.last_seq = 45;
+        s.expect.tunes = 2;
         s.expect.forced_receive = true;
         s
     };
-    v.push(civ(
-        "fault-civ-ng",
-        "the radio answers NG to the first CW message: nothing keyed, the operator repeats",
-        &[0x17],
-        ReplyFault::Ng,
-        false,
-    ));
-    v.push(civ(
+    v.push(civ_fault(
         "fault-civ-lost-reply",
-        "the reply to the first CW message is lost: the node stops and forces receive",
+        "the reply to the first CW message is lost: the node stops, forces receive and counts \
+         a fault, silent until its next tune; then it answers",
         &[0x17],
         ReplyFault::Drop,
-        true,
     ));
-    v.push(civ(
+    v.push(civ_fault(
         "fault-civ-late-reply",
-        "an SWR reading arrives after the driver's timeout: the node stops, resynchronises and recovers",
+        "an SWR reading arrives after the driver's timeout: the node stops, resynchronises and \
+         counts a fault, silent until its next tune; then it answers",
         &[0x15, 0x12],
         ReplyFault::Delay(Duration::from_millis(700)),
-        true,
     ));
     v.push({
-        let mut s = civ(
+        let mut s = civ_fault(
             "transceive",
             "someone at the radio keeps nudging the dial: CI-V Transceive frames to 00h arrive \
              unasked, also while the driver resynchronises after a late SWR reading",
             &[0x15, 0x12],
             ReplyFault::Delay(Duration::from_millis(700)),
-            true,
         );
         s.radio.dial_nudges = true;
         s
@@ -3417,9 +3668,27 @@ pub fn scenarios() -> Vec<Scenario> {
         s.expect.inhibited = true;
         s
     });
-    let refused = |name: &str, about: &str, item: &'static str, change: fn(&mut Menu)| {
+    v.push({
+        let mut s = base(
+            "fault-inhibited-at-start-radio-inhibited",
+            "as fault-inhibited-at-start, with the radio's TX Inhibit still on from the latch: \
+             the preflight lets the node start, so that it tells the owner",
+        );
+        s.node.inhibited_at_start = true;
+        s.radio.tx_inhibit = true;
+        s.script = vec![Step::Unanswered {
+            text: format!("{FIELD_CALL} 42 {{42}} TX MOM HI K"),
+            tries: 2,
+        }];
+        s.expect.last_seq = 42;
+        s.expect.tunes = 0;
+        s.expect.ids = 0;
+        s.expect.inhibited = true;
+        s
+    });
+    let refused = |name: &str, about: &str, item: &'static str, change: fn(&mut RadioSetup)| {
         let mut s = base(name, about);
-        change(&mut s.radio.menu);
+        change(&mut s.radio);
         s.expect.tunes = 0;
         s.expect.ids = 0;
         s.expect.refused = Some(item);
@@ -3430,14 +3699,42 @@ pub fn scenarios() -> Vec<Scenario> {
         "the radio's Time-Out Timer is OFF (its default): the node refuses to start, having \
          only read from the radio",
         "Time-Out Timer (CI-V)",
-        |m| m.time_out_timer = 0x00,
+        |r| r.menu.time_out_timer = 0x00,
+    ));
+    v.push(refused(
+        "preflight-tot-5-min",
+        "the radio's Time-Out Timer is 5 min, not the 3 min required: the node refuses to \
+         start, having only read from the radio",
+        "Time-Out Timer (CI-V)",
+        |r| r.menu.time_out_timer = 0x02,
     ));
     v.push(refused(
         "preflight-usb-send-dtr",
         "the radio is set to transmit while DTR is up (USB SEND = DTR): the node refuses to \
          start, having only read from the radio",
         "USB SEND",
-        |m| m.usb_send = 0x01,
+        |r| r.menu.usb_send = 0x01,
+    ));
+    v.push(refused(
+        "preflight-vox-on",
+        "the radio's VOX is ON, so sound at its microphone would transmit: the node refuses \
+         to start, having only read from the radio",
+        "VOX",
+        |r| r.menu.vox = 0x01,
+    ));
+    v.push(refused(
+        "preflight-ptt-start-on",
+        "the tuner's PTT Start is ON, so a transmission could start a tuner cycle: the node \
+         refuses to start, having only read from the radio",
+        "PTT Start (tuner)",
+        |r| r.menu.ptt_tune = 0x01,
+    ));
+    v.push(refused(
+        "preflight-tx-inhibit-on",
+        "the radio's TX Inhibit is ON (16 66), so it cannot transmit: the node refuses to \
+         start, having only read from the radio",
+        "TX Inhibit",
+        |r| r.tx_inhibit = true,
     ));
 
     // Listening all the time, as the node does by default.
@@ -3593,6 +3890,29 @@ pub fn scenarios() -> Vec<Scenario> {
     });
     v.push({
         let mut s = tx(
+            "front-panel-time-out-timer",
+            "someone at the radio sets its Time-Out Timer to 10 minutes after the start-up \
+             tune: the node reads it before keying and keys nothing while it is not 3 minutes, \
+             then answers the same open once it is",
+            "MOM",
+            "HOME SUN",
+        );
+        let Step::Open { text, .. } = s.script[0].clone() else {
+            unreachable!()
+        };
+        s.script.splice(
+            0..0,
+            [
+                Step::Panel(Panel::TimeOutTimer(0x03)),
+                Step::Unanswered { text, tries: 2 },
+                Step::Panel(Panel::TimeOutTimer(0x01)),
+            ],
+        );
+        s.expect.forced_receive = true;
+        s
+    });
+    v.push({
+        let mut s = tx(
             "front-panel-delta-tx",
             "someone at the radio switches ∂TX on after the start-up tune: the node checks \
              before keying and keys nothing while it is on, then answers the same open once it \
@@ -3625,6 +3945,25 @@ pub fn scenarios() -> Vec<Scenario> {
             Step::Panel(Panel::Mode(0x01, 0x01)),
             Step::Wait(660.0),
         ];
+        s
+    });
+    v.push({
+        let mut s = base(
+            "front-panel-transmit",
+            "someone at the radio pushes TRANSMIT while the node is idle: its idle watch reads \
+             1C 00 every second, forces receive, turns the radio's TX Inhibit on and latches \
+             the inhibit, long before its next radio check (check_minutes 30 here)",
+        );
+        // The watch reads every second of real time, twice before it acts: at most
+        // a few seconds even at the highest scale, well inside the wait.
+        s.node.check_minutes = 30;
+        s.script = vec![
+            Step::Wait(30.0),
+            Step::Panel(Panel::Transmit),
+            Step::Wait(800.0),
+        ];
+        s.expect.forced_receive = true;
+        s.expect.inhibited = true;
         s
     });
     v.push({
@@ -4783,6 +5122,15 @@ mod tests {
         // An over cut short by a fault ends the stretch.
         keyed[2].complete = false;
         assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // Or stopped between two pieces: no over prosign, then nothing keyed for
+        // longer than the transcript waits.
+        keyed[2].complete = true;
+        keyed[3].accepted = s(320);
+        keyed[3].start = s(320);
+        assert!(station_id_check(&keyed, &tunes, &e, 100.0).pass);
+        // An over that ended (K) does not end the stretch.
+        keyed[2].text = "NR 1 FM MOM TEST = A K".into();
+        assert!(!station_id_check(&keyed, &tunes, &e, 100.0).pass);
     }
 
     /// An outcome whose checks all pass, as a clean sweep run's would.
@@ -4809,7 +5157,129 @@ mod tests {
                 exchanges_done: 1,
                 ..Facts::default()
             },
+            not_judged: Vec::new(),
         }
+    }
+
+    /// A run's outcome with these checks, each (name, passed).
+    fn outcome_with(checks: &[(&'static str, bool)]) -> Outcome {
+        let mut o = sweep_outcome(&[]);
+        o.checks = checks.iter().map(|&(n, p)| check(n, p, "")).collect();
+        o
+    }
+
+    #[test]
+    fn a_run_the_machine_paused_in_is_run_again_and_listed() {
+        let mut runs = [
+            outcome_with(&[("keyed", false), ("machine", false)]),
+            outcome_with(&[("keyed", true), ("machine", true)]),
+        ]
+        .into_iter();
+        let out = judged(|| runs.next().expect("run once more than expected"));
+        assert!(out.passed());
+        assert_eq!(out.not_judged.len(), 1);
+        assert!(
+            out.not_judged[0].contains("failed keyed"),
+            "{:?}",
+            out.not_judged
+        );
+        assert!(out.summary().contains("after 1 run(s) not judged"));
+        assert!(out.render().contains("[not judged] an earlier run"));
+    }
+
+    #[test]
+    fn a_run_the_machine_paused_in_is_not_judged_even_if_it_passed() {
+        let mut runs = [
+            outcome_with(&[("keyed", true), ("machine", false)]),
+            outcome_with(&[("keyed", false), ("machine", true)]),
+        ]
+        .into_iter();
+        let out = judged(|| runs.next().expect("run once more than expected"));
+        assert!(!out.passed());
+        assert!(out.not_judged[0].contains("passed every other check"));
+    }
+
+    #[test]
+    fn an_ic7300_run_that_passed_every_other_check_stands_through_a_pause() {
+        let paused = || {
+            let ms = Duration::from_millis;
+            any_radio::machine_check_within(ms(50), 1.0, 20.0, pause_limit(20.0))
+        };
+        let mut out = outcome_with(&[("keyed", true), ("safety", true)]);
+        out.checks.push(paused());
+        pause_excuses_only_failures(&mut out);
+        assert!(out.passed(), "{}", out.render());
+        assert!(out.render().contains("every other check passed"));
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            out.clone()
+        });
+        assert_eq!(runs, 1);
+        assert!(out.not_judged.is_empty());
+
+        // A failure in a run the machine paused in is still not judged.
+        let mut out = outcome_with(&[("keyed", true), ("safety", false)]);
+        out.checks.push(paused());
+        pause_excuses_only_failures(&mut out);
+        let machine = out.checks.iter().find(|c| c.name == "machine").unwrap();
+        assert!(!machine.pass && machine.detail.contains("says nothing about the node"));
+    }
+
+    #[test]
+    fn a_failure_without_a_pause_stands() {
+        for checks in [
+            &[("keyed", false), ("machine", true)][..],
+            // A run whose outcome has no pause meter.
+            &[("keyed", false)][..],
+        ] {
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                outcome_with(checks)
+            });
+            assert_eq!(runs, 1);
+            assert!(!out.passed());
+            assert!(out.not_judged.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_machine_that_keeps_pausing_fails_the_scenario() {
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            outcome_with(&[("keyed", true), ("machine", false)])
+        });
+        assert_eq!(runs, NOT_JUDGED_RERUNS + 1);
+        assert!(!out.passed());
+        assert_eq!(out.not_judged.len(), NOT_JUDGED_RERUNS);
+    }
+
+    #[test]
+    fn a_keyer_scenario_is_judged_through_a_pause_under_a_second_of_radio_time() {
+        let ms = Duration::from_millis;
+        assert!(any_radio::machine_check(ms(199), 10.0, 5.0).pass);
+        assert!(!any_radio::machine_check(ms(201), 10.0, 5.0).pass);
+        // What broke the scenarios on CI, frozen locally with SIGSTOP: 0.35 s just
+        // before the operator's AGN, 0.5 s during a keying run.
+        assert!(!any_radio::machine_check(ms(350), 10.0, 5.0).pass);
+        assert!(any_radio::machine_check(ms(999), 10.0, 1.0).pass);
+        assert!(!any_radio::machine_check(ms(1001), 10.0, 1.0).pass);
+    }
+
+    #[test]
+    fn an_ic7300_scenario_is_judged_through_a_pause_under_the_safety_checks_slack() {
+        let ms = Duration::from_millis;
+        // 0.5 s of radio time and 20 ms of real time: at 20x, 45 ms.
+        assert!(any_radio::machine_check_within(ms(44), 1.0, 20.0, pause_limit(20.0)).pass);
+        assert!(!any_radio::machine_check_within(ms(46), 1.0, 20.0, pause_limit(20.0)).pass);
+        // What failed fault-stuck-tx on a Windows runner: about 0.7 s at 20x.
+        assert!(!any_radio::machine_check_within(ms(700), 1.0, 20.0, pause_limit(20.0)).pass);
+        // At 100x, 25 ms; at real time, 0.52 s.
+        assert!(any_radio::machine_check_within(ms(24), 1.0, 100.0, pause_limit(100.0)).pass);
+        assert!(!any_radio::machine_check_within(ms(26), 1.0, 100.0, pause_limit(100.0)).pass);
+        assert_eq!(pause_limit(1.0), ms(520));
     }
 
     const CELL: Cell = Cell {

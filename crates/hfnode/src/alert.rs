@@ -19,7 +19,8 @@ use lettre::message::{header::ContentType, Mailbox};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -36,6 +37,9 @@ const RETRY_AFTER: [Duration; 3] = [
     Duration::from_secs(900),
 ];
 
+/// How often the alert thread, with nothing to send, says so ([`Flush`]).
+const IDLE_CHECK: Duration = Duration::from_millis(100);
+
 /// Sends one email: (subject, body).
 pub type Deliver = Box<dyn FnMut(&str, &str) -> Result<(), String> + Send>;
 
@@ -44,6 +48,55 @@ pub struct Alerts {
     tx: Option<Sender<InhibitNotice>>,
     done: Receiver<()>,
     emails: bool,
+    flush: Flush,
+}
+
+/// Lets a stop signal, which exits the process without returning to
+/// [`Alerts::finish`], wait for alerts already queued: a stop that latches the
+/// inhibit queues its own.
+#[derive(Clone, Default)]
+pub struct Flush(Arc<(Mutex<u64>, Condvar)>);
+
+impl Flush {
+    /// Wait, at most `grace`, until every notice queued before this call has been
+    /// sent or given up. Whether it was.
+    pub fn wait(&self, grace: Duration) -> bool {
+        let (m, cv) = &*self.0;
+        let idle = m.lock().unwrap_or_else(|e| e.into_inner());
+        let before = *idle;
+        let (_idle, waited) = cv
+            .wait_timeout_while(idle, grace, |n| *n == before)
+            .unwrap_or_else(|e| e.into_inner());
+        !waited.timed_out()
+    }
+
+    /// The thread's next notice, or `None` once every sender is gone. Each time
+    /// it finds none queued it says so, under the lock that [`Flush::wait`] reads
+    /// it with: one said after a wait began found every notice queued before it
+    /// already sent.
+    fn next(&self, rx: &Receiver<InhibitNotice>) -> Option<InhibitNotice> {
+        loop {
+            {
+                let (m, cv) = &*self.0;
+                let mut idle = m.lock().unwrap_or_else(|e| e.into_inner());
+                match rx.try_recv() {
+                    Ok(n) => return Some(n),
+                    Err(e) => {
+                        *idle += 1;
+                        cv.notify_all();
+                        if e == TryRecvError::Disconnected {
+                            return None;
+                        }
+                    }
+                }
+            }
+            match rx.recv_timeout(IDLE_CHECK) {
+                Ok(n) => return Some(n),
+                // Said under the lock first.
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+            }
+        }
+    }
 }
 
 impl Alerts {
@@ -92,10 +145,12 @@ impl Alerts {
         let emails = deliver.is_some();
         let call = node_call.to_ascii_uppercase();
         let config = config.to_path_buf();
+        let flush = Flush::default();
+        let idle = flush.clone();
         thread::spawn(move || {
             let mut deliver = deliver;
             // Ends once every sender, the station's included, is gone.
-            for n in rx {
+            while let Some(n) = idle.next(&rx) {
                 let Some(send) = deliver.as_mut() else {
                     log::warn!(
                         "transmit inhibited ({}); no [email] alert_to, so nobody was emailed",
@@ -130,7 +185,13 @@ impl Alerts {
             tx: Some(tx),
             done,
             emails,
+            flush,
         }
+    }
+
+    /// For a stop signal to wait for alerts already queued ([`Flush::wait`]).
+    pub fn flush(&self) -> Flush {
+        self.flush.clone()
     }
 
     /// Whether alerts are emailed (otherwise only logged).
@@ -293,6 +354,9 @@ fn message_on(
             "   runs changes nothing):".into(),
             format!("   {cat} {f}"),
             format!("   {rm} {f}"),
+            "   On an IC-7300, then set it up again, which turns its TX Inhibit off".into(),
+            "   if the node turned it on (the node will not start while it is on):".into(),
+            format!("   {check} --config {config} setup"),
         ]),
         None => lines.push("3. There is no file to delete.".into()),
     }
@@ -414,6 +478,7 @@ mod tests {
                 "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check",
                 "sudo cat /var/lib/hfnode/tx-inhibited",
                 "sudo rm /var/lib/hfnode/tx-inhibited",
+                "sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml setup",
                 "sudo systemctl start hfnode",
             ],
         );
@@ -616,6 +681,30 @@ mod tests {
             "gave up after 3 tries"
         );
         assert!(sent.lock().unwrap().is_empty());
+    }
+
+    /// S6 (the safety audit's pre-review): a stop signal that latched the inhibit
+    /// exited before its alert went out.
+    #[test]
+    fn a_flush_waits_for_alerts_queued_before_it() {
+        let (d, sent) = recorder(Duration::from_millis(300), 0);
+        let alerts = Alerts::with_deliver("N0CALL", Path::new(CONFIG), Some(d), Vec::new());
+        let flush = alerts.flush();
+        // Nothing queued: back as soon as the thread says so.
+        let t0 = Instant::now();
+        assert!(flush.wait(Duration::from_secs(5)));
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+        let to = alerts.sender();
+        to.send(latched()).unwrap();
+        to.send(latched()).unwrap();
+        assert!(flush.wait(Duration::from_secs(5)));
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        // No longer than its grace.
+        to.send(latched()).unwrap();
+        assert!(!flush.wait(Duration::from_millis(50)));
+        drop(to);
+        alerts.finish(Duration::from_secs(5));
+        assert_eq!(sent.lock().unwrap().len(), 3);
     }
 
     #[test]

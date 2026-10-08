@@ -155,6 +155,34 @@ pub trait Rig: Send {
     fn held_key(&mut self) -> Option<String> {
         None
     }
+    /// Whether [`Rig::is_transmitting`] is a quick read of the radio's own status
+    /// (the IC-7300's 1C 00) that the station may make every second or so while it
+    /// is not keying, to find a transmission it did not start. Rigs whose status
+    /// is not that answer `false`.
+    fn polls_status_while_idle(&self) -> bool {
+        false
+    }
+    /// The radio's own limit on a transmission, as it is set now: `Some(ZERO)` if
+    /// it is off, `None` if the rig has no such setting to read (its limits are its
+    /// own, as a keyer box's or a handheld's are).
+    fn time_out_timer(&mut self) -> Result<Option<Duration>> {
+        Ok(None)
+    }
+    /// The RF power the radio is set to, in watts on the same 0-100 W scale as
+    /// [`Rig::set_rf_power_watts`], read back from the radio; `None` if the rig
+    /// cannot tell.
+    fn rf_power_watts(&mut self) -> Result<Option<f32>> {
+        Ok(None)
+    }
+    /// When the node inhibits transmitting, and after the radio could not be
+    /// confirmed back on receive: everything the rig can still send to stop the
+    /// radio transmitting again, on top of stopping the keyer and switching to
+    /// receive (the IC-7300: break-in off, so that neither a
+    /// keyer message nor a key held closed transmits, and its TX Inhibit function
+    /// on). Rigs with nothing more to send do nothing.
+    fn inhibit_transmit(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Split `text` into pieces the keyer accepts, on word boundaries where possible.

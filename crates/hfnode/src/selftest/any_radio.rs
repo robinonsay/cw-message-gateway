@@ -12,11 +12,23 @@
 //!     └── what the box keyed, if the radio was connected ◄──┘
 //! ```
 //!
+//! The `keyer-ht-` scenarios put an FM handheld on the box's PTT instead
+//! ([`RadioSetup::ptt`]): the box holds its PTT and keys an MCW tone, and the node
+//! hears it transmit by its receive noise going quiet.
+//!
 //! The radio's audio runs in real time on the box's clock, never held back for
 //! the node, so these scenarios run at most [`MAX_SCALE`] times real time: the
 //! sidetone monitor times the audio against the wall clock, as on the air, and
 //! the box's link timeout (2 s) leaves a busy machine 0.4 s of real time to send
 //! its keep-alive (a CI runner has held a test's thread up for longer than 0.2 s).
+//!
+//! **Pauses.** A busy machine (a CI runner) can stop the whole test process for a
+//! moment. The box's clock and the node's both run on meanwhile, as they would if
+//! the node's host stopped on the air, so a pause of half a second at 5x plays as
+//! the host stopping for 2.5 s: the box's link timeout ends the run, as it should,
+//! and the scenario fails through no fault of the node. Each run measures the
+//! longest pause (its `machine` check); a run with a pause of [`PAUSE_LIMIT`] of
+//! radio time or more is not judged, and [`super::run`] runs it again.
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -25,13 +37,127 @@ use crate::keyer::monitor::Monitor;
 use crate::keyer::rig::KeyerRig;
 use keyer_core::keyer::{Ended, Trip};
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 
 /// Real time the radio waits for the operator's next audio when it falls behind.
 const FIELD_WAIT: Duration = Duration::from_millis(250);
 
 /// The fastest the keyer scenarios run, whatever scale is asked for.
 pub const MAX_SCALE: f32 = 5.0;
+
+/// The longest pause of the whole test process, in radio time, that a keyer
+/// scenario is judged through. Under the least slack its timing leaves: the box's
+/// link timeout (2 s) against the node's keep-alive every 0.25 s, and the operator
+/// answering 2 s after the radio goes quiet against the node coming back to
+/// receive about 1 s after its last key-up.
+pub const PAUSE_LIMIT: Duration = Duration::from_secs(1);
+
+/// How often the pause meter looks at the clock (real time).
+const PAUSE_TICK: Duration = Duration::from_millis(5);
+
+/// Measures how long the whole process stops running: a thread that looks at the
+/// clock every [`PAUSE_TICK`] and keeps the gaps past that. Nothing the node does
+/// holds it up; only the machine can. The mock IC-7300's scenarios use it too.
+pub(super) struct PauseMeter {
+    stop: Arc<AtomicBool>,
+    /// Every pause of [`PAUSE_TICK`] or more: how long (real time), and the radio
+    /// time it ended.
+    thread: Option<JoinHandle<Vec<(Duration, f64)>>>,
+}
+
+impl PauseMeter {
+    pub(super) fn start(clock: Clock) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let mut pauses = Vec::new();
+                let mut last = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(PAUSE_TICK);
+                    let now = Instant::now();
+                    let gap = (now - last).saturating_sub(PAUSE_TICK);
+                    if gap >= PAUSE_TICK {
+                        pauses.push((gap, clock.secs()));
+                    }
+                    last = now;
+                }
+                pauses
+            })
+        };
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stop measuring: every pause of [`PAUSE_TICK`] or more, as (real time, the
+    /// radio time it ended).
+    pub(super) fn pauses(mut self) -> Vec<(Duration, f64)> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    }
+
+    /// The `machine` check: whether the process ran without a pause too long for
+    /// the scenario's timing at `scale`.
+    fn check(self, scale: f32) -> Check {
+        let (pause, at) = longest(&self.pauses());
+        machine_check(pause, at, scale)
+    }
+}
+
+/// The longest of `pauses`, and the radio time it ended; none is zero.
+pub(super) fn longest(pauses: &[(Duration, f64)]) -> (Duration, f64) {
+    pauses
+        .iter()
+        .copied()
+        .max_by_key(|p| p.0)
+        .unwrap_or((Duration::ZERO, 0.0))
+}
+
+/// The `machine` check for a run whose longest pause was `pause` (real time),
+/// ending at radio time `at`.
+pub(super) fn machine_check(pause: Duration, at: f64, scale: f32) -> Check {
+    machine_check_within(pause, at, scale, PAUSE_LIMIT.div_f32(scale))
+}
+
+/// The `machine` check for a run whose longest pause was `pause` (real time),
+/// ending at radio time `at`, against `limit` (real time).
+pub(super) fn machine_check_within(pause: Duration, at: f64, scale: f32, limit: Duration) -> Check {
+    let detail = format!(
+        "longest pause of the test process {:.2} s ({:.1} s radio time, at {at:.0} s); \
+         limit {:.2} s",
+        pause.as_secs_f32(),
+        pause.mul_f32(scale).as_secs_f32(),
+        limit.as_secs_f32()
+    );
+    if pause < limit {
+        check("machine", true, detail)
+    } else {
+        check(
+            "machine",
+            false,
+            format!(
+                "{detail}: the machine stopped the test for longer than the scenario's \
+                 timing allows at {scale}x, so the run says nothing about the node"
+            ),
+        )
+    }
+}
+
+impl Drop for PauseMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -77,6 +203,8 @@ pub(super) struct KeyerAir {
     /// Radio time spans with the key cable out; the last ends at infinity while
     /// it is out.
     cable_out: Mutex<Vec<(f64, f64)>>,
+    /// A handheld on the box's PTT.
+    fm: bool,
     /// [`KeyerFault::KeyStuck`] armed: for how long.
     stick: Mutex<Option<f64>>,
     /// Stuck until then (radio time).
@@ -145,7 +273,7 @@ impl KeyerAir {
         let hang = lock(&self.settings).hang;
         let to = self.keyer_box.clock.ms();
         let from = to.saturating_sub((hang * 1000.0) as u64);
-        !self.keyer_box.now().downs(from, to).is_empty()
+        !self.keyer_box.now().keyed(self.fm, from, to).is_empty()
     }
 
     /// Something to hear on the frequency: the radio keying a run from the box
@@ -163,7 +291,16 @@ impl KeyerAir {
         b.runs
             .iter()
             .skip(from)
-            .map(|r| self.keyed(r, &b.downs(r.start, r.end.unwrap_or(now)), now, off))
+            .map(|r| {
+                let (from, to) = (r.start, r.end.unwrap_or(now));
+                // When it keyed: the key, or for MCW the tone.
+                let downs = if r.mcw {
+                    b.tones(from, to)
+                } else {
+                    b.downs(from, to)
+                };
+                self.keyed(r, &downs, now, off)
+            })
             .collect()
     }
 
@@ -227,13 +364,26 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let cfg = config(s, &dir.0, scale)?;
     let book = node::load_codebook(&cfg)?;
     let clock = Clock::new(scale);
+    let pauses = PauseMeter::start(clock);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
         monitor_settings(&cfg, scale),
         clock.epoch,
     )));
-    let mut rs = RadioSettings::new(SAMPLE_RATE, PITCH_HZ);
-    rs.sidetone = SIDETONE;
+    let mut rs = if s.radio.ptt {
+        // Its receive noise as loud as the band noise of the other scenarios', for
+        // the decoder (FM capture, which would quiet it under the operator's
+        // signal, is not modelled).
+        RadioSettings {
+            noise: 0.02,
+            ..RadioSettings::handheld(SAMPLE_RATE, PITCH_HZ)
+        }
+    } else {
+        RadioSettings {
+            sidetone: SIDETONE,
+            ..RadioSettings::new(SAMPLE_RATE, PITCH_HZ)
+        }
+    };
     // The operator's audio brings the band noise, if the scenario has any.
     if s.fist.snr_db.is_some() {
         rs.noise = 0.0;
@@ -289,11 +439,14 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         settings,
         field,
         cable_out: Mutex::new(Vec::new()),
+        fm: s.radio.ptt,
         stick: Mutex::new(None),
         stuck_until: Mutex::new(None),
     };
-    let mut air = air(s, AirRadio::Keyer(k), None, book, scale);
-    let Some((station, session, svc)) = operate(s, &mut air, &done, out) else {
+    let mut air = air(s, AirRadio::Keyer(Box::new(k)), None, book, scale);
+    let ran = operate(s, &mut air, &done, out);
+    out.checks.push(pauses.check(scale));
+    let Some((station, session, svc)) = ran else {
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
@@ -337,9 +490,10 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     Ok(())
 }
 
-/// Bounds that hold whatever the scenario: the box's key-downs and runs within
-/// its limits and the station's, never tripped, its key open when the node
-/// stopped, and the duty cycle.
+/// Bounds that hold whatever the scenario: the box's key-downs (a handheld's
+/// tone elements), PTT holds and runs within its limits and the station's, never
+/// tripped (but by a PTT held at the radio, if the scenario inhibits), its outputs
+/// off when the node stopped, and the duty cycle.
 fn box_safety(
     cfg: &Config,
     e: &Expect,
@@ -349,9 +503,13 @@ fn box_safety(
 ) -> Check {
     let b = keyer_box.now();
     let now = keyer_box.clock.ms();
-    let downs = b.downs(0, now);
-    let longest_down = downs.iter().map(|&(d, u)| u - d).max().unwrap_or(0);
-    let total_down: u64 = downs.iter().map(|&(d, u)| u - d).sum();
+    let span = |v: &[(u64, u64)]| v.iter().map(|&(d, u)| u - d).collect::<Vec<_>>();
+    let elements = [span(&b.downs(0, now)), span(&b.tones(0, now))].concat();
+    let longest_down = elements.iter().copied().max().unwrap_or(0);
+    let ptts = span(&b.ptt_downs(0, now));
+    let longest_ptt = ptts.iter().copied().max().unwrap_or(0);
+    // On the air: the key down, or a handheld's PTT.
+    let total_down: u64 = span(&b.downs(0, now)).iter().sum::<u64>() + ptts.iter().sum::<u64>();
     let longest_run = b
         .runs
         .iter()
@@ -369,8 +527,14 @@ fn box_safety(
             cfg.station.max_key_seconds
         ));
     }
-    if b.trip() != Trip::None {
-        bad.push("the box tripped".into());
+    if longest_ptt > u64::from(keyer_core::limits::PTT_MS) {
+        bad.push(format!("PTT down for {longest_ptt} ms at once"));
+    }
+    match b.trip() {
+        Trip::None => {}
+        // A PTT held at the radio, which the box saw after letting its own up.
+        Trip::Line if e.inhibited => {}
+        t => bad.push(format!("the box tripped: {}", t.as_str())),
     }
     if left_keying {
         bad.push("the box was keying when the node stopped".into());
@@ -386,7 +550,8 @@ fn box_safety(
         ));
     }
     let detail = format!(
-        "{} runs, longest {:.1} s, longest key-down {longest_down} ms, duty {:.0}%, {} restarts",
+        "{} runs, longest {:.1} s, longest key-down {longest_down} ms, longest PTT \
+         {longest_ptt} ms, duty {:.0}%, {} restarts",
         b.runs.len(),
         longest_run as f32 / 1000.0,
         duty * 100.0,
@@ -415,6 +580,13 @@ fn on_keyer(mut s: Scenario, name: &str, about: &str) -> Scenario {
     s
 }
 
+/// [`on_keyer`] with an FM handheld on the box's PTT.
+fn on_handheld(s: Scenario, name: &str, about: &str) -> Scenario {
+    let mut s = on_keyer(s, name, about);
+    s.radio.ptt = true;
+    s
+}
+
 /// The keyer scenarios; some are IC-7300 ones (`ic7300`) on the keyer box.
 pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
     let like = |name: &str| {
@@ -438,11 +610,21 @@ pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
             "keyer-rx-long",
             "a 26-chunk readout through the keyer box, one run per piece, IDs between chunks",
         ),
-        on_keyer(
-            like("agn"),
-            "keyer-agn",
-            "AGN through the keyer box repeats the last over; bare and unknown AGNs ignored",
-        ),
+        {
+            let mut s = on_keyer(
+                like("agn"),
+                "keyer-agn",
+                "AGN through the keyer box repeats the last over; bare and unknown AGNs ignored",
+            );
+            // Its AGNs that get silence must be copied for certain (see `agn`), but
+            // the decoder prints a stray E in band noise a few times a minute, and
+            // one just before a call turns its A into a U. So the operator brings
+            // the band noise instead of the radio, as loud (27 dB under its
+            // signal): the noise before and in each call is then the same however
+            // long the node took over the one before.
+            s.fist.snr_db = Some(27.0);
+            s
+        },
     ];
     v.push({
         let mut s = on_keyer(
@@ -523,7 +705,7 @@ pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
             Step::Keyer(KeyerFault::Unplugged(false)),
             Step::Wait(5.0),
             Step::Open {
-                text: open,
+                text: open.clone(),
                 read_back: read_back.clone(),
             },
             Step::Say {
@@ -536,6 +718,50 @@ pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
         // The node's STOP cannot reach an unplugged box, whose key opened when it
         // lost power.
         s.expect.forced_receive = false;
+        s
+    });
+    v.push(on_handheld(
+        like("tx"),
+        "keyer-ht-tx",
+        "TX on an FM handheld through its headset jack: the box holds its PTT and keys an MCW \
+         tone for each piece, rests as long between them, and the node hears the radio go \
+         quiet on transmit and its receive noise come back after",
+    ));
+    v.push({
+        let mut s = on_handheld(
+            like("tx"),
+            "keyer-ht-stuck-ptt",
+            "the handheld's PTT sticks at the radio as the node keys its result: the box lets \
+             its PTT up but its PTT line stays low, so the box trips and the node inhibits \
+             transmitting and alerts the owner; the radio's own timer lets go and nothing more \
+             is keyed",
+        );
+        s.script = vec![
+            Step::Open {
+                text: open.clone(),
+                read_back: read_back.clone(),
+            },
+            Step::Keyer(KeyerFault::KeyStuck { secs: 60.0 }),
+            Step::Say {
+                text: "OK 43 {43} K".into(),
+                expect: Some(done.clone()),
+            },
+            // The decoder prints stray characters in a handheld's receive noise
+            // (its squelch is open), and one just before a call can garble it (E + A
+            // = U). Where they fall moves with how long the node took, since the
+            // noise comes back when the radio's timer lets go. A field operator who
+            // gets silence sends the AGN again: the node copies one of the two and
+            // keys nothing for either.
+            Step::Unanswered {
+                text: "AGN 44 {44} K".into(),
+                tries: 2,
+            },
+        ];
+        s.expect.keyed = full(&[&read_back, &done]);
+        s.expect.sent = sent("MOM", "HI");
+        s.expect.last_seq = 44;
+        s.expect.forced_receive = true;
+        s.expect.inhibited = true;
         s
     });
     v

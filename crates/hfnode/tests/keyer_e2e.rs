@@ -7,7 +7,9 @@
 //! IC-7300's scenarios take all the processor they can get, and on a busy machine
 //! (a CI runner) these, which must keep up with real time, would then miss it.
 //! They run at most [`selftest::KEYER_MAX_SCALE`] times real time, or
-//! `HFNODE_E2E_SCALE` if lower.
+//! `HFNODE_E2E_SCALE` if lower. A run the machine paused the test in for longer
+//! than the scenario's timing allows is not judged and runs again (its `machine`
+//! check, `selftest::run`).
 
 use hfnode::selftest;
 
@@ -22,6 +24,11 @@ fn run(name: &str) {
     let s = selftest::scenario(name).unwrap_or_else(|| panic!("no scenario {name}"));
     let out = selftest::run(&s, scale());
     assert!(out.passed(), "\n{}", out.render());
+    assert!(
+        out.checks.iter().any(|c| c.name == "machine"),
+        "no pause meter:\n{}",
+        out.render()
+    );
 }
 
 const NAMES: &[&str] = &[
@@ -31,6 +38,8 @@ const NAMES: &[&str] = &[
     "keyer-cable-out",
     "keyer-stuck-key",
     "keyer-box-unplugged",
+    "keyer-ht-tx",
+    "keyer-ht-stuck-ptt",
 ];
 
 #[test]
@@ -71,4 +80,14 @@ fn keyer_stuck_key() {
 #[test]
 fn keyer_box_unplugged() {
     run("keyer-box-unplugged");
+}
+
+#[test]
+fn keyer_ht_tx() {
+    run("keyer-ht-tx");
+}
+
+#[test]
+fn keyer_ht_stuck_ptt() {
+    run("keyer-ht-stuck-ptt");
 }

@@ -10,6 +10,7 @@ fn settings() -> Settings {
         pitch_hz: PITCH,
         min_level_dbfs: -65.0,
         scale: 1.0,
+        mode: Mode::Sidetone,
     }
 }
 
@@ -42,6 +43,10 @@ struct Radio {
     /// The field station's CW at the pitch on receive: key-down stretches.
     field: Vec<(f64, f64)>,
     off: bool,
+    /// An FM handheld on the box's PTT ([`Mode::Mute`]): `box_downs` are the PTT's,
+    /// it is muted while keyed and has no sidetone, and a carrier quiets its
+    /// receive noise.
+    fm: bool,
 }
 
 impl Default for Radio {
@@ -61,6 +66,7 @@ impl Default for Radio {
             dropouts: Vec::new(),
             field: Vec::new(),
             off: false,
+            fm: false,
         }
     }
 }
@@ -106,6 +112,22 @@ impl Radio {
             return one[0];
         }
         let mut v = 0.0f32;
+        if self.fm {
+            let muted = self.muted(t);
+            let carrier = self.carrier.filter(|&(s, e, _)| t >= s && t < e);
+            rng.add(
+                &mut one,
+                if muted || carrier.is_some() {
+                    self.floor
+                } else {
+                    self.noise
+                },
+            );
+            if let Some((_, _, a)) = carrier.filter(|_| !muted) {
+                v += a * w.sin() as f32;
+            }
+            return v + one[0];
+        }
         if self.keyed(t) {
             let swing = self.wobble.map_or(1.0, |(hz, db)| {
                 let s = (2.0 * std::f64::consts::PI * hz * t).sin() as f32;
@@ -898,4 +920,176 @@ fn the_sidetone_pitch_and_the_longest_tone_are_measured() {
     // The longest element is a dash: 180 ms.
     let longest = m.longest_tone(t0).as_millis() as i64;
     assert!((longest - 180).abs() <= 20, "{longest} ms");
+}
+
+// An FM handheld on the box's PTT: [`Mode::Mute`].
+
+/// A handheld, its squelch open.
+fn handheld() -> Radio {
+    Radio {
+        fm: true,
+        sidetone: 0.0,
+        hang: 0.15,
+        delay: 0.03,
+        noise: 0.05,
+        ..Radio::default()
+    }
+}
+
+/// A monitor in [`Mode::Mute`] that has heard 3 s of receive noise, then the box
+/// hold the PTT for `ptt` s, then audio until `after` s past its end.
+fn mute_case(ptt: f64, tweak: impl FnOnce(&mut Radio), after: f64) -> Case {
+    let t0 = Instant::now();
+    let mut m = Monitor::starting_at(
+        Settings {
+            mode: Mode::Mute,
+            ..settings()
+        },
+        t0,
+    );
+    let start = 3.0;
+    let end = start + ptt;
+    let mut radio = Radio {
+        box_downs: vec![(start, end)],
+        ..handheld()
+    };
+    tweak(&mut radio);
+    feed(&mut m, t0, &radio, 0.0, start, 0.08, 0.04);
+    // As the rig does before keying.
+    m.band(t0 + Duration::from_secs_f64(start + 0.1));
+    let id = m.ptt_started(
+        t0 + Duration::from_secs_f64(start),
+        Duration::from_secs_f64(ptt),
+    );
+    feed(&mut m, t0, &radio, start, end + after, 0.08, 0.04);
+    Case {
+        m,
+        t0,
+        id,
+        radio,
+        end,
+        fed: end + after,
+    }
+}
+
+#[test]
+fn a_handheld_keyed_goes_quiet_and_its_noise_comes_back() {
+    let mut c = mute_case(4.0, |_| {}, 2.0);
+    let j = c.m.judge(c.id).expect("audio covers the run");
+    assert!(j.heard, "{j}");
+    assert_eq!(j.mode, Mode::Mute);
+    // The sound card's least delay (80 ms) and the radio's (30 ms).
+    let lag = j.lag.as_millis() as i64;
+    assert!((lag - 110).abs() <= 30, "{j}");
+    assert!(j.gap_db - j.tone_db > MUTE_DB, "{j}");
+    assert_eq!(c.state(), KeyState::Open);
+    assert!(!c.m.quieted());
+    let on_air = c.m.longest_on_air(c.t0).as_secs_f64();
+    assert!((on_air - 4.15).abs() < 0.1, "{on_air} s");
+}
+
+#[test]
+fn a_ptt_that_does_not_key_the_handheld_is_not_heard() {
+    let mut c = mute_case(4.0, |r| r.cable_out = true, 2.0);
+    let j = c.m.judge(c.id).unwrap();
+    assert!(!j.heard, "{j}");
+    let why = j.why_not().unwrap();
+    assert!(why.contains("did not drop"), "{why}");
+    assert_eq!(c.state(), KeyState::Open);
+}
+
+#[test]
+fn a_handheld_off_or_its_squelch_closed_is_not_heard_keyed() {
+    // No receive noise to go quiet: the level is under the minimum, and a run
+    // is not taken for keyed.
+    let mut c = mute_case(4.0, |r| r.noise = r.floor, 2.0);
+    assert!(c.m.band(c.t0 + Duration::from_secs(2)).level_db.unwrap() < -65.0);
+    assert!(!c.m.judge(c.id).unwrap().heard);
+}
+
+#[test]
+fn a_ptt_held_at_the_handheld_after_the_box_lets_it_up_is_caught() {
+    let mut c = mute_case(4.0, |r| r.stuck_from = Some(4.0), 0.3);
+    assert!(c.m.judge(c.id).unwrap().heard);
+    // Not yet: the audio delay and the radio's switch back to receive.
+    assert_eq!(c.state(), KeyState::Unsure);
+    c.feed_to(c.end + 2.5);
+    let KeyState::Held(why) = c.state() else {
+        panic!("not held")
+    };
+    assert!(why.contains("did not come back"), "{why}");
+}
+
+#[test]
+fn the_handheld_back_on_receive_within_its_switch_time_is_released() {
+    // A slow switch back to receive (1 s), still inside the 1.5 s allowed.
+    let mut c = mute_case(4.0, |r| r.hang = 0.9, 0.5);
+    assert_eq!(c.state(), KeyState::Unsure);
+    c.feed_to(c.end + 2.5);
+    assert_eq!(c.state(), KeyState::Open);
+}
+
+#[test]
+fn thirty_seconds_without_receive_noise_is_a_ptt_held() {
+    let t0 = Instant::now();
+    let at = |t: f64| t0 + Duration::from_secs_f64(t);
+    let mut m = Monitor::starting_at(
+        Settings {
+            mode: Mode::Mute,
+            ..settings()
+        },
+        t0,
+    );
+    let mut radio = handheld();
+    feed(&mut m, t0, &radio, 0.0, 5.0, 0.08, 0.04);
+    assert!(m.band(at(5.1)).level_db.unwrap() > -65.0);
+    // The radio transmits on its own (its PTT button, VOX) from 5 s on.
+    radio.stuck_from = Some(5.0);
+    feed(&mut m, t0, &radio, 5.0, 30.0, 0.08, 0.04);
+    m.band(at(30.1));
+    assert_eq!(m.key_state(), KeyState::Open);
+    assert!(
+        m.quieted(),
+        "the receiver quieted: a station on the channel, or this"
+    );
+    feed(&mut m, t0, &radio, 30.0, 36.0, 0.08, 0.04);
+    m.band(at(36.1));
+    let KeyState::Held(why) = m.key_state() else {
+        panic!("not held")
+    };
+    assert!(why.contains("no receive noise"), "{why}");
+}
+
+#[test]
+fn a_station_on_the_channel_quiets_the_handheld_and_keeps_the_level() {
+    let t0 = Instant::now();
+    let at = |t: f64| t0 + Duration::from_secs_f64(t);
+    let mut m = Monitor::starting_at(
+        Settings {
+            mode: Mode::Mute,
+            ..settings()
+        },
+        t0,
+    );
+    let radio = Radio {
+        carrier: Some((4.0, 8.0, 0.0)),
+        ..handheld()
+    };
+    feed(&mut m, t0, &radio, 0.0, 4.0, 0.08, 0.04);
+    let lv = m.band(at(4.0)).level_db.unwrap();
+    assert!(!m.quieted());
+    // The level stays the receive noise's, however often it is asked for: as
+    // before every piece.
+    let mut t = 4.0;
+    while t < 7.0 {
+        feed(&mut m, t0, &radio, t, t + 0.25, 0.08, 0.04);
+        t += 0.25;
+        let now = m.band(at(t + 0.1)).level_db.unwrap();
+        assert!((now - lv).abs() < 1.0, "{now} dBFS at {t} s, {lv} before");
+    }
+    assert!(m.quieted());
+    // A station with its tone at the pitch is no different.
+    feed(&mut m, t0, &radio, 7.0, 10.0, 0.08, 0.04);
+    m.band(at(10.1));
+    assert!(!m.quieted());
 }

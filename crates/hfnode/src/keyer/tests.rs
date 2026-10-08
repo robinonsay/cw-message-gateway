@@ -30,7 +30,7 @@ fn the_example_config_works_with_the_keyer_box() {
     assert_eq!(k.sidetone_hz, Some(600.0));
     // The figures the example's comment gives for max_key_seconds.
     let at = |wpm| {
-        (longest_piece(wpm).unwrap() + KEY_SECONDS_SPARE)
+        (longest_piece(wpm, Output::Key).unwrap() + KEY_SECONDS_SPARE)
             .as_secs_f32()
             .ceil()
     };
@@ -113,6 +113,7 @@ fn a_box_with_looser_limits_than_the_node_is_refused() {
         key_down_limit: MAX_KEY_DOWN_LIMIT,
         rest: MIN_REST,
         duty_budget: MAX_DUTY_BUDGET,
+        ptt_limit: MAX_PTT_LIMIT,
         uptime: Duration::from_secs(5),
         boot: Boot::Power,
         build: "1a2b3c4d".into(),
@@ -176,4 +177,90 @@ fn the_box_is_known_by_its_usb_product_name() {
     assert!(is_keyer_box("PICO2-KEYER"));
     assert!(!is_keyer_box("CP2102 USB to UART Bridge Controller"));
     assert!(!is_keyer_box("Pico"));
+}
+
+/// [`example_keyer`] on a handheld's PTT (`[keyer] output = "ptt"`), on 2 m.
+fn example_handheld() -> Config {
+    let mut cfg = example_keyer();
+    cfg.station.frequency_hz = 144_150_000;
+    cfg.station.key_speed_wpm = 20;
+    cfg.station.max_key_seconds = 60;
+    let k = cfg.keyer.as_mut().unwrap();
+    k.output = Output::Ptt;
+    k.ptt_contact_volts = Some(3.3);
+    cfg
+}
+
+#[test]
+fn a_handheld_on_the_ptt_is_checked() {
+    example_handheld().validate().unwrap();
+    let bad = |edit: fn(&mut Config), says: &str| {
+        let mut cfg = example_handheld();
+        edit(&mut cfg);
+        let e = cfg.validate().unwrap_err().to_string();
+        assert!(e.contains(says), "{says}: {e}");
+    };
+    // MCW only where 97.305(c) allows it: not the bottom of 2 m, not HF.
+    bad(|c| c.station.frequency_hz = 144_050_000, "MCW is allowed");
+    bad(|c| c.station.frequency_hz = 7_030_000, "MCW is allowed");
+    bad(
+        |c| c.keyer.as_mut().unwrap().ptt_contact_volts = Some(1.0),
+        "ptt_contact_volts",
+    );
+    bad(
+        |c| c.keyer.as_mut().unwrap().ptt_contact_volts = Some(30.0),
+        "ptt_contact_volts",
+    );
+    // 30 zeros at 13 wpm are 60.6 s: with the lead and tail, not under the box's
+    // 60 s PTT limit.
+    bad(
+        |c| c.station.key_speed_wpm = 13,
+        "with the PTT's lead and tail",
+    );
+    // The longest piece with its lead and tail, the spare, and the receive
+    // noise's return: 39.4 + 0.7 + 2 + 1.5 s at 20 wpm.
+    bad(|c| c.station.max_key_seconds = 43, "max_key_seconds");
+    let mut ok = example_handheld();
+    ok.station.max_key_seconds = 44;
+    ok.validate().unwrap();
+    ok.station.frequency_hz = 446_000_000;
+    ok.validate().unwrap();
+}
+
+#[test]
+fn nothing_keys_a_handheld_until_its_ptt_contact_is_on_record() {
+    let mut cfg = example_handheld();
+    let k = cfg.keyer.as_mut().unwrap();
+    check_ptt_cable(k).unwrap();
+    k.ptt_contact_volts = None;
+    let e = check_ptt_cable(k).unwrap_err().to_string();
+    assert!(e.contains("not recorded"), "{e}");
+    // Not needed to validate: the bring-up records it.
+    cfg.validate().unwrap();
+    // Nor for the key output.
+    let k = cfg.keyer.as_mut().unwrap();
+    k.output = Output::Key;
+    check_ptt_cable(k).unwrap();
+}
+
+#[test]
+fn the_output_is_read_from_the_config() {
+    let text = |extra: &str| format!("[keyer]\n{extra}");
+    let k: crate::config::Keyer = toml::from_str::<toml::Table>(&text("output = \"ptt\"")).unwrap()
+        ["keyer"]
+        .clone()
+        .try_into()
+        .unwrap();
+    assert_eq!(k.output, Output::Ptt);
+    let k: crate::config::Keyer = toml::from_str::<toml::Table>(&text("")).unwrap()["keyer"]
+        .clone()
+        .try_into()
+        .unwrap();
+    assert_eq!(k.output, Output::Key);
+    assert!(
+        toml::from_str::<toml::Table>(&text("output = \"vox\"")).unwrap()["keyer"]
+            .clone()
+            .try_into::<crate::config::Keyer>()
+            .is_err()
+    );
 }

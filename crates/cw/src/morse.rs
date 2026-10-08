@@ -116,6 +116,15 @@ pub fn units(text: &str) -> u32 {
     total
 }
 
+/// The part of [`units`] with the key down: dit 1, dah 3, no gaps.
+pub fn mark_units(text: &str) -> u32 {
+    text.chars()
+        .filter_map(encode_char)
+        .flat_map(str::chars)
+        .map(|e| if e == '.' { 1 } else { 3 })
+        .sum()
+}
+
 /// How long `text` takes to key at `wpm` (PARIS timing), in milliseconds.
 pub fn duration_ms(text: &str, wpm: u32) -> u64 {
     units(text) as u64 * 1200 / wpm.max(1) as u64
@@ -131,5 +140,13 @@ mod timing_tests {
         assert_eq!(units("PARIS"), 43);
         assert_eq!(units("PARIS PARIS"), 93);
         assert_eq!(duration_ms("PARIS", 20), 43 * 60);
+    }
+
+    #[test]
+    fn key_down_part() {
+        // P .--. 8, A .- 4, R .-. 5, I .. 2, S ... 3.
+        assert_eq!(mark_units("PARIS"), 22);
+        assert_eq!(mark_units("PARIS PARIS"), 44);
+        assert_eq!(mark_units("0"), 15);
     }
 }

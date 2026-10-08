@@ -122,6 +122,16 @@ pub struct Keyer {
     /// reporting any other is refused (so the box keeps running the firmware whose
     /// UF2 was checked).
     pub firmware_build: Option<String>,
+    /// What the box keys: "key" (the default), a radio's key jack with `CW`; or
+    /// "ptt", an FM handheld's PTT through its headset jack, holding it while it
+    /// keys an MCW tone into the microphone (docs/keyer.md, "A handheld through its
+    /// headset jack").
+    #[serde(default)]
+    pub output: crate::keyer::Output,
+    /// With `output = "ptt"`: the DC voltage measured on the handheld's PTT
+    /// contact, radio on and PTT open (docs/keyer.md, "The cable"). Nothing is
+    /// keyed until it is recorded, and only if it is 2.5-25 V.
+    pub ptt_contact_volts: Option<f32>,
 }
 
 /// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in
@@ -853,13 +863,15 @@ pub fn expand_home(path: &Path) -> Result<PathBuf> {
     expand_home_from(path, home_dir())
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// The user's home directory, from HOME (USERPROFILE on Windows).
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
 }
 
-fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
+/// [`expand_home`], with the home directory given.
+pub fn expand_home_from(path: &Path, home: Option<PathBuf>) -> Result<PathBuf> {
     let mut parts = path.components();
     match parts.next() {
         Some(std::path::Component::Normal(first)) if first == "~" => match home {
@@ -896,6 +908,20 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // A relative state_dir would be found from the folder each command is started
+        // in: the service and a command run by hand would keep tx-inhibited in two
+        // places, and an inhibit one of them latched would not stop the other (the
+        // safety audit's K6). A leading `~` has been expanded by now (`Config::load`
+        // does that first). On Windows a path from the root of the current drive
+        // (`\hfnode`, which is how a Unix path such as the example's reads there) is
+        // let through: it depends on the drive, not on the folder.
+        if !self.state_dir.has_root() {
+            bail!(
+                "state_dir {}: use a full path or one starting with ~; a relative one \
+                 depends on the folder hfnode is started from",
+                self.state_dir.display()
+            );
+        }
         let s = &self.station;
         if s.node_call.trim().is_empty() {
             bail!("station.node_call is required");
@@ -918,6 +944,11 @@ impl Config {
         }
         if s.max_key_seconds == 0 || s.max_key_seconds > 120 {
             bail!("station.max_key_seconds must be 1-120");
+        }
+        // Each chunk is read back and acknowledged on its own: at least a few words,
+        // and at most two keyer commands (17 takes 30 characters, p. 19-13).
+        if !(10..=60).contains(&s.chunk_chars) {
+            bail!("station.chunk_chars must be 10-60");
         }
         if !(1.1..=3.0).contains(&s.swr_limit) {
             bail!("station.swr_limit must be between 1.1 and 3.0");
@@ -1356,6 +1387,16 @@ mod tests {
     }
 
     #[test]
+    fn chunk_chars_is_bounded() {
+        // The safety audit's K13: it was not checked at all.
+        for (chars, ok) in [(0, false), (9, false), (10, true), (60, true), (61, false)] {
+            let mut cfg = example();
+            cfg.station.chunk_chars = chars;
+            assert_eq!(cfg.validate().is_ok(), ok, "{chars}");
+        }
+    }
+
+    #[test]
     fn rejects_key_speed_outside_radio_range() {
         for (wpm, ok) in [(5, false), (6, true), (48, true), (49, false), (80, false)] {
             let mut cfg = example();
@@ -1662,6 +1703,36 @@ mod tests {
             cfg.imessage.unwrap().db,
             Path::new("/home/op").join("Library/Messages/chat.db")
         );
+    }
+
+    #[test]
+    fn state_dir_must_be_a_full_path() {
+        // The service and a command run by hand must keep tx-inhibited in one place:
+        // a relative state_dir is found from the folder each is started in (the
+        // safety audit's K6).
+        let mut cfg = example();
+        for relative in ["state", "./state", "hfnode/state", ""] {
+            cfg.state_dir = relative.into();
+            let e = cfg.validate().unwrap_err().to_string();
+            assert!(
+                e.starts_with(&format!("state_dir {relative}: use a full path")),
+                "{e}"
+            );
+        }
+        #[cfg(windows)]
+        {
+            // A drive with no root: the folder last used on that drive.
+            cfg.state_dir = r"C:hfnode\state".into();
+            assert!(cfg.validate().is_err());
+            cfg.state_dir = r"C:\hfnode\state".into();
+            cfg.validate().unwrap();
+        }
+        cfg.state_dir = "/var/lib/hfnode".into();
+        cfg.validate().unwrap();
+        // As loaded: `~` is the home directory by then.
+        cfg.state_dir = "~/hfnode/state".into();
+        cfg.expand_paths(Some(PathBuf::from("/home/op"))).unwrap();
+        cfg.validate().unwrap();
     }
 
     #[test]

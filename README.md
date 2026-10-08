@@ -199,7 +199,12 @@ driver) against `civ::mock`, a byte-level IC-7300, with a scripted field operato
 on the other end. The `keyer-` scenarios run it on the keyer rig instead, against a
 mock keyer box (the firmware's own keyer code) and a radio whose headphone audio,
 sidetone included, goes to the node in real time; they run after the others, at most
-5x real time:
+5x real time. A machine that stops the test process for 1 s of radio time or more
+(0.2 s at 5x; a busy CI runner does) breaks their timing as a host stopping for that
+long would on the air, so such a run is not judged: it runs again, at most twice,
+and the result lists it. The IC-7300's scenarios do the same for a stop longer than
+the slack their safety check leaves the station to unkey a radio left on transmit
+(0.5 s of radio time and 20 ms: 45 ms at 20x):
 
 ```sh
 hfnode selftest                          # all scenarios, PASS/FAIL table; exit code 1 on failure

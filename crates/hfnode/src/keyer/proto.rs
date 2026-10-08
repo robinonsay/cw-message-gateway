@@ -16,8 +16,13 @@ pub enum Command {
         wpm: u32,
         text: String,
     },
-    /// Bring-up only: the box takes `TEST HANG` or `TEST STUCK` only within 2 s of
-    /// this, and once.
+    /// Hold the PTT and key `text` (1-30 characters) at `wpm` on the tone.
+    Mcw {
+        wpm: u32,
+        text: String,
+    },
+    /// Bring-up only: the box takes `TEST HANG`, `TEST STUCK` or `TEST HOLD` only
+    /// within 2 s of this, and once.
     TestArm,
     /// Bring-up only: stop the box's control loop at the next key-down, so that
     /// only its watchdog can open the key.
@@ -25,6 +30,9 @@ pub enum Command {
     /// Bring-up only: hold the next key-down, so that the box's key-down limit
     /// must open the key (and trip the box).
     TestStuck,
+    /// Tests only: hold the PTT after an `MCW` run's text, so that the box's PTT
+    /// limit must open it (and trip the box).
+    TestHold,
 }
 
 impl Command {
@@ -35,9 +43,11 @@ impl Command {
             Self::Status => "STATUS".into(),
             Self::Stop => "STOP".into(),
             Self::Cw { wpm, text } => format!("CW {wpm} {text}"),
+            Self::Mcw { wpm, text } => format!("MCW {wpm} {text}"),
             Self::TestArm => "TEST ARM".into(),
             Self::TestHang => "TEST HANG".into(),
             Self::TestStuck => "TEST STUCK".into(),
+            Self::TestHold => "TEST HOLD".into(),
         }
     }
 
@@ -48,13 +58,14 @@ impl Command {
             Self::Status => "STATUS",
             Self::Stop => "STOP",
             Self::Cw { .. } => "CW",
-            Self::TestArm | Self::TestHang | Self::TestStuck => "TEST",
+            Self::Mcw { .. } => "MCW",
+            Self::TestArm | Self::TestHang | Self::TestStuck | Self::TestHold => "TEST",
         }
     }
 
     /// Whether sending it twice does no harm, so that it may be sent again when
-    /// its reply is lost. `CW` and the tests start something; `TEST ARM` only
-    /// renews itself.
+    /// its reply is lost. `CW`, `MCW` and the tests start something; `TEST ARM`
+    /// only renews itself.
     pub fn repeatable(&self) -> bool {
         matches!(
             self,
@@ -67,7 +78,7 @@ impl Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     /// The fields after `OK <command>` (for `TEST`, after `OK TEST ARM`, `OK TEST
-    /// HANG` or `OK TEST STUCK`).
+    /// HANG`, `OK TEST STUCK` or `OK TEST HOLD`).
     Ok(Vec<String>),
     Err(String),
 }
@@ -83,6 +94,7 @@ pub fn answers(cmd: &Command, body: &str) -> bool {
         ("OK", Command::TestArm) => body == "OK TEST ARM",
         ("OK", Command::TestHang) => body == "OK TEST HANG",
         ("OK", Command::TestStuck) => body == "OK TEST STUCK",
+        ("OK", Command::TestHold) => body == "OK TEST HOLD",
         ("OK" | "ERR", _) => name == cmd.name(),
         _ => false,
     }
@@ -102,18 +114,28 @@ pub fn parse_reply(cmd: &Command, body: &str) -> Result<Reply, String> {
 /// What a box code means, for the log and the operator.
 pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
     Some(match (cmd.name(), code) {
-        ("CW", "TRIP") => {
-            "the box tripped: its key stayed down past its limit; unplug it and plug it \
+        ("CW" | "MCW", "TRIP") => {
+            "the box tripped (its key or tone stayed on, its PTT stayed down, or the PTT \
+             line stayed low after it let go; STATUS says which); unplug it and plug it \
              in again"
         }
-        ("CW", "RUN") => "a run is already under way",
-        ("CW", "WPM") => "speed outside 5-50 wpm",
-        ("CW", "LEN") => "1 to 30 characters per run",
-        ("CW", "CHAR") => "a character the box cannot key",
+        ("CW" | "MCW", "RUN") => "a run is already under way",
+        ("CW" | "MCW", "WPM") => "speed outside 5-50 wpm",
+        ("CW" | "MCW", "LEN") => "1 to 30 characters per run",
+        ("CW" | "MCW", "CHAR") => "a character the box cannot key",
         ("CW", "LIMIT") => "longer than the box's run limit at this speed",
-        ("CW", "REST") => "the box keeps its key up for 1 s after each run",
-        ("CW", "DUTY") => {
-            "the box's duty budget is spent: its key must stay up as long as it was down"
+        ("MCW", "LIMIT") => {
+            "with its lead and tail, not under the box's run and PTT limits at this speed"
+        }
+        ("CW", "LINE") => "the PTT line has not yet been checked since the PTT last moved",
+        ("MCW", "LINE") => {
+            "the PTT line reads low: the radio off, the cable out, or the PTT already \
+             held; or it has not yet been checked since the PTT last moved"
+        }
+        ("CW" | "MCW", "REST") => "the box rests 1 s after each run",
+        ("CW" | "MCW", "DUTY") => {
+            "the box's duty budget is spent: the transmitter must stay unkeyed as long as \
+             it was keyed (the PTT's whole time for MCW)"
         }
         ("TEST", "RUN") => "only during a run",
         ("TEST", "ARM") => "a test is taken only just after TEST ARM",
@@ -126,7 +148,7 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub version: u32,
-    /// Longest one `CW` run may last.
+    /// Longest one `CW` or `MCW` run may last.
     pub run_limit: Duration,
     /// A run stops when no valid line has arrived for this long.
     pub link_timeout: Duration,
@@ -134,8 +156,11 @@ pub struct Hello {
     pub key_down_limit: Duration,
     /// How long the key stays up after a run before the box takes another.
     pub rest: Duration,
-    /// The most key-down time the box keeps in its duty budget.
+    /// The most keyed time (the key or the PTT down) the box keeps in its duty
+    /// budget.
     pub duty_budget: Duration,
+    /// Longest the PTT may stay down at once before the box trips.
+    pub ptt_limit: Duration,
     /// Time since the box started.
     pub uptime: Duration,
     /// Why it last started.
@@ -146,12 +171,13 @@ pub struct Hello {
 }
 
 impl Hello {
-    /// From the fields of `OK HELLO`. A box of protocol version 1 is refused here,
-    /// by its field count: it has no rest and no duty budget.
+    /// From the fields of `OK HELLO`. A box of protocol version 1 or 2 is refused
+    /// here, by its field count: it has no rest and no duty budget (1), or no PTT
+    /// limit (2).
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [version, run, link, down, rest, budget, uptime, boot, build, name] = f else {
+        let [version, run, link, down, rest, budget, ptt, uptime, boot, build, name] = f else {
             return Err(format!(
-                "HELLO has {} fields, not 10 (older firmware? flash this hfnode's)",
+                "HELLO has {} fields, not 11 (older firmware? flash this hfnode's)",
                 f.len()
             ));
         };
@@ -166,6 +192,7 @@ impl Hello {
             key_down_limit: Duration::from_millis(num(down, "key-down limit")?),
             rest: Duration::from_millis(num(rest, "rest")?),
             duty_budget: Duration::from_secs(num(budget, "duty budget")?),
+            ptt_limit: Duration::from_secs(num(ptt, "PTT limit")?),
             uptime: Duration::from_millis(num(uptime, "uptime")?),
             boot: Boot::parse(boot).ok_or_else(|| format!("HELLO boot {boot:?} unknown"))?,
             build: build.clone(),
@@ -179,22 +206,26 @@ impl Hello {
 pub struct Status {
     /// The key is down now.
     pub key: bool,
-    /// A `CW` run is under way.
+    /// A `CW` or `MCW` run is under way.
     pub run: bool,
     /// How the last run ended.
     pub ended: Ended,
     pub trip: Trip,
     /// How long until the rest after the last run is over.
     pub rest_left: Duration,
-    /// The duty budget: the key-down time the box would take now.
+    /// The duty budget: the keyed time the box would take now.
     pub budget: Duration,
+    /// The PTT is down now.
+    pub ptt: bool,
+    /// The PTT line reads high (the PTT contact open).
+    pub line: bool,
 }
 
 impl Status {
     /// From the fields of `OK STATUS`.
     pub fn parse(f: &[String]) -> Result<Self, String> {
-        let [key, run, ended, trip, rest, budget] = f else {
-            return Err(format!("STATUS has {} fields, not 6", f.len()));
+        let [key, run, ended, trip, rest, budget, ptt, line] = f else {
+            return Err(format!("STATUS has {} fields, not 8", f.len()));
         };
         let ms = |s: &str, what: &str| {
             s.parse::<u64>()
@@ -213,12 +244,14 @@ impl Status {
             trip: Trip::parse(trip).ok_or_else(|| format!("STATUS trip {trip:?} unknown"))?,
             rest_left: ms(rest, "rest")?,
             budget: ms(budget, "budget")?,
+            ptt: bit(ptt, "ptt")?,
+            line: bit(line, "line")?,
         })
     }
 
     /// The box is keying, or may be about to.
     pub fn busy(&self) -> bool {
-        self.key || self.run
+        self.key || self.ptt || self.run
     }
 }
 
@@ -258,16 +291,27 @@ mod tests {
         assert_eq!(h.key_down_limit, Duration::from_secs(1));
         assert_eq!(h.rest, Duration::from_secs(1));
         assert_eq!(h.duty_budget, Duration::from_secs(60));
+        assert_eq!(h.ptt_limit, Duration::from_secs(60));
         assert_eq!(h.uptime, Duration::from_millis(1500));
         assert_eq!(h.boot, Boot::Watchdog);
         assert_eq!(h.build, "-");
         assert_eq!(h.name, "PICO2-KEYER");
-        // The budget starts empty after a watchdog reset: earn some first.
+        // A watchdog reset comes up tripped.
         let cw = Command::Cw {
             wpm: 20,
             text: "TEST".into(),
         };
-        assert_eq!(ask(2, &cw), Reply::Err("DUTY".into()));
+        assert_eq!(ask(2, &cw), Reply::Err("TRIP".into()));
+        let Reply::Ok(f) = ask(3, &Command::Status) else {
+            panic!()
+        };
+        assert_eq!(Status::parse(&f).unwrap().trip, Trip::Watchdog);
+        // The budget starts empty after another restart: earn some first.
+        let mut k = Keyer::new(Limits::BOX, Boot::Other, 1234);
+        let line = encode(4, &cw).unwrap();
+        let reply = k.handle_line(1500, line.as_bytes()).unwrap();
+        let (_, body) = keyer_core::frame::decode(reply.as_bytes()).unwrap();
+        assert_eq!(parse_reply(&cw, body).unwrap(), Reply::Err("DUTY".into()));
         let mut k = Keyer::new(Limits::BOX, Boot::Power, 1234);
         let mut ask = |id: u8, cmd: &Command| {
             let line = encode(id, cmd).unwrap();
@@ -307,8 +351,34 @@ mod tests {
                 trip: Trip::None,
                 rest_left: Duration::from_secs(1),
                 budget: Duration::from_secs(60),
+                ptt: false,
+                line: false,
             }
         );
+        // `MCW`, the line read high first, after the rest.
+        k.set_line(true);
+        let mut ask = |id: u8, cmd: &Command| {
+            let line = encode(id, cmd).unwrap();
+            let reply = k.handle_line(2600, line.as_bytes()).unwrap();
+            let (_, body) = keyer_core::frame::decode(reply.as_bytes()).unwrap();
+            assert!(answers(cmd, body), "{body}");
+            parse_reply(cmd, body).unwrap()
+        };
+        let mcw = Command::Mcw {
+            wpm: 20,
+            text: "TEST".into(),
+        };
+        assert_eq!(ask(9, &mcw), Reply::Ok(Vec::new()));
+        assert_eq!(ask(10, &Command::TestHold), Reply::Err("ARM".into()));
+        assert_eq!(ask(10, &Command::TestArm), Reply::Ok(Vec::new()));
+        assert_eq!(ask(10, &Command::TestHold), Reply::Ok(Vec::new()));
+        let Reply::Ok(f) = ask(11, &Command::Status) else {
+            panic!()
+        };
+        let s = Status::parse(&f).unwrap();
+        assert!(s.ptt && s.run && !s.key && s.busy());
+        assert_eq!(ask(12, &Command::Stop), Reply::Ok(Vec::new()));
+        assert_eq!(ask(13, &mcw), Reply::Err("LINE".into()));
     }
 
     #[test]
@@ -330,21 +400,31 @@ mod tests {
     #[test]
     fn bad_fields_are_errors() {
         assert!(Status::parse(&strings(&["1", "0", "DONE", "NONE"])).is_err());
-        assert!(Status::parse(&strings(&["2", "0", "DONE", "NONE", "0", "0"])).is_err());
-        assert!(Status::parse(&strings(&["0", "0", "MAYBE", "NONE", "0", "0"])).is_err());
-        assert!(Status::parse(&strings(&["0", "0", "DONE", "NONE", "-1", "0"])).is_err());
+        // Version 2's STATUS: no PTT and no line.
+        assert!(Status::parse(&strings(&["0", "0", "DONE", "NONE", "0", "0"])).is_err());
+        let status = ["0", "0", "DONE", "LINE", "0", "70", "0", "0"];
+        assert!(Status::parse(&strings(&status)).is_ok());
+        for (i, bad) in [(0, "2"), (2, "MAYBE"), (4, "-1"), (6, "2"), (7, "x")] {
+            let mut st = status;
+            st[i] = bad;
+            assert!(Status::parse(&strings(&st)).is_err(), "{st:?}");
+        }
         let hello = [
-            "2", "60", "2000", "1000", "1000", "60", "5", "POWER", "-", "X",
+            "3", "60", "2000", "1000", "1000", "60", "60", "5", "POWER", "-", "X",
         ];
         assert!(Hello::parse(&strings(&hello)).is_ok());
         let mut h = hello;
-        h[7] = "LUNCH";
+        h[8] = "LUNCH";
         assert!(Hello::parse(&strings(&h)).is_err());
         let mut h = hello;
         h[2] = "2s";
         assert!(Hello::parse(&strings(&h)).is_err());
-        // Version 1's HELLO.
+        // Version 1's and 2's HELLO.
         assert!(Hello::parse(&strings(&["1", "60", "2000", "1000", "5", "POWER", "X"])).is_err());
+        assert!(Hello::parse(&strings(&[
+            "2", "60", "2000", "1000", "1000", "60", "5", "POWER", "-", "X"
+        ]))
+        .is_err());
         assert!(parse_reply(&Command::Stop, "OK").is_err());
     }
 

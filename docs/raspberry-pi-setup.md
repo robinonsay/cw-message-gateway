@@ -83,6 +83,11 @@ again afterwards):
 sudo usermod -aG dialout,audio "$USER"
 ```
 
+The bench tests use `/var/lib/hfnode` as their state directory too, so that a
+transmit inhibit a test latches also stops the node: the [hardware test
+plan](hardware-test-plan.md#before-you-start) has you make it yours for the tests
+and give it back to `hfnode` afterwards.
+
 Create the secret key. It must be readable by the `hfnode` user and nobody else:
 
 ```sh
@@ -176,11 +181,12 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Item | Set to | Why |
 |---|---|---|
 | CI-V Address | **94h** (default) | Must equal `station.civ_address` (02h to DFh). Instructions written for the IC-7300MK2 use B6h; do not copy them. |
-| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node warns if it is linked. |
+| CI-V USB Port | **Unlink from [REMOTE]** (default) | The USB port works independently of the rear REMOTE jack, so no other controller's replies can be mistaken for the radio's. The two settings below only apply in this mode. The node refuses to write to the radio if it is linked. |
 | CI-V USB Baud Rate | **115200** | Must equal `station.baud`. Set it explicitly rather than Auto. |
 | CI-V USB Echo Back | **OFF** (default) | The driver skips its own echoed frames, so ON also works; OFF is less traffic. |
 | CI-V Transceive | **OFF** (default is ON) | Stops the radio sending unsolicited status frames whenever a setting changes. The driver ignores frames not addressed to it, so ON also works. |
 | USB Serial Function | **CI-V** (default) | The USB serial port must carry CI-V, not decoded RTTY. |
+| CI-V Output (for ANT) | **OFF** (default) | ON sends the radio's status (frequency and so on) unasked for an antenna controller (p. 12-10). The node warns while it is ON. |
 
 **Transmit control over USB, keep OFF:**
 
@@ -199,7 +205,8 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | ACC/USB AF Output Level | Start at 50% (default) and adjust | Receive audio to the Pi. Adjust so the strongest signals do not clip (test plan, step 2). |
 | ACC/USB AF SQL | **OFF (OPEN)** (default) | The decoder needs audio all the time, not gated by squelch. |
 | ACC/USB AF Beep/Speech... Output | **OFF** (default) | Keeps beeps and voice announcements out of the decoder. |
-| USB MOD Level, DATA OFF MOD | Leave as is | The node does not transmit audio. |
+| USB MOD Level | Leave as is | The node does not transmit audio. |
+| DATA OFF MOD, DATA MOD | **MIC,ACC** and **ACC** (defaults), not USB | With USB in either, sound the computer plays to the radio is transmitted in that mode (p. 12-10). The node sends no audio; it warns if either includes USB. |
 
 **CW** (in CW mode, from the Multi-function menu):
 
@@ -208,15 +215,17 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | CW PITCH | **600 Hz** | Must equal `audio.pitch_hz`. The decoder looks for the tone here. |
 | BKIN D (break-in delay) | Leave to the node | Holds transmit between characters and words. The node sets it to 10.0 dots (fixed, not a config key: 3 dots longer than a word gap, so the radio stays on transmit for a whole keyer message) at start-up and at the start of each listening window, and reads it back at start-up. |
 | Break-in | Leave to the node | The node turns semi break-in on with CI-V at start-up (command 17 only transmits with break-in on), and reads it back. It never selects full break-in. |
-| Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder. The node warns if it is anything else. |
+| Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder; the node times its keying at 1:1:3.0. The node refuses to write to the radio if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
 
 **Transmit backstop and tuner** (MENU > SET > Function, p. 12-5):
 
 | Item | Set to | Why |
 |---|---|---|
-| PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it. It does not read this item yet, so check it on the radio's screen. |
-| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `hfnode run` refuses to start while it is OFF. |
+| PTT Start (Tuner) | **OFF** (default) | ON starts a tuner cycle, which transmits, when PTT is pushed after the frequency has moved more than 1% (p. 12-5, lines 6310-6315). The node never needs it, and refuses to write to the radio unless it is OFF. |
+| Time-Out Timer (CI-V) | **3 min** (shortest option) | The radio ends a transmission "initiated by a CI-V command or pushing TRANSMIT" after this long (p. 12-5). The manual does not say whether CW keyed with command 17 counts, so it backs up, and does not replace, the node's watchdog (`max_key_seconds`) and the external hardware PTT timer. `radio tune`, `radio cw` and `hfnode run` refuse to start unless it is 3 min. |
+| VOX (VOX/BK-IN key) | **OFF** | With VOX ON, sound at the microphone transmits (p. 4-10). The node refuses to write to the radio unless it is off. |
+| TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it, and so does the node when it stops transmitting (see "If it stops transmitting"). `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON (`run` only warns while `tx-inhibited` is there); `radio check` and `radio setup` warn. |
 
 **Display** (MENU > SET > Display, p. 12-12):
 
@@ -233,7 +242,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 **Scope data output** (command `27 11`, p. 19-14; panadapter programs turn it on): OFF.
 With it ON the radio streams waveform data to the port the node uses, which slows
 the node's stop commands. Close any panadapter program before starting the node;
-`radio check` warns while it is ON.
+the node refuses to write to the radio while it is ON.
 
 **On the main screen:** SPLIT off and XIT (∂TX) off. With either on, the radio would
 transmit somewhere other than the frequency the node set; the node refuses to
@@ -373,9 +382,18 @@ so the device allow-list covers it.
 
 **If it stops transmitting.** When the node cannot confirm the radio is back on
 receive (the radio off or unplugged at the top of a window, or stuck on transmit
-after a fault), or the radio reads receive while its Po meter shows output, it
-stops transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
-reason. It keeps running and decoding, but it does not tune or key, so the field
+after a fault), the radio reads receive while its Po meter shows output, the radio
+transmits while the node is not keying it (someone at the radio: stop the node
+before using the radio by hand), its status cannot be read for 5 s while idle and
+receive then cannot be confirmed, or a second fault comes before a transmission has
+gone out whole (high SWR, no output or too much, a radio stuck on transmit, no
+tuner match, a failed tune: each locks the node out until its next tune, and two
+in a row mean the next tune would only key into the same fault; so does a reply
+from the radio lost while it keys), it stops
+transmitting and writes `/var/lib/hfnode/tx-inhibited` with the time and the
+reason. It also turns the radio's semi break-in off and its TX Inhibit on (16 66
+01), unless the radio could not be reached: the radio's screen shows TX Inhibit
+when anything tries to transmit. It keeps running and decoding, but it does not tune or key, so the field
 operator hears nothing, and this lasts across restarts. With `[email] alert_to`
 set it emails that address once when this happens (subject `N0CALL: node stopped
 transmitting (tx-inhibited)`), and once more each time the service starts while the
@@ -387,11 +405,14 @@ sudo systemctl stop hfnode
 sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml check   # read-only; must pass
 sudo cat /var/lib/hfnode/tx-inhibited                                # the time and the reason
 sudo rm /var/lib/hfnode/tx-inhibited
+sudo -u hfnode hfnode radio --config /etc/hfnode/hfnode.toml setup   # TX Inhibit off again
 sudo systemctl reset-failed hfnode                                   # only if systemd gave up
 sudo systemctl start hfnode
 ```
 
-Check the radio before deleting the file. Deleting it while the node runs changes
+`radio setup` turns the radio's TX Inhibit off only once the file is gone (from
+`/var/lib/hfnode` too when it runs with another config); `run` refuses to start
+while it is on, unless the file is still there. Check the radio before deleting the file. Deleting it while the node runs changes
 nothing: the node reads it only when it starts.
 
 **Check the alert.** Make the node start inhibited and see the email arrive.
@@ -413,7 +434,9 @@ handed to its keyer (at most 30 characters).
 **Using the radio yourself.** Stop the node first, and start it again
 (`sudo systemctl start hfnode`) when you are done. While it runs, it puts its
 frequency, mode, power and keyer settings back every `schedule.check_minutes` (10)
-and before every transmission.
+and before every transmission, and it reads the radio's transmit status every
+second: a transmission it did not start (you keying the radio) stops it
+transmitting until you clear `tx-inhibited` as above.
 
 **Updating.** `sudo systemctl stop hfnode`, install the new binary, `sudo systemctl
 start hfnode`. `last_seq` and the inbox are kept in `/var/lib/hfnode`.

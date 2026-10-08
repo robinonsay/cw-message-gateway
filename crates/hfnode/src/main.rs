@@ -10,7 +10,7 @@ use hfnode::handheld::{self, Handheld};
 use hfnode::inbox::Inbox;
 use hfnode::keyer;
 use hfnode::session::{Outcome, Services};
-use hfnode::station::{InhibitLatch, Station, StationConfig};
+use hfnode::station::{check_state_dir, InhibitLatch, Station, StationConfig, INHIBIT_FILE};
 use hfnode::storm::StormHold;
 use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
@@ -296,21 +296,25 @@ enum RadioCmd {
 
 #[derive(Subcommand)]
 enum KeyerCmd {
-    /// Greet the box (its limits, why it last started, its key) and check the
-    /// radio's audio: band level, no key held at the radio. Keys nothing.
+    /// Greet the box (its limits, why it last started, its key and PTT, its PTT
+    /// line) and check the radio's audio: band level, no key held at the radio.
+    /// Keys nothing.
     Check,
-    /// Stop the box and confirm the radio's key open, by the box and the audio.
+    /// Stop the box and confirm the radio's key (or PTT) open, by the box and the
+    /// audio.
     Rx,
     /// Key TEXT through the box with every check `run` makes but the storm
     /// stand-down, and report whether the radio was heard sending it.
     Key { text: String },
-    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch.
+    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch. Not
+    /// for a handheld (`keyer.output = "ptt"`), which has none.
     Sidetone,
     /// Hang the box's control loop mid-run: its watchdog must reset it and open
-    /// the key within 0.5 s. Then identifies.
+    /// the key (or release the PTT) within 0.5 s. Then identifies.
     Hangtest,
-    /// Identify, then make the box hold its key down: its 1 s limit must open the
-    /// key and trip it (unplug it and plug it in again afterwards).
+    /// Identify, then make the box hold its key (or a handheld's tone) down: its
+    /// 1 s limit must open it and trip the box (unplug it and plug it in again
+    /// afterwards).
     Stucktest,
     /// Key a long message and then stop talking to the box: its link timeout must
     /// open the key by itself, as it would if the node died or the cable came out.
@@ -433,6 +437,9 @@ type Radio = Arc<Mutex<DynRig>>;
 /// inhibit a failed stop latches.
 static RADIO: Mutex<Option<(Radio, InhibitLatch)>> = Mutex::new(None);
 
+/// The alerts of `hfnode run`, which a stop signal waits for before it exits.
+static ALERTS: Mutex<Option<alert::Flush>> = Mutex::new(None);
+
 /// From here on a stop signal puts `st`'s radio back on receive before the program
 /// exits, and latches `st`'s own transmit inhibit if it cannot: the one in the state
 /// directory, which the next start reads.
@@ -451,16 +458,33 @@ fn on_stop_signal() {
     stop_guarded(|code| std::process::exit(code));
 }
 
-/// What a stop signal does: put the guarded radio back on receive, then `exit` with
-/// the exit code while still holding it.
+/// What a stop signal does: put the guarded radio back on receive, let the alerts
+/// already queued go out (a stop that latches the inhibit queues its own), for at
+/// most [`STOP_ALERT_WAIT`], then `exit` with the exit code while still holding it.
 fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     let guarded = RADIO.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some((radio, inhibit)) = guarded else {
         return exit(130);
     };
-    let (_held, code) = stop_radio(&radio, &inhibit);
+    let (_held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
+    let alerts = ALERTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if alerts.is_some_and(|a| !a.wait(STOP_ALERT_WAIT)) {
+        log::warn!("stopped waiting for an inhibit alert to be sent");
+    }
     exit(code)
 }
+
+/// Longest a stop signal waits for a radio another call is still using: no call to
+/// a radio that answers takes this long (the CI-V driver gives up on a reply after
+/// half a second, and on a link that stays busy after four times that).
+const STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// Longest a stop signal then waits for its alerts. The service that stops the node
+/// kills it 20 s after asking it to stop (`TimeoutStopSec` in `deploy/hfnode.service`,
+/// `HFNODE_STOP_TIMEOUT` in `deploy/hfnode-supervise.sh`): [`STOP_WAIT`], the
+/// receive check and this fit inside that, so the inhibit is latched and the node
+/// gone before the kill. An alert cut off here is in the log, and the file stays.
+const STOP_ALERT_WAIT: Duration = Duration::from_secs(5);
 
 /// Take the radio, stop the keyer and confirm receive. The radio may first finish
 /// the text already in its keyer (at most 30 characters). Returns the radio, still
@@ -469,13 +493,23 @@ fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
 /// A stop that cannot confirm receive latches the transmit inhibit, so that the node
 /// transmits nothing after a restart until someone has looked at the radio: the
 /// process exiting here is the one thing that cannot be taken back (the safety
-/// audit's KB-2(iii) for the keyer box, K5 for the IC-7300).
+/// audit's KB-2(iii) for the keyer box, K5 for the IC-7300). So does one that cannot
+/// get the radio within `wait`, from a call to it that has not returned (a serial
+/// port that never drains, the audit's K4): it exits 1 without it.
 fn stop_radio<'a>(
     radio: &'a Mutex<DynRig>,
     inhibit: &InhibitLatch,
-) -> (MutexGuard<'a, DynRig>, i32) {
+    wait: Duration,
+) -> (Option<MutexGuard<'a, DynRig>>, i32) {
     log::warn!("stop requested: stopping the keyer and forcing receive");
-    let mut rig = radio.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut rig) = hfnode::station::lock_within(radio, wait) else {
+        inhibit.latch(&format!(
+            "stop requested, and the radio could not be reached for {wait:?} to put it on \
+             receive (a call to it did not return)"
+        ));
+        log::error!("radio NOT confirmed on receive; check it before restarting");
+        return (None, 1);
+    };
     let code = match hfnode::station::force_receive_or_latch(&mut *rig, inhibit) {
         Ok(()) => {
             log::info!("radio confirmed on receive; exiting");
@@ -486,7 +520,7 @@ fn stop_radio<'a>(
             1
         }
     };
-    (rig, code)
+    (Some(rig), code)
 }
 
 fn keygen(out: &Path) -> Result<()> {
@@ -884,7 +918,8 @@ fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
     commissioning::open_for(
         cfg.station.commissioned,
         action,
-        cfg.station.power_watts,
+        commissioning::Limits::of(&cfg.station),
+        &cfg.state_dir,
         || open_radio(cfg),
     )
 }
@@ -917,10 +952,20 @@ fn verify_setup(cfg: &Config, st: &Station<civ::ic7300::Ic7300>) -> Result<()> {
     Ok(())
 }
 
-fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
-    use civ::Rig;
-    match cfg.station.rig {
-        RigKind::Ic7300 => {}
+/// What `hfnode radio <action>` runs for the configured rig.
+#[derive(Debug, PartialEq)]
+enum RadioRoute {
+    Ic7300,
+    /// `hfnode keyer rx`.
+    KeyerRx,
+}
+
+fn radio_route(rig: RigKind, action: &RadioCmd) -> Result<RadioRoute> {
+    match rig {
+        RigKind::Ic7300 => Ok(RadioRoute::Ic7300),
+        // What the systemd unit and the supervise scripts run after every stop or
+        // crash, whichever the rig (the safety audit's KB-12).
+        RigKind::Keyer if matches!(action, RadioCmd::Rx) => Ok(RadioRoute::KeyerRx),
         RigKind::Keyer => bail!(
             "station.rig is \"keyer\": the radio itself is not controlled; use `hfnode keyer \
              --config C ...` (docs/keyer.md)"
@@ -928,6 +973,13 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         RigKind::Handheld => {
             bail!("station.rig is \"handheld\": use `hfnode handheld ...` (docs/handheld.md)")
         }
+    }
+}
+
+fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
+    use civ::Rig;
+    if radio_route(cfg.station.rig, &action)? == RadioRoute::KeyerRx {
+        return keyer_rx(cfg);
     }
     match action {
         RadioCmd::Status => {
@@ -937,7 +989,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         }
         RadioCmd::Check => {
             let mut rig = open_radio(cfg)?;
-            let report = civ::preflight::preflight(&mut rig, false);
+            let report = civ::preflight::preflight(&mut rig, civ::preflight::Purpose::Check);
             print!("{report}");
             println!(
                 "bring-up stage passed (station.commissioned): {}",
@@ -959,9 +1011,11 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
                 _ => Action::Cw,
             };
             // The health log and any transmit inhibit are written there.
-            std::fs::create_dir_all(&cfg.state_dir)
-                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
-            let rig = open_for(cfg, needs)?;
+            check_state_dir(&cfg.state_dir)?;
+            let mut rig = open_for(cfg, needs)?;
+            if matches!(action, RadioCmd::Setup) {
+                release_tx_inhibit(&mut rig, &cfg.state_dir, hfnode::config::home_dir())?;
+            }
             let mut st = Station::new(
                 rig,
                 StationConfig::from_config(&cfg.station),
@@ -988,6 +1042,66 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// The state directories the setup guides give (docs/raspberry-pi-setup.md,
+/// docs/macos-setup.md, docs/windows-setup.md).
+const STANDARD_STATE_DIRS: [&str; 3] = [
+    "/var/lib/hfnode",
+    "~/Library/Application Support/hfnode/state",
+    r"~\AppData\Local\hfnode\state",
+];
+
+/// `radio setup`: turn the radio's TX Inhibit (16 66) off again, which the node
+/// turns on when it inhibits transmitting ([`civ::Rig::inhibit_transmit`]), but
+/// only once [`INHIBIT_FILE`] is gone from the state directory, and from each of
+/// the [`STANDARD_STATE_DIRS`]: someone has checked the radio and removed it, also
+/// when this runs with another config than the node's (a bench one). Until then
+/// nothing is written, and every command that can transmit is refused by the
+/// preflight as well as by the file. `home` is this user's home directory.
+fn release_tx_inhibit<P: civ::ic7300::Port>(
+    rig: &mut civ::ic7300::Ic7300<P>,
+    state_dir: &Path,
+    home: Option<PathBuf>,
+) -> Result<()> {
+    release_tx_inhibit_unless(rig, &inhibit_dirs(state_dir, home))
+}
+
+/// `state_dir`, then the [`STANDARD_STATE_DIRS`] `home` expands them to.
+fn inhibit_dirs(state_dir: &Path, home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = vec![state_dir.to_path_buf()];
+    dirs.extend(
+        STANDARD_STATE_DIRS
+            .iter()
+            .filter_map(|d| hfnode::config::expand_home_from(Path::new(d), home.clone()).ok()),
+    );
+    dirs
+}
+
+/// [`release_tx_inhibit`], with the state directories to look in.
+fn release_tx_inhibit_unless<P: civ::ic7300::Port>(
+    rig: &mut civ::ic7300::Ic7300<P>,
+    state_dirs: &[PathBuf],
+) -> Result<()> {
+    if !rig.tx_inhibit()? {
+        return Ok(());
+    }
+    // One this user cannot read counts as holding the file (the Pi's is the
+    // hfnode user's: run this as that user, as the alert says).
+    if let Some(dir) = state_dirs.iter().find(|d| InhibitLatch::in_dir(d).is_set()) {
+        log::warn!(
+            "the radio's TX Inhibit is ON, and {INHIBIT_FILE} is in {} (or that directory \
+             cannot be read): left ON until the radio has been checked and the file removed",
+            dir.display()
+        );
+        return Ok(());
+    }
+    rig.release_tx_inhibit()?;
+    log::warn!(
+        "the radio's TX Inhibit was ON (the node turns it on when it inhibits transmitting): \
+         turned OFF"
+    );
     Ok(())
 }
 
@@ -1103,11 +1217,12 @@ fn filter_cmd(cfg: &Config, action: FilterCmd) -> Result<()> {
 }
 
 fn run(config: &Path, cfg: &Config) -> Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)
-        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+    // Before anything else, whichever radio it is: see `check_state_dir`.
+    check_state_dir(&cfg.state_dir)?;
     // First, so the first check is likely back before the first window.
     let storm = start_storm_watch(cfg)?;
     let alerts = alert::Alerts::start(cfg, config);
+    *ALERTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(alerts.flush());
     let result = run_node(cfg, &alerts, storm);
     // The station is gone: dropping it forced receive, which can still latch the
     // inhibit. Let an alert already queued go out before the process exits.
@@ -1179,12 +1294,16 @@ fn serve<R: civ::Rig + 'static>(
         storm,
     } = parts;
     node::spawn_inbound(cfg.clone(), inbox, im);
-    let mut station = Station::new(
-        rig,
-        StationConfig::from_config(&cfg.station),
-        Some(cfg.state_dir.join("health.csv")),
-    );
-    guard_station(&station);
+    let mut on_air = OnAir {
+        station: Station::new(
+            rig,
+            StationConfig::from_config(&cfg.station),
+            Some(cfg.state_dir.join("health.csv")),
+        ),
+        audio: cap,
+    };
+    let station = &mut on_air.station;
+    guard_station(station);
     // Email the owner when transmitting is inhibited: now, if tx-inhibited was
     // already there, or when it latches.
     station.notify_inhibit(alerts.sender());
@@ -1197,17 +1316,30 @@ fn serve<R: civ::Rig + 'static>(
         station.set_storm_hold(hold);
     }
     station.configure()?;
-    verify(&station)?;
-    let cap = match cap {
+    verify(station)?;
+    let cap = match &mut on_air.audio {
         Some(c) => c,
-        None => audio::Capture::start(&cfg.audio.device, cfg.audio.sample_rate)?,
+        none => none.insert(audio::Capture::start(
+            &cfg.audio.device,
+            cfg.audio.sample_rate,
+        )?),
     };
     log::info!(
         "{} listening on {} Hz",
         cfg.station.node_call,
         cfg.station.frequency_hz
     );
-    node::run(cfg, &mut station, &cap.samples, &mut session, &mut svc)
+    node::run(cfg, station, &cap.samples, &mut session, &mut svc)
+}
+
+/// The station and the radio's audio it hears, for `run`. A struct's fields are
+/// dropped in the order they are declared, so the station goes first: its last
+/// receive check, when it is dropped, still hears the radio through the capture
+/// (the keyer rig confirms its key open by the sidetone going quiet; the safety
+/// audit's KB-12).
+struct OnAir<S, A> {
+    station: S,
+    audio: Option<A>,
 }
 
 /// The keyer box and the radio's audio, for a command that may key (`needs`, or
@@ -1219,6 +1351,8 @@ fn open_keyer(
 ) -> Result<(keyer::rig::KeyerRig, Option<audio::Capture>)> {
     let k = keyer_section(cfg)?;
     keyer::check_stage(k.commissioned, needs.unwrap_or(keyer::Action::Run))?;
+    // Everything opened here keys: a handheld's PTT contact must be on record.
+    keyer::check_ptt_cable(k)?;
     let (cap, monitor) = keyer::bench::start_listening(cfg)?;
     let rig = keyer::bench::open_rig(cfg, monitor.clone())?;
     let band = keyer::bench::wait_for_band(&monitor, Duration::from_secs(5));
@@ -1257,18 +1391,34 @@ fn keyer_section(cfg: &Config) -> Result<&hfnode::config::Keyer> {
     cfg.keyer.as_ref().context("no [keyer] section")
 }
 
+/// `hfnode keyer rx`, and `hfnode radio rx` with rig = "keyer": the box's key open
+/// and no sidetone heard, or the transmit inhibit latched. It keys nothing, so it
+/// needs no bring-up stage.
+fn keyer_rx(cfg: &Config) -> Result<()> {
+    use keyer::bench;
+    let k = keyer_section(cfg)?;
+    let (_cap, monitor) = bench::start_listening(cfg)?;
+    let mut rig = bench::open_rig(cfg, monitor)?;
+    bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
+    if k.output == keyer::Output::Ptt {
+        println!(
+            "PTT open: the box is idle, its PTT line reads high and the radio's receive \
+             noise is heard"
+        );
+    } else {
+        println!("key open: the box is idle and no sidetone is heard");
+    }
+    Ok(())
+}
+
 fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
     use keyer::bench;
     let k = keyer_section(cfg)?;
     match action {
-        KeyerCmd::Check | KeyerCmd::Rx => {
+        KeyerCmd::Rx => keyer_rx(cfg),
+        KeyerCmd::Check => {
             let (_cap, monitor) = bench::start_listening(cfg)?;
             let mut rig = bench::open_rig(cfg, monitor)?;
-            if matches!(action, KeyerCmd::Rx) {
-                bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
-                println!("key open: the box is idle and no sidetone is heard");
-                return Ok(());
-            }
             let (report, ok) = bench::check(&mut rig, k.min_level_dbfs);
             print!("{report}");
             println!(
@@ -1293,9 +1443,15 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             if let KeyerCmd::Key { text } = &action {
                 check_key_length(&sanitize(text), k.commissioned)?;
             }
+            if matches!(action, KeyerCmd::Sidetone) && k.output == keyer::Output::Ptt {
+                bail!(
+                    "keyer.output is \"ptt\": a handheld has no sidetone. `hfnode keyer key` \
+                     reports whether its receive noise went quiet while the box held the PTT, \
+                     and came back after"
+                );
+            }
             // The health log and any transmit inhibit are written there.
-            std::fs::create_dir_all(&cfg.state_dir)
-                .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
+            check_state_dir(&cfg.state_dir)?;
             let (rig, _cap) = open_keyer(cfg, Some(needs))?;
             let sc = StationConfig::from_config(&cfg.station);
             let id = sc.station_id.clone();
@@ -1352,7 +1508,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                         bench::stucktest(&mut st, &id, 1.0)?
                     };
                     println!(
-                        "longest sidetone {} ms (limit {} ms)",
+                        "longest on the air {} ms, as its audio shows (limit {} ms)",
                         rep.longest.as_millis(),
                         rep.limit.as_millis()
                     );
@@ -1418,6 +1574,7 @@ fn handheld_cmd(cfg: &Config, action: HandheldCmd) -> Result<()> {
             println!("receive (confirmed)");
         }
         HandheldCmd::Key { .. } | HandheldCmd::Linktest => {
+            check_state_dir(&cfg.state_dir)?;
             let rig = open_handheld(cfg, Some(handheld::Action::Key))?;
             let mut st = handheld_station(cfg, rig)?;
             match action {
@@ -1482,11 +1639,10 @@ fn handheld_settings(rig: &mut Handheld, cfg: &Config) -> usize {
     wrong
 }
 
-/// The station's safety layer on `rig`, with the radio checked.
+/// The station's safety layer on `rig`, with the radio checked. The caller checked
+/// the state directory, where the health log and any transmit inhibit are written,
+/// before it opened the port ([`check_state_dir`]).
 fn handheld_station(cfg: &Config, rig: Handheld) -> Result<Station<Handheld>> {
-    // The health log and any transmit inhibit are written there.
-    std::fs::create_dir_all(&cfg.state_dir)
-        .with_context(|| format!("creating state_dir {}", cfg.state_dir.display()))?;
     let st = Station::new(
         rig,
         StationConfig::from_config(&cfg.station),
@@ -1511,11 +1667,13 @@ fn send_text(st: &mut Station<Handheld>, text: &str) -> Result<()> {
 /// `hfnode handheld hangtest`: the firmware's watchdog must end a transmission
 /// when the firmware hangs (docs/handheld.md, "Bring-up").
 fn handheld_hang_test(cfg: &Config) -> Result<()> {
-    let inhibit = cfg.state_dir.join(hfnode::station::INHIBIT_FILE);
-    if inhibit.exists() {
+    check_state_dir(&cfg.state_dir)?;
+    // Keyed outside a station at first, so the inhibit is checked here, as a station
+    // would: one that cannot be checked counts as there.
+    if InhibitLatch::in_dir(&cfg.state_dir).is_set() {
         bail!(
             "transmitting is inhibited ({}): see why in the log before clearing it",
-            inhibit.display()
+            cfg.state_dir.join(hfnode::station::INHIBIT_FILE).display()
         );
     }
     let mut rig = open_handheld(cfg, Some(handheld::Action::Hang))?;
@@ -1871,6 +2029,17 @@ mod tests {
     /// A configuration for the keyer box on a port that does not exist, with the
     /// bring-up stage at `commissioned`.
     fn keyer_cfg(dir: &Path, commissioned: &str) -> Config {
+        rig_cfg(
+            dir,
+            "rig = \"keyer\"\nfrequency_hz = 7030000\nmax_key_seconds = 60",
+            &format!("[keyer]\ncommissioned = \"{commissioned}\""),
+        )
+    }
+
+    /// A configuration on a port that does not exist, with `station` added to the
+    /// `[station]` section (the rig, its frequency and keying limit) and `sections`
+    /// after it; written to `dir`/hfnode.toml and loaded from there.
+    fn rig_cfg(dir: &Path, station: &str, sections: &str) -> Config {
         let path = dir.join("hfnode.toml");
         std::fs::write(
             &path,
@@ -1881,15 +2050,12 @@ state_dir = '{}'
 [station]
 node_call = "N0DE"
 field_calls = ["N0CALL"]
-frequency_hz = 7030000
 key_speed_wpm = 20
-max_key_seconds = 60
-rig = "keyer"
 serial_port = "/dev/does-not-exist"
+{station}
 [audio]
 device = "default"
-[keyer]
-commissioned = "{commissioned}"
+{sections}
 [auth]
 key_file = '{}'
 "#,
@@ -1924,6 +2090,48 @@ key_file = '{}'
     }
 
     #[test]
+    fn radio_rx_checks_the_keyer_box() {
+        // The systemd unit's ExecStopPost and the supervise scripts run `hfnode
+        // radio rx` after every stop or crash (the safety audit's KB-12): with
+        // rig = "keyer" it is `hfnode keyer rx`, which keys nothing and so needs no
+        // bring-up stage. Decided before anything is opened, so no test here opens
+        // a sound card.
+        assert_eq!(
+            radio_route(RigKind::Keyer, &RadioCmd::Rx).unwrap(),
+            RadioRoute::KeyerRx
+        );
+        // Everything else on `radio` is still refused for the keyer.
+        for action in [RadioCmd::Status, RadioCmd::Check, RadioCmd::Tune] {
+            let e = radio_route(RigKind::Keyer, &action)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("not controlled"), "{e}");
+        }
+        assert_eq!(
+            radio_route(RigKind::Ic7300, &RadioCmd::Rx).unwrap(),
+            RadioRoute::Ic7300
+        );
+    }
+
+    #[test]
+    fn the_station_is_dropped_before_the_audio_it_hears() {
+        // `run`'s last receive check, in the station's Drop, must still hear the
+        // radio (the safety audit's KB-12).
+        struct Mark(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Mark {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        drop(OnAir {
+            station: Mark("station", log.clone()),
+            audio: Some(Mark("audio", log.clone())),
+        });
+        assert_eq!(*log.lock().unwrap(), ["station", "audio"]);
+    }
+
+    #[test]
     fn keyer_key_sends_one_piece_at_a_time_until_bring_up_is_done() {
         // Refused before the port is opened (or the sound card: no test here opens
         // one), so a long text fails with the cap's error and not the port's (the
@@ -1951,11 +2159,107 @@ key_file = '{}'
     }
 
     #[test]
+    fn every_keying_command_needs_a_state_directory_it_can_write_first() {
+        // A node that cannot write tx-inhibited must not key (the safety audit's K6),
+        // and opening a port can itself key some radios: each command that can key
+        // refuses before it opens one. The error must be the state directory's, and
+        // not the port's, the bring-up stage's or the missing [storm] section's,
+        // which come after it.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("hfnode.toml");
+        let ic7300 = rig_cfg(
+            dir.path(),
+            "frequency_hz = 7030000\ncommissioned = \"done\"",
+            "",
+        );
+        let keyer = keyer_cfg(dir.path(), "done");
+        let handheld = rig_cfg(
+            dir.path(),
+            "rig = \"handheld\"\nfrequency_hz = 144060000",
+            "[handheld]\ncommissioned = \"done\"",
+        );
+        // A regular file cannot be written in, also by root.
+        std::fs::write(&ic7300.state_dir, "not a directory").unwrap();
+        let mut unwritable = vec![ic7300.state_dir.clone()];
+        // Nor can Linux's /proc, a directory that is there: creating it, as before
+        // this check, is not enough.
+        if cfg!(target_os = "linux") {
+            unwritable.push("/proc".into());
+        }
+        for state in unwritable {
+            let with = |cfg: &Config| Config {
+                state_dir: state.clone(),
+                ..cfg.clone()
+            };
+            let (ic7300, keyer, handheld) = (with(&ic7300), with(&keyer), with(&handheld));
+            let refused = |what: &str, result: Result<()>| {
+                let e = format!("{:#}", result.expect_err(what));
+                let want = format!("state_dir {} cannot be written", state.display());
+                assert!(e.starts_with(&want), "{what}: {e}");
+            };
+            let text = || "E".to_string();
+            refused("radio setup", radio(&ic7300, RadioCmd::Setup));
+            refused("radio tune", radio(&ic7300, RadioCmd::Tune));
+            refused("radio cw", radio(&ic7300, RadioCmd::Cw { text: text() }));
+            refused(
+                "keyer key",
+                keyer_cmd(&keyer, KeyerCmd::Key { text: text() }),
+            );
+            refused("keyer sidetone", keyer_cmd(&keyer, KeyerCmd::Sidetone));
+            refused("keyer hangtest", keyer_cmd(&keyer, KeyerCmd::Hangtest));
+            refused("keyer stucktest", keyer_cmd(&keyer, KeyerCmd::Stucktest));
+            refused("keyer linktest", keyer_cmd(&keyer, KeyerCmd::Linktest));
+            refused(
+                "handheld key",
+                handheld_cmd(&handheld, HandheldCmd::Key { text: text() }),
+            );
+            refused(
+                "handheld linktest",
+                handheld_cmd(&handheld, HandheldCmd::Linktest),
+            );
+            refused(
+                "handheld hangtest",
+                handheld_cmd(&handheld, HandheldCmd::Hangtest),
+            );
+            for cfg in [&ic7300, &keyer, &handheld] {
+                refused("run", run(&config, cfg));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_handheld_hang_test_reads_the_inhibit_as_a_station_does() {
+        // It keys outside a station at first, so it checks the inhibit itself: in the
+        // same way, with anything at that name counting as the file (here a link to
+        // nowhere, which `Path::exists` would call absent). Refused before the port.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = rig_cfg(
+            dir.path(),
+            "rig = \"handheld\"\nfrequency_hz = 144060000",
+            "[handheld]\ncommissioned = \"done\"",
+        );
+        std::fs::create_dir_all(&cfg.state_dir).unwrap();
+        let file = cfg.state_dir.join(hfnode::station::INHIBIT_FILE);
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &file).unwrap();
+        let e = handheld_cmd(&cfg, HandheldCmd::Hangtest)
+            .expect_err("inhibited")
+            .to_string();
+        assert!(e.starts_with("transmitting is inhibited"), "{e}");
+        // Without it, it gets as far as the port.
+        std::fs::remove_file(&file).unwrap();
+        let e = handheld_cmd(&cfg, HandheldCmd::Hangtest)
+            .expect_err("the port does not exist")
+            .to_string();
+        assert!(!e.contains("inhibited"), "{e}");
+    }
+
+    #[test]
     fn a_stop_signal_puts_the_radio_on_receive() {
         let dir = tempfile::tempdir().unwrap();
         let inhibit = InhibitLatch::in_dir(dir.path());
         let radio: Radio = Arc::new(Mutex::new(keying()));
-        let (held, code) = stop_radio(&radio, &inhibit);
+        let (held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
         assert_eq!(code, 0);
         drop(held);
         assert!(!radio.lock().unwrap().is_transmitting().unwrap());
@@ -1974,13 +2278,110 @@ key_file = '{}'
         let mut sim = keying();
         sim.tx_jammed = true;
         let radio: Radio = Arc::new(Mutex::new(sim));
-        assert_eq!(stop_radio(&radio, &inhibit).1, 1);
+        assert_eq!(stop_radio(&radio, &inhibit, STOP_WAIT).1, 1);
         assert!(inhibit.is_set());
         let file = dir.path().join(hfnode::station::INHIBIT_FILE);
         let why = std::fs::read_to_string(&file).expect("inhibit file written");
         assert!(why.contains("not confirmed on receive"), "{why}");
         // A node starting in that state transmits nothing.
         assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    #[test]
+    fn a_stop_that_cannot_reach_the_radio_inhibits_transmitting() {
+        // A call to the radio that never returns (a serial port that never drains)
+        // holds it: the stop must not wait for it for ever, and must leave the
+        // inhibit behind (the safety audit's K4).
+        let dir = tempfile::tempdir().unwrap();
+        let inhibit = InhibitLatch::in_dir(dir.path());
+        let radio: Radio = Arc::new(Mutex::new(keying()));
+        let busy = radio.lock().unwrap();
+        let t0 = Instant::now();
+        let (held, code) = stop_radio(&radio, &inhibit, Duration::from_millis(200));
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(held.is_none());
+        assert_eq!(code, 1);
+        drop(busy);
+        let why = std::fs::read_to_string(dir.path().join(hfnode::station::INHIBIT_FILE))
+            .expect("inhibit file written");
+        assert!(why.contains("could not be reached"), "{why}");
+    }
+
+    #[test]
+    fn radio_setup_turns_the_radios_tx_inhibit_off_only_once_the_file_is_gone() {
+        use civ::mock::{MockConfig, MockRadio};
+        let dir = tempfile::tempdir().unwrap();
+        let radio = MockRadio::new(MockConfig {
+            tx_inhibit: true,
+            ..MockConfig::default()
+        });
+        let mut rig = civ::ic7300::Ic7300::with_port(radio.port(), 0x94);
+        InhibitLatch::in_dir(dir.path()).latch("stuck");
+        release_tx_inhibit(&mut rig, dir.path(), None).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while tx-inhibited is there"
+        );
+        std::fs::remove_file(dir.path().join(INHIBIT_FILE)).unwrap();
+        // S7 (the safety audit's pre-review): nor while the node's own state
+        // directory holds it, `radio setup` run with another config.
+        let node = tempfile::tempdir().unwrap();
+        InhibitLatch::in_dir(node.path()).latch("stuck");
+        let dirs = [dir.path().to_path_buf(), node.path().to_path_buf()];
+        release_tx_inhibit_unless(&mut rig, &dirs).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while the node's is there"
+        );
+        std::fs::remove_file(node.path().join(INHIBIT_FILE)).unwrap();
+        release_tx_inhibit_unless(&mut rig, &dirs).unwrap();
+        assert!(!rig.tx_inhibit().unwrap());
+        let violations = radio.report().violations;
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn radio_setup_looks_in_the_standard_state_directories() {
+        let home = hfnode::config::expand_home(Path::new("~")).unwrap();
+        let mac = home.join("Library/Application Support/hfnode/state");
+        let found = inhibit_dirs(Path::new("/srv/bench"), hfnode::config::home_dir());
+        assert_eq!(found[0], Path::new("/srv/bench"));
+        assert!(found.contains(&PathBuf::from("/var/lib/hfnode")));
+        assert!(found.contains(&mac), "{found:?}");
+        let example: Config = toml::from_str(include_str!("../../../hfnode.example.toml")).unwrap();
+        assert!(
+            found.contains(&example.state_dir),
+            "{:?}",
+            example.state_dir
+        );
+    }
+
+    #[test]
+    fn radio_setup_leaves_the_inhibit_on_while_a_standard_state_directory_holds_it() {
+        // S7's call site (the safety audit's pass at 894e995): `radio setup` with a
+        // bench config on a Mac whose node has latched the inhibit in its own state
+        // directory under this user's home.
+        use civ::mock::{MockConfig, MockRadio};
+        let bench = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let node = home.path().join("Library/Application Support/hfnode/state");
+        std::fs::create_dir_all(&node).unwrap();
+        InhibitLatch::in_dir(&node).latch("stuck");
+        let radio = MockRadio::new(MockConfig {
+            tx_inhibit: true,
+            ..MockConfig::default()
+        });
+        let mut rig = civ::ic7300::Ic7300::with_port(radio.port(), 0x94);
+        release_tx_inhibit(&mut rig, bench.path(), Some(home.path().into())).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while the node's is there"
+        );
+        std::fs::remove_file(node.join(INHIBIT_FILE)).unwrap();
+        release_tx_inhibit(&mut rig, bench.path(), Some(home.path().into())).unwrap();
+        assert!(!rig.tx_inhibit().unwrap());
+        let violations = radio.report().violations;
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]
@@ -1995,6 +2396,24 @@ key_file = '{}'
         let e = radio_rx(&mut sim, dir.path()).unwrap_err();
         assert!(e.to_string().contains("not confirmed on receive"), "{e:#}");
         assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    /// Alerts that take half a second to send, and what they sent.
+    fn slow_alerts() -> (Arc<Mutex<Vec<String>>>, alert::Alerts) {
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = sent.clone();
+        let deliver: alert::Deliver = Box::new(move |subject: &str, _: &str| {
+            std::thread::sleep(Duration::from_millis(500));
+            log.lock().unwrap().push(subject.into());
+            Ok(())
+        });
+        let alerts = alert::Alerts::with_deliver(
+            "N0CALL",
+            Path::new("hfnode.toml"),
+            Some(deliver),
+            Vec::new(),
+        );
+        (sent, alerts)
     }
 
     #[test]
@@ -2013,13 +2432,47 @@ key_file = '{}'
             StationConfig::from_config(&cfg.station),
             Some(state.join("health.csv")),
         );
+        // Its alert goes out before it exits (S6 of the safety audit's
+        // pre-review): the exit does not wait for `run` to return.
+        let (sent, alerts) = slow_alerts();
+        st.notify_inhibit(alerts.sender());
+        *ALERTS.lock().unwrap() = Some(alerts.flush());
         guard_station(&st);
-        let code = stop_guarded(|code| code);
+        let (code, emailed) = stop_guarded(|code| (code, sent.lock().unwrap().len()));
         *RADIO.lock().unwrap() = None;
+        *ALERTS.lock().unwrap() = None;
         assert_eq!(code, 1);
+        assert_eq!(emailed, 1);
         assert!(InhibitLatch::in_dir(&state).is_set());
         // With nothing guarded, the signal only interrupts.
         assert_eq!(stop_guarded(|code| code), 130);
+    }
+
+    #[test]
+    fn a_stop_ends_before_the_service_kills_the_node() {
+        // The safety audit's m02: a stop that waits longer for the radio than the
+        // service waits for the node is killed before it latches the inhibit. Room
+        // for the receive check on a radio that answers: its break-in delay can hold
+        // transmit for 13 dots at 6 wpm, 2.6 s (14 0F and 14 0C, p. 19-3).
+        let stop = STOP_WAIT + Duration::from_secs(3) + STOP_ALERT_WAIT;
+        let limits = [
+            (
+                include_str!("../../../deploy/hfnode.service"),
+                "TimeoutStopSec=",
+            ),
+            (
+                include_str!("../../../deploy/hfnode-supervise.sh"),
+                "stop_timeout=${HFNODE_STOP_TIMEOUT:-",
+            ),
+        ];
+        for (text, key) in limits {
+            let line = text.lines().find_map(|l| l.strip_prefix(key)).unwrap();
+            let secs: u64 = line.trim_end_matches('}').parse().unwrap();
+            assert!(
+                stop <= Duration::from_secs(secs),
+                "{key}{secs} is less than {stop:?}"
+            );
+        }
     }
 
     #[test]
