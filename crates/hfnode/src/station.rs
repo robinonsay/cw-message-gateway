@@ -4288,7 +4288,10 @@ mod tests {
         let pieces = st.pieces(&format!("AB {zeros}"), dot);
         assert!(pieces.len() > 2, "{pieces:?}");
         for p in &pieces {
-            assert!(st.keying_bound(&[p.clone()], dot) <= c.max_key, "{p}");
+            assert!(
+                st.keying_bound(std::slice::from_ref(p), dot) <= c.max_key,
+                "{p}"
+            );
         }
         assert_eq!(pieces.concat().replace(' ', ""), format!("AB{zeros}"));
         st.transmit(&tx(&[&zeros])).unwrap();
@@ -4297,7 +4300,7 @@ mod tests {
         let mut short = c;
         short.max_key = Duration::from_millis(100);
         let st = Station::new(fast_rig(), short, None);
-        assert_eq!(st.pieces(&zeros, dot), [zeros.clone()]);
+        assert_eq!(st.pieces(&zeros, dot), std::slice::from_ref(&zeros));
         assert!(shortest_max_key(18) < Duration::from_secs(5));
         assert!(shortest_max_key(6) > Duration::from_secs(8));
     }
