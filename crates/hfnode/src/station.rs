@@ -3544,7 +3544,9 @@ mod tests {
                 std::fs::read(tmp)
             })
         };
-        let sent = st.transmit(&tx(&["E", "E"]));
+        // Long enough to be seen keying by a thread that runs late: an `E` keys for
+        // only 6 ms here, and a first sample after it reads no output.
+        let sent = st.transmit(&tx(&["TEST", "TEST"]));
         // Whatever happened, let the reader go: a pipe still there takes a writer.
         let _ = std::fs::OpenOptions::new().write(true).open(&tmp);
         let written = reader.join().unwrap().unwrap();
@@ -3552,7 +3554,7 @@ mod tests {
         assert_eq!(sent, Ok(()));
         let rig = st.rig();
         let r = rig.lock().unwrap();
-        assert_eq!(r.sim.sent, ["E", "E"]);
+        assert_eq!(r.sim.sent, ["TEST", "TEST"]);
         assert_eq!(r.stops, 0, "receive was not forced");
     }
 
