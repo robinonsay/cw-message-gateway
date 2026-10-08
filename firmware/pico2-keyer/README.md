@@ -15,6 +15,7 @@ takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
   this firmware's `safe_state` (the key and the PTT open first) before they stop.
   It is pinned in `Cargo.toml` at a commit on a rustos branch until its PRs
   merge, then at their merge commits.
+- `build.sh`: builds a commit's UF2 the way CI does (below, "Building it yourself").
 - `uf2.py`: turns the built ELF file into `pico2-keyer.uf2`, the file you copy onto
   the Pico 2, after checking that the RP2350 would boot it.
 - `check_faults.py`: reads the built ELF's HardFault, default exception and panic
@@ -23,7 +24,7 @@ takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
   `llvm-objdump`, which `rust-toolchain.toml` installs (`llvm-tools`):
 
   ```sh
-  python3 check_faults.py target/thumbv8m.main-none-eabihf/release/pico2-keyer
+  python3 check_faults.py pico2-keyer.elf
   ```
 
 ## Getting it
@@ -34,18 +35,28 @@ is in [docs/keyer.md](../../docs/keyer.md), "Flashing the firmware".
 
 ## Building it yourself
 
-From a checkout of the commit you want, with `rustup` installed (it fetches the
-compiler `rust-toolchain.toml` pins):
+From a checkout of the repository, with `git`, `python3` and `rustup` installed
+(rustup fetches the compiler `rust-toolchain.toml` pins), on Linux:
 
 ```sh
-cd firmware/pico2-keyer
-KEYER_BUILD_ID="$(git rev-parse --short=8 HEAD)" cargo build --release --locked
-python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
+sh firmware/pico2-keyer/build.sh            # HEAD, or name a commit: build.sh 759f01b6
 ```
 
-This is CI's build, and the UF2 comes out byte for byte the same as CI's for that
-commit, so its SHA-256 is the one CI and the safety audit publish. Without
-`KEYER_BUILD_ID` the box reports `-` as its build, and the file has another checksum.
+This is CI's build. It builds the commit as committed (`git archive`, so nothing
+uncommitted gets in), at one fixed path, `/tmp/pico2-keyer-build`, with the
+commit's first eight characters as `KEYER_BUILD_ID`, and writes `pico2-keyer.uf2`,
+its `pico2-keyer.uf2.sha256` and `pico2-keyer.elf` into `firmware/pico2-keyer`. The
+UF2 comes out byte for byte the same as CI's for that commit, so its SHA-256 is
+the one CI and the safety audit publish. CI checks that, building each commit from
+two checkouts in different places. A Mac should give the same file; that has not
+been checked.
+
+A plain `cargo build` does not: keyer-core is outside this crate's workspace, so
+cargo puts its absolute path into the hash in every symbol name, and the code's
+layout follows those names. The same commit built in place in two checkouts can
+give two different UF2s. That is fine for development: `cargo build --release`
+here builds the working tree, and without `KEYER_BUILD_ID` the box reports `-` as
+its build.
 
 It builds only for the Pico 2, so it is its own Cargo workspace, outside the
 hfnode one (`.cargo/config.toml` sets the target).

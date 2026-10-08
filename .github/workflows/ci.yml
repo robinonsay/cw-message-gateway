@@ -155,26 +155,34 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --release --locked -- -D warnings
 
-      # The box reports this in `HELLO`, and `[keyer] firmware_build` is checked
-      # against it: eight characters of the commit, which is all `HELLO` carries.
-      - name: cargo build
+      # build.sh builds the commit at one fixed path, so that anyone's build of it
+      # is this same file (README.md, "Building it yourself"), and prints the
+      # build id and the UF2's SHA-256 into the log. The box reports the build id
+      # in `HELLO`, and `[keyer] firmware_build` is checked against it: eight
+      # characters of the commit, which is all `HELLO` carries.
+      - name: UF2 and its SHA-256
         run: |
-          id="$(git rev-parse --short=8 HEAD)"
-          echo "KEYER_BUILD_ID=$id" >>"$GITHUB_ENV"
-          KEYER_BUILD_ID="$id" cargo build --release --locked
+          echo "KEYER_BUILD_ID=$(git rev-parse --short=8 HEAD)" >>"$GITHUB_ENV"
+          sh build.sh
 
       # The fault and panic handlers open the key before anything else (the
       # audit's KB-9), read from the machine code: nothing on a computer can run
-      # them.
+      # them. This is the ELF the UF2 was made from.
       - name: fault handlers open the key first
-        run: python3 check_faults.py target/thumbv8m.main-none-eabihf/release/pico2-keyer
+        run: python3 check_faults.py pico2-keyer.elf
 
-      - name: UF2 and its SHA-256
+      # The same commit from a checkout somewhere else must give the same file.
+      # Built in place, a checkout at this second path gives another UF2 than
+      # one at the first; build.sh is what makes the two the same.
+      - name: the UF2 does not depend on where the checkout is
         run: |
-          python3 uf2.py target/thumbv8m.main-none-eabihf/release/pico2-keyer pico2-keyer.uf2
-          sha256sum pico2-keyer.uf2 >pico2-keyer.uf2.sha256
-          # In the log too, so that a link to this job shows it.
-          echo "build id $KEYER_BUILD_ID, $(wc -c <pico2-keyer.uf2) bytes, UF2 SHA-256 $(cut -d ' ' -f 1 pico2-keyer.uf2.sha256)"
+          other="$RUNNER_TEMP/copy/ic-7300-hf-server"
+          git worktree add --detach "$other" HEAD
+          sh "$other/firmware/pico2-keyer/build.sh"
+          cmp pico2-keyer.uf2 "$other/firmware/pico2-keyer/pico2-keyer.uf2"
+
+      - name: summary
+        run: |
           {
             echo "### Keyer box firmware"
             echo
