@@ -57,7 +57,7 @@ branch.
 | Replies of any length accepted; `1C 00` anything but `00` read as transmit | Low | Every reply must have exactly the documented shape, or it is an error |
 | `1C 00 01` (force transmit) could be sent; frequencies outside the radio's range could be sent | Low | The driver refuses both before anything goes out |
 | CI-V address, baud rate and callsigns not validated | Low | Address 02h-DFh, baud one of the six USB rates, callsigns letters/digits/"/" only |
-| CI-V USB port linked to REMOTE would let another controller's replies pass as the radio's | Low | The preflight warns if `1A 05 00 74` reads Link |
+| CI-V USB port linked to REMOTE would let another controller's replies pass as the radio's | Low | The preflight refuses to go on if `1A 05 00 74` reads Link (it warned until the audit's K11) |
 | Docs: "can toggle" understated DTR/RTS; Inhibit Timer and Time-Out Timer presented as protection they are not; USB Keying (RTTY) missing; hardware-timer advice could itself key the radio | Medium | `raspberry-pi-setup.md` section 6 and `hardware-test-plan.md` corrected |
 | No trace of what went over the wire for bench evidence | Medium | `RUST_LOG=civ=trace` logs every frame in and out with its reply time |
 
@@ -93,21 +93,26 @@ named test-plan step measures it.
 | `14 0A`, `14 0C`, `14 0F` | 2 BCD bytes, at most `02 55` | 8677, 8685, 8698 | Yes |
 | `15 11` | Po: 0 = 0%, 143 = 50%, 213 = 100%, linear between | 8732 | Yes; calibration bench (step 9) |
 | `15 12` | SWR: 0 = 1.0, 48 = 1.5, 80 = 2.0, 120 = 3.0 | 8736 | Yes |
+| `16 46` | VOX: `00` OFF required | 8766 | Yes |
 | `16 47` | `01` (semi) required after setup | 8767 | Yes |
+| `16 66` | TX Inhibit: `00` OFF required by `tune`, `cw` and `run`; `01` warns for `check` and `setup` | 8788-8789 | Yes |
 | `19 00` | `94`, or nothing is written | 8793 | Yes |
 | `1C 00` | `00` receive, `01` transmit, anything else an error | 9319-9323 | Yes; keyer behaviour bench (step 6) |
 | `1C 01` | `00` OFF (bypassed after a tune), `01` ON, `02` tuning | 9327, 5917 | Yes; timing bench (step 5) |
 | `1C 03` | 5 BCD bytes; must equal the set frequency | 9332 | Yes |
 | `21 02` | `00` = ∂TX OFF, required | 9348 | Yes |
-| `1A 05 00 29` | Time-Out Timer (CI-V): `00` OFF to `05` 30 min; `run` refuses OFF | 8861 | Yes |
+| `1A 05 00 29` | Time-Out Timer (CI-V): `00` OFF to `05` 30 min; `tune`, `cw` and `run` refuse anything but `01` (3 min), `check` and `setup` warn | 8861 | Yes |
+| `1A 05 00 35` | PTT tune set (PTT Start): `00` OFF required | 8872 | Yes |
+| `1A 05 00 66`, `00 67` | MOD input during DATA OFF, DATA: `03` (USB) or `04` (MIC/USB) warns | 8953-8959 | Yes |
 | `1A 05 00 71` | CI-V Transceive, reported | 8966 | Yes |
-| `1A 05 00 74` | CI-V USB port: `01` Unlink expected, `00` Link warns | 8975 | Yes |
+| `1A 05 00 73` | CI-V Output (for ANT): warns if ON | 8973 | Yes |
+| `1A 05 00 74` | CI-V USB port: `01` Unlink required, `00` Link refused | 8975 | Yes |
 | `1A 05 00 75` | USB Echo Back, raw value reported (see below) | 8978 | Yes |
 | `1A 05 00 78`, `00 79`, `00 80` | USB SEND, USB Keying (CW), (RTTY): `00` OFF required | 8986, 8991, 8995 | Yes |
 | `1A 05 00 84` | Meter peak hold: warns if ON | 9006 | Yes |
-| `1A 05 01 61` | Keyer dot/dash ratio: warns unless `30` (1:1:3.0) | 9185 | Yes |
+| `1A 05 01 61` | Keyer dot/dash ratio: refused unless `30` (1:1:3.0) | 9185 | Yes |
 | `1A 05 01 97` | Inhibit Timer at USB Connection: warns if OFF | 9269 | Yes |
-| `27 11` | Scope wave data output: warns if ON (the waveform stream keeps the link busy) | 9353-9361 | Yes; reply format bench (step 0) |
+| `27 11` | Scope wave data output: refused if ON (the waveform stream keeps the link busy) | 9353-9361 | Yes; reply format bench (step 0) |
 
 **The link:**
 
@@ -147,10 +152,11 @@ passing self-test proves nothing. These are measured on the radio instead:
 
 - **The node does not change the radio's menu settings over CI-V.** It refuses to
   go on instead, so the radio stays in the state the operator set and photographed.
-- **TX Inhibit (`16 66`) is not used.** The manual does not say what it covers (the
-  keyer, the tuner) or whether it survives a power cycle, and a latch inside the
-  radio that the operator does not know about is its own hazard. Worth a bench
-  look later.
+- **TX Inhibit (`16 66`) is only read** (the preflight refuses a command that can
+  transmit while it is ON); the node does not set it. The manual does not say what
+  it covers (the keyer, the tuner) or whether it survives a power cycle, and a latch
+  inside the radio that the operator does not know about is its own hazard. Worth a
+  bench look later.
 - **Break-in is left ON between transmissions.** `17` only transmits with break-in
   on (p. 19-8, footnote 2). With nothing on the KEY jack and no `17` sent, break-in
   alone does not transmit.

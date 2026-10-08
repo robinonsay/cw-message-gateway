@@ -5,10 +5,11 @@
 //! without data, which reads it (Section 19 of the *IC-7300 Full Manual*, see
 //! [`crate::ic7300`] for the citations), plus `19 00` and `1C 00`. It fails if the
 //! radio is not an IC-7300 answering at the configured address, is transmitting,
-//! could be keyed by the USB serial control lines, or would transmit somewhere other
-//! than the dial frequency (split or ∂TX on). With `unattended`, it also requires the
-//! radio's own Time-Out Timer (CI-V) to be set, as a backstop that does not depend
-//! on this software.
+//! could be keyed by the USB serial control lines, VOX or the tuner's PTT Start, or
+//! would transmit somewhere other than the dial frequency (split or ∂TX on). For a
+//! command that can transmit ([`Purpose::Transmit`]) it also requires the radio's
+//! own Time-Out Timer (CI-V) at 3 min, as a backstop that does not depend on this
+//! software, and TX Inhibit OFF.
 //!
 //! [`verify_setup`] reads back what [`crate::Rig`]'s set commands are meant to have
 //! done, since an OK (FB) only says the radio accepted a command, not that it did
@@ -192,10 +193,34 @@ fn tot_name(v: u8) -> &'static str {
     }
 }
 
-/// Read-only checks before the node writes to the radio. Stops after the first
-/// check if nothing answers at the configured address, since every other read would
-/// only time out too.
-pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
+/// MOD input connector codes: "00=MIC, 01=ACC, 02=MIC/ACC, 03=USB, 04=MIC/USB"
+/// (1A 05 00 66 and 00 67, p. 19-5).
+fn mod_input_name(v: u8) -> &'static str {
+    match v {
+        0 => "MIC",
+        1 => "ACC",
+        2 => "MIC/ACC",
+        3 => "USB",
+        _ => "MIC/USB",
+    }
+}
+
+/// What the command that runs the preflight will do with the radio, which sets how
+/// strict the checks that guard a transmission are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// `radio check`: reads only.
+    Check,
+    /// `radio setup`: writes settings, never transmits.
+    Setup,
+    /// `radio tune`, `radio cw` and `run`: can transmit.
+    Transmit,
+}
+
+/// Read-only checks before the node writes to the radio, for a command that will do
+/// `purpose`. Stops after the first check if nothing answers at the configured
+/// address, since every other read would only time out too.
+pub fn preflight<P: Port>(r: &mut Ic7300<P>, purpose: Purpose) -> Report {
     let mut rep = Report::default();
 
     rep.required("transceiver ID", "19 00", r.transceiver_id(), |&id| {
@@ -280,24 +305,78 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
         }
     });
 
+    // With VOX ON, sound at the microphone transmits (p. 4-10, line 2464): a
+    // keying path the node does not control.
+    rep.required("VOX", "16 46", r.vox(), |&on| {
+        if on {
+            (
+                "ON".into(),
+                Level::Fail,
+                "sound at the microphone would transmit; turn VOX off".into(),
+            )
+        } else {
+            ("OFF".into(), Level::Pass, String::new())
+        }
+    });
+
+    // With PTT Start ON the tuner "starts to tune when you push PTT" after the
+    // frequency has moved more than 1% (p. 12-5, lines 6310-6315): a carrier the
+    // node did not ask for, and does not time.
+    rep.required("PTT Start (tuner)", "1A 05 00 35", r.ptt_tune(), |&on| {
+        if on {
+            (
+                "ON".into(),
+                Level::Fail,
+                "a transmission could start a tuner cycle; set PTT Start OFF (the default)".into(),
+            )
+        } else {
+            ("OFF".into(), Level::Pass, String::new())
+        }
+    });
+
+    // The radio's own limit on a transmission "initiated by a CI-V command" (p. 12-5,
+    // lines 6281-6286). 3 min, the shortest, is required before anything that can
+    // transmit; `radio check` and `radio setup` transmit nothing, so for them any
+    // other setting is a warning.
     rep.required(
         "Time-Out Timer (CI-V)",
         "1A 05 00 29",
         r.time_out_timer(),
         |&v| {
-            let level = match (v, unattended) {
-                (0, true) => Level::Fail,
-                (0, false) => Level::Warn,
-                _ => Level::Pass,
+            let level = match (v, purpose) {
+                (1, _) => Level::Pass,
+                (_, Purpose::Transmit) => Level::Fail,
+                _ => Level::Warn,
             };
-            let note = if v == 0 {
-                "set it to 3 min: the radio's own limit on CI-V transmissions"
-            } else {
+            let note = if v == 1 {
                 ""
+            } else {
+                "set it to 3 min: the radio's own limit on CI-V transmissions"
             };
             (tot_name(v).into(), level, note.into())
         },
     );
+
+    // TX Inhibit ON: the radio "cannot transmit" (p. 13-6, lines 7505-7506), so a
+    // command that transmits would only seem to, and whatever set it (an IC-PW2
+    // locking this exciter out, or a controller that could not get the radio back
+    // to receive) has not been dealt with. `radio check` and `radio setup` transmit
+    // nothing, so for them it is only a warning.
+    let inhibit_level = match purpose {
+        Purpose::Transmit => Level::Fail,
+        Purpose::Check | Purpose::Setup => Level::Warn,
+    };
+    match r.tx_inhibit() {
+        Ok(false) => rep.add("TX Inhibit", "16 66", "OFF", Level::Pass, ""),
+        Ok(true) => rep.add(
+            "TX Inhibit",
+            "16 66",
+            "ON",
+            inhibit_level,
+            "the radio will not transmit; find out why it was set, then clear it",
+        ),
+        Err(e) => rep.add("TX Inhibit", "16 66", "-", inhibit_level, unread(&e)),
+    }
 
     // Linked, the USB port shares the bus with [REMOTE]: another controller's
     // replies could be taken for the radio's, and the USB baud rate and echo items
@@ -314,10 +393,40 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
             "CI-V USB port",
             "1A 05 00 74",
             "Link to [REMOTE]",
-            Level::Warn,
-            "set Unlink from [REMOTE] (the default) unless nothing is on [REMOTE]",
+            Level::Fail,
+            "set Unlink from [REMOTE] (the default)",
         ),
-        Err(e) => rep.add("CI-V USB port", "1A 05 00 74", "-", Level::Warn, unread(&e)),
+        Err(e) => rep.add("CI-V USB port", "1A 05 00 74", "-", Level::Fail, unread(&e)),
+    }
+
+    // CI-V Output (for ANT) ON makes the radio send its transmit status and transmit
+    // frequency (1C 00, 1C 03) unasked whenever they change (p. 19-7, lines
+    // 9319-9335): the same command bytes as replies the node waits for. The menu
+    // puts that output on [REMOTE] (p. 12-10, lines 6846-6850), which Unlink keeps
+    // off this port, but the command table does not name a port or an address, so
+    // ON is a warning. ICOM's default is OFF.
+    match r.civ_output_ant() {
+        Ok(false) => rep.add(
+            "CI-V Output (for ANT)",
+            "1A 05 00 73",
+            "OFF",
+            Level::Pass,
+            "",
+        ),
+        Ok(true) => rep.add(
+            "CI-V Output (for ANT)",
+            "1A 05 00 73",
+            "ON",
+            Level::Warn,
+            "the radio sends its status unasked; set it OFF (the default)",
+        ),
+        Err(e) => rep.add(
+            "CI-V Output (for ANT)",
+            "1A 05 00 73",
+            "-",
+            Level::Warn,
+            unread(&e),
+        ),
     }
 
     match r.usb_inhibit_timer() {
@@ -338,8 +447,33 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
         ),
     }
 
+    // With a MOD input of USB, sound the computer plays to the radio's USB audio
+    // codec is transmitted in that mode (p. 12-10, lines 6768-6785). The node sends
+    // no audio and keys only CW, so this is a warning.
+    for (name, command, read) in [
+        (
+            "MOD input (DATA OFF)",
+            "1A 05 00 66",
+            r.mod_input_data_off(),
+        ),
+        ("MOD input (DATA)", "1A 05 00 67", r.mod_input_data()),
+    ] {
+        match read {
+            Ok(v @ (0x03 | 0x04)) => rep.add(
+                name,
+                command,
+                mod_input_name(v),
+                Level::Warn,
+                "the computer's audio would be transmitted; select MIC or ACC",
+            ),
+            Ok(v) => rep.add(name, command, mod_input_name(v), Level::Pass, ""),
+            Err(e) => rep.add(name, command, "-", Level::Warn, unread(&e)),
+        }
+    }
+
     // The node's keying times assume PARIS timing, dash = 3 dots; a longer dash
-    // makes every piece run long and trips the stuck-transmitter check.
+    // makes every piece run long and trips the stuck-transmitter check, and a
+    // shorter one is not the code the field operator's decoder expects.
     match r.keyer_ratio() {
         Ok(ratio) if (ratio - 3.0).abs() < 0.05 => rep.add(
             "keyer dot/dash ratio",
@@ -352,14 +486,14 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
             "keyer dot/dash ratio",
             "1A 05 01 61",
             format!("1:1:{ratio:.1}"),
-            Level::Warn,
+            Level::Fail,
             "the node times keying at 1:1:3.0; set the ratio to 3.0",
         ),
         Err(e) => rep.add(
             "keyer dot/dash ratio",
             "1A 05 01 61",
             "-",
-            Level::Warn,
+            Level::Fail,
             unread(&e),
         ),
     }
@@ -394,10 +528,10 @@ pub fn preflight<P: Port>(r: &mut Ic7300<P>, unattended: bool) -> Report {
             "scope data output",
             "27 11",
             "ON",
-            Level::Warn,
+            Level::Fail,
             "close any panadapter program: its waveform stream delays the stop commands",
         ),
-        Err(e) => rep.add("scope data output", "27 11", "-", Level::Warn, unread(&e)),
+        Err(e) => rep.add("scope data output", "27 11", "-", Level::Fail, unread(&e)),
     }
 
     rep.info("frequency", "03", r.frequency(), |hz| format!("{hz} Hz"));
@@ -605,7 +739,7 @@ mod tests {
     }
 
     /// A radio at factory defaults with the guide's settings: on receive, USB lines
-    /// OFF, Time-Out Timer 3 min.
+    /// OFF, VOX and PTT Start OFF, Time-Out Timer 3 min, TX Inhibit OFF.
     fn good() -> Table {
         let mut t = Table::default();
         for (cmd, data) in [
@@ -616,9 +750,15 @@ mod tests {
             (&[0x1A, 0x05, 0x00, 0x80], &[0x00]),
             (&[0x0F], &[0x00]),
             (&[0x21, 0x02], &[0x00]),
+            (&[0x16, 0x46], &[0x00]),
+            (&[0x1A, 0x05, 0x00, 0x35], &[0x00]),
             (&[0x1A, 0x05, 0x00, 0x29], &[0x01]),
+            (&[0x16, 0x66], &[0x00]),
             (&[0x1A, 0x05, 0x01, 0x97], &[0x01]),
             (&[0x1A, 0x05, 0x00, 0x74], &[0x01]),
+            (&[0x1A, 0x05, 0x00, 0x73], &[0x00]),
+            (&[0x1A, 0x05, 0x00, 0x66], &[0x02]),
+            (&[0x1A, 0x05, 0x00, 0x67], &[0x01]),
             (&[0x03], &[0x00, 0x00, 0x03, 0x07, 0x00]),
             (&[0x04], &[0x03, 0x01]),
             (&[0x14, 0x0A], &[0x00, 0x26]),
@@ -638,6 +778,8 @@ mod tests {
         t
     }
 
+    const PURPOSES: [Purpose; 3] = [Purpose::Check, Purpose::Setup, Purpose::Transmit];
+
     fn rig(t: Table) -> Ic7300<Table> {
         Ic7300::with_port(t, 0x94)
     }
@@ -653,21 +795,39 @@ mod tests {
     }
 
     fn level_of(rep: &Report, name: &str) -> Level {
-        rep.checks.iter().find(|c| c.name == name).unwrap().level
+        rep.checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no check {name}\n{rep}"))
+            .level
+    }
+
+    /// The preflight for `purpose` on [`good`] with `cmd` answering `data`, or not
+    /// answering at all with `None`.
+    fn with(cmd: &[u8], data: Option<&[u8]>, purpose: Purpose) -> Report {
+        let mut t = good();
+        match data {
+            Some(d) => t.answers.insert(cmd.to_vec(), d.to_vec()),
+            None => t.answers.remove(cmd),
+        };
+        preflight(&mut rig(t), purpose)
     }
 
     #[test]
     fn a_well_set_radio_passes_and_nothing_is_written() {
-        let mut r = rig(good());
-        let rep = preflight(&mut r, true);
-        assert!(rep.passed(), "{rep}");
-        // Every frame sent is one of the reads in the table, without data: nothing
-        // that sets a value, keys or tunes.
-        let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
-        let sent = sent_bodies(&r);
-        assert_eq!(sent.len(), 21);
-        for body in sent {
-            assert!(reads.contains(&body), "{body:02X?} is not a read");
+        for purpose in PURPOSES {
+            let mut r = rig(good());
+            let rep = preflight(&mut r, purpose);
+            assert!(rep.passed(), "{rep}");
+            assert!(rep.checks.iter().all(|c| c.level != Level::Warn), "{rep}");
+            // Every frame sent is one of the reads in the table, without data:
+            // nothing that sets a value, keys or tunes.
+            let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
+            let sent = sent_bodies(&r);
+            assert_eq!(sent.len(), 27);
+            for body in sent {
+                assert!(reads.contains(&body), "{body:02X?} is not a read");
+            }
         }
     }
 
@@ -683,9 +843,34 @@ mod tests {
         ] {
             let mut t = good();
             t.answers.insert(cmd.to_vec(), vec![data]);
-            let rep = preflight(&mut rig(t), false);
+            let rep = preflight(&mut rig(t), Purpose::Check);
             assert!(!rep.passed(), "{name}");
             assert_eq!(level_of(&rep, name), Level::Fail, "{name}\n{rep}");
+        }
+    }
+
+    /// The audit's K11: other ways the radio could transmit, or settings the node's
+    /// timing and link rely on, fail whatever the command, set wrong or unread.
+    #[test]
+    fn vox_ptt_start_remote_link_keyer_ratio_and_scope_output_fail() {
+        for (cmd, bad, name) in [
+            (&[0x16, 0x46][..], &[0x01][..], "VOX"),
+            (&[0x1A, 0x05, 0x00, 0x35], &[0x01], "PTT Start (tuner)"),
+            (&[0x1A, 0x05, 0x00, 0x74], &[0x00], "CI-V USB port"),
+            (&[0x1A, 0x05, 0x01, 0x61], &[0x45], "keyer dot/dash ratio"),
+            (&[0x1A, 0x05, 0x01, 0x61], &[0x28], "keyer dot/dash ratio"),
+            (&[0x1A, 0x05, 0x01, 0x61], &[0x31], "keyer dot/dash ratio"),
+            (&[0x27, 0x11], &[0x01], "scope data output"),
+        ] {
+            for purpose in PURPOSES {
+                for data in [Some(bad), None] {
+                    let rep = with(cmd, data, purpose);
+                    let case = format!("{name} {data:02X?} for {purpose:?}\n{rep}");
+                    assert!(!rep.passed(), "{case}");
+                    assert_eq!(level_of(&rep, name), Level::Fail, "{case}");
+                    assert_eq!(rep.failures().count(), 1, "{case}");
+                }
+            }
         }
     }
 
@@ -693,19 +878,64 @@ mod tests {
     fn an_unreadable_usb_setting_fails() {
         let mut t = good();
         t.answers.remove(&[0x1A, 0x05, 0x00, 0x79][..]);
-        assert!(!preflight(&mut rig(t), false).passed());
+        assert!(!preflight(&mut rig(t), Purpose::Check).passed());
     }
 
     #[test]
-    fn time_out_timer_is_required_only_unattended() {
-        let mut t = good();
-        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x29], vec![0x00]);
-        let rep = preflight(&mut rig(t), false);
-        assert!(rep.passed());
-        assert_eq!(level_of(&rep, "Time-Out Timer (CI-V)"), Level::Warn);
-        let mut t = good();
-        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x29], vec![0x00]);
-        assert!(!preflight(&mut rig(t), true).passed());
+    fn time_out_timer_must_be_3_min_for_a_command_that_can_transmit() {
+        let tot = [0x1A, 0x05, 0x00, 0x29];
+        let name = "Time-Out Timer (CI-V)";
+        // OFF, 5, 10, 20 and 30 min.
+        for v in [0x00, 0x02, 0x03, 0x04, 0x05] {
+            let rep = with(&tot, Some(&[v]), Purpose::Transmit);
+            assert!(!rep.passed(), "{v:02X}\n{rep}");
+            assert_eq!(level_of(&rep, name), Level::Fail, "{v:02X}");
+            for purpose in [Purpose::Check, Purpose::Setup] {
+                let rep = with(&tot, Some(&[v]), purpose);
+                assert!(rep.passed(), "{v:02X} for {purpose:?}\n{rep}");
+                assert_eq!(level_of(&rep, name), Level::Warn, "{v:02X} for {purpose:?}");
+            }
+        }
+        for purpose in PURPOSES {
+            let rep = with(&tot, Some(&[0x01]), purpose);
+            assert_eq!(level_of(&rep, name), Level::Pass, "{purpose:?}");
+            assert!(!with(&tot, None, purpose).passed(), "unread, {purpose:?}");
+        }
+    }
+
+    #[test]
+    fn tx_inhibit_fails_a_command_that_can_transmit_and_warns_otherwise() {
+        let inhibit = [0x16, 0x66];
+        for data in [Some(&[0x01][..]), None] {
+            let rep = with(&inhibit, data, Purpose::Transmit);
+            assert!(!rep.passed(), "{data:02X?}\n{rep}");
+            assert_eq!(level_of(&rep, "TX Inhibit"), Level::Fail);
+            for purpose in [Purpose::Check, Purpose::Setup] {
+                let rep = with(&inhibit, data, purpose);
+                assert!(rep.passed(), "{data:02X?} for {purpose:?}\n{rep}");
+                assert_eq!(level_of(&rep, "TX Inhibit"), Level::Warn);
+            }
+        }
+    }
+
+    #[test]
+    fn a_mod_input_from_usb_warns() {
+        for (cmd, name) in [
+            ([0x1A, 0x05, 0x00, 0x66], "MOD input (DATA OFF)"),
+            ([0x1A, 0x05, 0x00, 0x67], "MOD input (DATA)"),
+        ] {
+            for (v, level) in [
+                (0x00, Level::Pass), // MIC
+                (0x01, Level::Pass), // ACC
+                (0x02, Level::Pass), // MIC/ACC
+                (0x03, Level::Warn), // USB
+                (0x04, Level::Warn), // MIC/USB
+            ] {
+                let rep = with(&cmd, Some(&[v]), Purpose::Transmit);
+                assert!(rep.passed(), "{name} {v:02X}\n{rep}");
+                assert_eq!(level_of(&rep, name), level, "{name} {v:02X}");
+            }
+        }
     }
 
     #[test]
@@ -713,7 +943,7 @@ mod tests {
         let mut t = good();
         t.answers.insert(vec![0x19, 0x00], vec![0xB6]); // IC-7300MK2
         let mut r = rig(t);
-        let rep = preflight(&mut r, false);
+        let rep = preflight(&mut r, Purpose::Check);
         assert!(!rep.passed());
         assert_eq!(rep.checks.len(), 1);
         assert_eq!(sent_bodies(&r), [vec![0x19, 0x00]]);
@@ -722,26 +952,37 @@ mod tests {
     #[test]
     fn warning_items_do_not_fail_the_preflight() {
         let mut t = good();
-        t.answers.insert(vec![0x1A, 0x05, 0x01, 0x61], vec![0x45]);
         t.answers.insert(vec![0x1A, 0x05, 0x00, 0x84], vec![0x01]);
-        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x74], vec![0x00]);
-        t.answers.insert(vec![0x27, 0x11], vec![0x01]);
-        let rep = preflight(&mut rig(t), true);
+        t.answers.insert(vec![0x1A, 0x05, 0x01, 0x97], vec![0x00]);
+        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x73], vec![0x01]);
+        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x66], vec![0x04]);
+        t.answers.insert(vec![0x1A, 0x05, 0x00, 0x67], vec![0x03]);
+        let rep = preflight(&mut rig(t), Purpose::Transmit);
         assert!(rep.passed(), "{rep}");
-        assert_eq!(level_of(&rep, "keyer dot/dash ratio"), Level::Warn);
         assert_eq!(level_of(&rep, "meter peak hold"), Level::Warn);
-        assert_eq!(level_of(&rep, "CI-V USB port"), Level::Warn);
-        assert_eq!(level_of(&rep, "scope data output"), Level::Warn);
+        assert_eq!(level_of(&rep, "USB inhibit timer"), Level::Warn);
+        assert_eq!(level_of(&rep, "CI-V Output (for ANT)"), Level::Warn);
+        assert_eq!(level_of(&rep, "MOD input (DATA OFF)"), Level::Warn);
+        assert_eq!(level_of(&rep, "MOD input (DATA)"), Level::Warn);
     }
 
     #[test]
     fn missing_info_items_only_warn() {
         let mut t = good();
-        t.answers.remove(&[0x1A, 0x05, 0x00, 0x71][..]);
-        t.answers.remove(&[0x1A, 0x05, 0x01, 0x97][..]);
-        let rep = preflight(&mut rig(t), true);
+        for cmd in [
+            &[0x1A, 0x05, 0x00, 0x71][..],
+            &[0x1A, 0x05, 0x01, 0x97],
+            &[0x1A, 0x05, 0x00, 0x73],
+            &[0x1A, 0x05, 0x00, 0x66],
+            &[0x1A, 0x05, 0x00, 0x67],
+        ] {
+            t.answers.remove(cmd);
+        }
+        let rep = preflight(&mut rig(t), Purpose::Transmit);
         assert!(rep.passed(), "{rep}");
         assert_eq!(level_of(&rep, "CI-V Transceive"), Level::Warn);
+        assert_eq!(level_of(&rep, "CI-V Output (for ANT)"), Level::Warn);
+        assert_eq!(level_of(&rep, "MOD input (DATA)"), Level::Warn);
     }
 
     fn setup() -> Setup {

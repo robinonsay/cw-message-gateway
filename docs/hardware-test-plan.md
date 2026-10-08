@@ -61,16 +61,23 @@ what the code does, not what the radio does.
   the stage and power before they open the port, then first read, and refuse with
   nothing written unless: the radio answers `19 00` as an IC-7300 (94h); it is on
   receive (`1C 00`); USB SEND, USB Keying (CW) and USB Keying (RTTY) are all OFF
-  (`1A 05 00 78`, `00 79`, `00 80`); SPLIT is off (`0F`); ∂TX is off (`21 02`). `run`
-  also requires the radio's Time-Out Timer (CI-V) to be set (`1A 05 00 29`).
+  (`1A 05 00 78`, `00 79`, `00 80`); SPLIT is off (`0F`); ∂TX is off (`21 02`); VOX
+  is off (`16 46`); the tuner's PTT Start is OFF (`1A 05 00 35`); the CI-V USB port
+  is unlinked from [REMOTE] (`1A 05 00 74`); the keyer ratio is 1:1:3.0
+  (`1A 05 01 61`); scope data output is OFF (`27 11`). `tune`, `cw` and `run` also
+  require the radio's Time-Out Timer (CI-V) at exactly 3 min (`1A 05 00 29`) and
+  its TX Inhibit OFF (`16 66`); for `radio check` and `setup` those two only warn.
   `radio check` runs the same reads and prints them. `radio rx` is the one command
   that writes without a preflight: it sends only the stop and receive commands
   (`17 FF`, `1C 00 00`), so that it can take off transmit a radio the preflight
   would refuse. Tests: `commissioning` (`a_refused_stage_or_power_opens_nothing_and_sends_nothing`,
   `nothing_is_written_after_a_failed_preflight`,
-  `run_needs_the_radios_time_out_timer_and_the_bench_commands_do_not`,
+  `every_command_that_can_transmit_needs_the_time_out_timer_at_3_min`,
+  `tx_inhibit_on_refuses_every_command_that_can_transmit_but_setup`,
   `the_first_write_after_the_preflight_puts_the_radio_on_receive`), and the
-  selftest scenarios `preflight-tot-off` and `preflight-usb-send-dtr`.
+  selftest scenarios `preflight-tot-off`, `preflight-tot-5-min`,
+  `preflight-usb-send-dtr`, `preflight-vox-on`, `preflight-ptt-start-on` and
+  `preflight-tx-inhibit-on`.
 - **Read-back after setup.** After setting the radio up, the node reads back the
   frequency (`03`, and the transmit frequency `1C 03`), mode (must be CW, not CW-R),
   break-in (must be semi), split, ∂TX, RF power (never above what was sent), key
@@ -245,8 +252,9 @@ In `~/bench.toml` set:
 **Radio settings.** Set the IC-7300 menu settings listed in
 [raspberry-pi-setup.md, section 6](raspberry-pi-setup.md#6-ic-7300-settings),
 including CI-V address 94h, CI-V USB baud 115200, USB SEND and both USB Keying items
-OFF, Time-Out Timer (CI-V) 3 min, and the tuner's PTT Start OFF (the preflight does
-not read it yet). Photograph each screen. Also:
+OFF, Time-Out Timer (CI-V) 3 min, the tuner's PTT Start OFF and VOX off (the
+preflight reads all of these, and that TX Inhibit is OFF). Photograph each screen.
+Also:
 
 - Record the firmware version (MENU > SET > Others > Information > Version, line
   7876). The CI-V `1A 05` item numbers the driver uses are those of manual revision
@@ -305,7 +313,7 @@ hfnode selftest --sweep --csv ~/sweep.csv   # where decoding breaks: speed x SNR
 Each scenario opens the radio as `hfnode run` does (the read-only preflight first)
 and runs the whole node (`node::run`: decoder, parser, session, station safety
 layer and the real `Ic7300` CI-V driver) against `civ::mock`, a byte-level IC-7300
-that answers every command the node sends, the preflight's 21 reads among them,
+that answers every command the node sends, the preflight's 27 reads among them,
 as Section 19 of the manual says, and flags anything else as a protocol violation
 (a write to one of the radio's menu settings, for one). A scripted field
 operator keys CW audio (with noise and hand-keying jitter) into the node's audio
@@ -348,8 +356,9 @@ watchdog gets off transmit, refused status commands, NG and lost or late CI-V
 replies, a readout the radio refuses (left unread), a tuner that never finishes
 (transmitting inhibited), a lost reply to the tune command (no reply until the
 node has tuned again), a node that starts with transmitting already inhibited (no
-tune, nothing keyed), and a radio the preflight refuses (Time-Out Timer OFF, USB
-SEND set to DTR: only reads sent, nothing written).
+tune, nothing keyed), and a radio the preflight refuses (Time-Out Timer OFF or 5
+min, USB SEND set to DTR, VOX or PTT Start ON, TX Inhibit ON: only reads sent,
+nothing written).
 
 It runs 100 times faster than real time by default (about 35 s for all of them on a
 laptop). On a slow or busy Pi lower the speed with `--scale 20`; the result must not
@@ -493,21 +502,26 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.24 | `21 02` ∂TX | `00` = OFF, required | p. 19-7 (line 9348) | ☐ |
 | 0.25 | `1C 03` transmit frequency | 5 frequency bytes as in 0.4; must equal the set frequency | p. 19-7 (line 9332) | ☐ |
 | 0.26 | `1A 05 00 78`, `00 79`, `00 80` | USB SEND, USB Keying (CW), USB Keying (RTTY): `00` = OFF (required), `01` = DTR, `02` = RTS | p. 19-5 (lines 8986, 8991, 8995) | ☐ |
-| 0.27 | `1A 05 00 29` | Time-Out Timer (CI-V): `00` = OFF, `01` = 3 min to `05` = 30 min. `run` refuses OFF | p. 19-4 (line 8861) | ☐ |
-| 0.28 | `1A 05 01 97`, `1A 05 00 74` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON. CI-V USB Port: `00` = Link to [REMOTE] (warning), `01` = Unlink | p. 19-7 (line 9269); p. 19-5 (line 8975) | ☐ |
-| 0.29 | `1A 05 00 71`, `00 75`, `00 84`, `01 61` | Reported only: CI-V Transceive, USB Echo Back (raw value), meter peak hold (warning if ON), keyer dot/dash ratio (warning unless `30`, 1:1:3) | pp. 19-5 and 19-6 (lines 8966, 8978, 9006, 9185) | ☐ |
-| 0.30 | `27 11` scope data output | Reads `27 11`; `00` = OFF, `01` = ON (warning: the radio streams `27 00` waveform frames to the port, which slow the stop commands after a timeout) | p. 19-14: "Send/read the Scope wave data output (00=OFF, 01=ON)" (lines 9353-9361) | ☐ |
+| 0.27 | `1A 05 00 29` | Time-Out Timer (CI-V): `00` = OFF, `01` = 3 min to `05` = 30 min. `tune`, `cw` and `run` refuse anything but `01`; `check` and `setup` warn | p. 19-4 (line 8861) | ☐ |
+| 0.28 | `1A 05 01 97`, `1A 05 00 74` | Inhibit Timer at USB Connection: `00` = OFF (warning), `01` = ON. CI-V USB Port: `00` = Link to [REMOTE] (refused), `01` = Unlink | p. 19-7 (line 9269); p. 19-5 (line 8975) | ☐ |
+| 0.29 | `1A 05 00 71`, `00 75`, `00 84`, `01 61` | CI-V Transceive and USB Echo Back (raw value) reported only; meter peak hold (warning if ON); keyer dot/dash ratio (refused unless `30`, 1:1:3) | pp. 19-5 and 19-6 (lines 8966, 8978, 9006, 9185) | ☐ |
+| 0.30 | `27 11` scope data output | Reads `27 11`; `00` = OFF, `01` = ON (refused: the radio streams `27 00` waveform frames to the port, which slow the stop commands after a timeout) | p. 19-14: "Send/read the Scope wave data output (00=OFF, 01=ON)" (lines 9353-9361) | ☐ |
 | 0.31 | USB echo back | Frames not addressed to E0 from 94 are skipped, so an echoed copy of the node's own frame is ignored | CI-V USB Echo Back item, p. 12-11 | ☐ |
 | 0.32 | CI-V Transceive | Frames the radio sends unasked when its frequency or mode is changed at the front panel (`FE FE 00 94 00 ...` and `... 01 ...`) are skipped like the echo, also while reading the link quiet after a timeout | CI-V Transceive (default ON) and "The default transceive address is 00h", p. 12-10 (line 6843); commands 00 and 01, p. 19-3 | ☐ |
 | 0.33 | Serial link | DTR, then RTS, low straight after opening; port opened exclusively; 8 data bits, no parity, 1 stop bit, no flow control; baud one of 4800, 9600, 19200, 38400, 57600, 115200 | USB SEND and USB Keying items, p. 12-11 (lines 6895-6927); baud options (lines 6869-6872). The manual does not give the character format: 8N1 is what CI-V software uses, and step 1 shows it works | ☐ |
 | 0.34 | Unit tests | `cargo test -p civ` passes, and the bytes in the `frames_on_the_wire` and `transmit_control_and_read_frames_on_the_wire` tests match the rows above | `crates/civ/src/ic7300.rs` | ☐ |
+| 0.35 | `16 46` VOX, `1A 05 00 35` PTT Start | `00` = OFF, required; `01` = ON is refused | p. 19-3: "VOX function *(00=OFF, 01=ON)" (line 8766); p. 19-4: "Send/read PTT tune set *(00=OFF, 01=ON)" (line 8872) | ☐ |
+| 0.36 | `16 66` TX Inhibit | `00` = OFF; `01` = ON is refused by `tune`, `cw` and `run`, a warning for `check` and `setup` | p. 19-4: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (lines 8788-8789); p. 13-6 (lines 7500-7507) | ☐ |
+| 0.37 | `1A 05 00 66`, `00 67` MOD input | During DATA OFF and DATA: `00` = MIC, `01` = ACC, `02` = MIC/ACC, `03` = USB, `04` = MIC/USB; `03` or `04` is a warning | p. 19-5 (lines 8953-8959) | ☐ |
+| 0.38 | `1A 05 00 73` CI-V Output (for ANT) | `00` = OFF; `01` = ON is a warning (the radio sends `1C 00` and `1C 03` unasked) | p. 19-5 (line 8973); p. 19-7 (lines 9319-9335) | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
 that has not been ticked.
 
-The `1A 05` item numbers (0.26 to 0.29) are the ones most likely to differ between
-firmware versions; step 1 checks two of them against the radio's screen.
+The `1A 05` item numbers (0.26 to 0.29, 0.35, 0.37 and 0.38) are the ones most
+likely to differ between firmware versions; step 1 checks two of them against the
+radio's screen.
 
 A related manual item that is useful during testing but not used by the node:
 `14 09` reads the CW pitch ("01 28=600 Hz", p. 19-3).
@@ -523,8 +537,9 @@ hfnode radio --config $C status
 ```
 
 `check` only reads: `19 00`, `1C 00`, `1A 05 00 78`, `00 79`, `00 80`, `0F`, `21 02`,
-`1A 05 00 29`, `1A 05 00 74`, `1A 05 01 97`, `1A 05 01 61`, `1A 05 00 84`, `27 11`,
-`03`, `1C 03`, `04`, `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent
+`16 46`, `1A 05 00 35`, `1A 05 00 29`, `16 66`, `1A 05 00 74`, `1A 05 00 73`,
+`1A 05 01 97`, `1A 05 00 66`, `00 67`, `1A 05 01 61`, `1A 05 00 84`, `27 11`, `03`,
+`1C 03`, `04`, `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent
 with no data, which reads the item. To see every frame on the wire, with the time
 each reply took, put `RUST_LOG=info,civ=trace` in front of the command.
 
@@ -535,9 +550,11 @@ nothing was written to the radio`. `status` prints `frequency N Hz` and
 **Pass:**
 
 1. No FAIL line, and `preflight passed` printed. A WARN about the Time-Out Timer
-   is a stop: `radio tune` and `radio cw` only warn about it, but the bench steps
-   need it set. Set it to 3 min (raspberry-pi-setup.md, section 6) and run `check`
-   again. Any other WARN is acceptable only if you understand it.
+   is a stop: `check` only warns about it, but `radio tune`, `radio cw` and `run`
+   refuse anything but 3 min. Set it to 3 min (raspberry-pi-setup.md, section 6)
+   and run `check` again. A WARN about TX Inhibit is a stop too (those commands
+   refuse it ON): something set it over CI-V, so find out what before going on. Any
+   other WARN is acceptable only if you understand it.
 2. Every value matches the radio's own screen: frequency to the hertz, mode, RF
    power about 0%, break-in, tuner, Time-Out Timer, the USB items.
 3. **The item numbers match this firmware.** On the front panel change Time-Out
@@ -862,8 +879,8 @@ can itself key or damage the radio:
   you used ACC pin 3, measure it: it must stay above 2.0 V on receive.
 
 As an additional backstop inside the radio, set **Time-Out Timer (CI-V)** (MENU >
-SET > Function, p. 12-5) to its shortest setting, 3 minutes; `run` refuses to start
-while it is OFF. The manual says it applies to transmitting "initiated by a CI-V
+SET > Function, p. 12-5) to its shortest setting, 3 minutes; `radio tune`, `radio
+cw` and `run` refuse to start with any other setting. The manual says it applies to transmitting "initiated by a CI-V
 command or pushing TRANSMIT" (line 6283). It is too long to replace the hardware
 timer. Check that it works: in CW mode with nothing on the KEY jack, push TRANSMIT
 (with the key up the radio sends no carrier; the Po meter should stay at zero) and

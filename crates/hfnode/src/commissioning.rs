@@ -15,6 +15,7 @@
 
 use anyhow::{bail, Result};
 use civ::ic7300::{Ic7300, Port};
+use civ::preflight::Purpose;
 use serde::Deserialize;
 use std::fmt;
 
@@ -84,6 +85,15 @@ impl Action {
             Self::Run => "run",
         }
     }
+
+    /// What the command will do with the radio, for the preflight: `radio setup`
+    /// writes settings and never transmits; the others can transmit.
+    pub fn purpose(self) -> Purpose {
+        match self {
+            Self::Setup => Purpose::Setup,
+            Self::Tune | Self::Cw | Self::Run => Purpose::Transmit,
+        }
+    }
 }
 
 /// Whether `action` may run at `stage` with `power_watts` configured.
@@ -109,9 +119,9 @@ pub fn check(stage: Stage, action: Action, power_watts: u32) -> Result<()> {
 /// Open the radio for `action`, a command that writes to it: the bring-up stage
 /// must allow the command, checked before `open` is called, so that a refused
 /// command opens no port and sends nothing; then the read-only preflight must pass
-/// (with the radio's own Time-Out Timer required for `run`), or the radio is
-/// closed again with nothing written. `open` opens the port, DTR and RTS lowered
-/// ([`Ic7300::open`] for the real radio).
+/// (for a command that can transmit, with the radio's own Time-Out Timer at 3 min
+/// and its TX Inhibit OFF), or the radio is closed again with nothing written.
+/// `open` opens the port, DTR and RTS lowered ([`Ic7300::open`] for the real radio).
 pub fn open_for<P: Port>(
     stage: Stage,
     action: Action,
@@ -120,7 +130,7 @@ pub fn open_for<P: Port>(
 ) -> Result<Ic7300<P>> {
     check(stage, action, power_watts)?;
     let mut rig = open()?;
-    let report = civ::preflight::preflight(&mut rig, action == Action::Run);
+    let report = civ::preflight::preflight(&mut rig, action.purpose());
     for line in report.to_string().lines() {
         log::info!("preflight: {line}");
     }
@@ -199,11 +209,16 @@ mod tests {
     const ACTIONS: [Action; 4] = [Action::Setup, Action::Tune, Action::Cw, Action::Run];
 
     fn mock(menu: Menu) -> MockRadio {
-        MockRadio::new(MockConfig {
+        mock_with(|c| c.menu = menu)
+    }
+
+    fn mock_with(change: impl FnOnce(&mut MockConfig)) -> MockRadio {
+        let mut cfg = MockConfig {
             time_scale: 100.0,
-            menu,
             ..MockConfig::default()
-        })
+        };
+        change(&mut cfg);
+        MockRadio::new(cfg)
     }
 
     /// [`open_for`] on `radio`; whether the port was opened.
@@ -247,26 +262,35 @@ mod tests {
 
     #[test]
     fn nothing_is_written_after_a_failed_preflight() {
-        type Change = fn(&mut Menu);
-        let cases: [(&str, Change); 4] = [
-            ("USB SEND", |m| m.usb_send = 0x01),
-            ("USB Keying (CW)", |m| m.usb_keying_cw = 0x02),
-            ("USB Keying (RTTY)", |m| m.usb_keying_rtty = 0x01),
-            ("Time-Out Timer (CI-V)", |m| m.time_out_timer = 0x00),
+        type Change = fn(&mut MockConfig);
+        let cases: [(&str, Change); 12] = [
+            ("USB SEND", |c| c.menu.usb_send = 0x01),
+            ("USB Keying (CW)", |c| c.menu.usb_keying_cw = 0x02),
+            ("USB Keying (RTTY)", |c| c.menu.usb_keying_rtty = 0x01),
+            ("Time-Out Timer (CI-V)", |c| c.menu.time_out_timer = 0x00),
+            ("Time-Out Timer (CI-V)", |c| c.menu.time_out_timer = 0x05),
+            ("VOX", |c| c.menu.vox = 0x01),
+            ("PTT Start (tuner)", |c| c.menu.ptt_tune = 0x01),
+            ("TX Inhibit", |c| c.tx_inhibit = true),
+            ("CI-V USB port", |c| c.menu.civ_usb_port = 0x00),
+            ("keyer dot/dash ratio", |c| c.menu.keyer_ratio = 0x33),
+            ("scope data output", |c| c.menu.scope_data_output = 0x01),
+            ("USB SEND", |c| c.menu.usb_send = 0x02),
         ];
         for (name, change) in cases {
-            let mut menu = Menu::default();
-            change(&mut menu);
-            let radio = mock(menu);
-            // `run`: the Time-Out Timer is required too.
-            let (r, opened) = open(&radio, Stage::Done, Action::Run, 40);
-            let e = r
-                .err()
-                .unwrap_or_else(|| panic!("{name}: preflight passed"));
-            assert!(opened && e.to_string().contains(name), "{name}: {e}");
-            let cmds = radio.commands();
-            assert!(cmds.iter().all(|(_, b)| is_read(b)), "{name}: {cmds:02X?}");
-            assert!(radio.report().violations.is_empty());
+            // Every command that can transmit; the stage allows each at 10 W.
+            for action in [Action::Tune, Action::Cw, Action::Run] {
+                let radio = mock_with(change);
+                let (r, opened) = open(&radio, Stage::Done, action, 10);
+                let e = r
+                    .err()
+                    .unwrap_or_else(|| panic!("{name}, {action:?}: preflight passed"));
+                assert!(opened && e.to_string().contains(name), "{name}: {e}");
+                let cmds = radio.commands();
+                assert!(cmds.iter().all(|(_, b)| is_read(b)), "{name}: {cmds:02X?}");
+                let rep = radio.report();
+                assert!(rep.violations.is_empty() && rep.keyed.is_empty() && rep.tunes == 0);
+            }
         }
         // Another radio, or nothing, at the address: refused at the first read.
         let radio = MockRadio::new(MockConfig {
@@ -279,20 +303,41 @@ mod tests {
     }
 
     #[test]
-    fn run_needs_the_radios_time_out_timer_and_the_bench_commands_do_not() {
-        let menu = Menu {
-            time_out_timer: 0x00,
-            ..Menu::default()
-        };
-        let (r, _) = open(&mock(menu), Stage::Done, Action::Run, 40);
-        assert!(r.is_err(), "run with the Time-Out Timer OFF");
-        // `radio tune` and `radio cw` warn about it; the bench procedure stops on it.
-        for action in [Action::Setup, Action::Tune, Action::Cw] {
-            let (r, _) = open(&mock(menu), Stage::Done, action, 10);
-            assert!(r.is_ok(), "{action:?}");
+    fn every_command_that_can_transmit_needs_the_time_out_timer_at_3_min() {
+        // OFF, 5, 10, 20 and 30 min.
+        for tot in [0x00, 0x02, 0x03, 0x04, 0x05] {
+            let menu = Menu {
+                time_out_timer: tot,
+                ..Menu::default()
+            };
+            for action in [Action::Tune, Action::Cw, Action::Run] {
+                let radio = mock(menu);
+                let (r, opened) = open(&radio, Stage::Done, action, 10);
+                let e = r.err().unwrap_or_else(|| panic!("{action:?} at {tot:02X}"));
+                assert!(opened && e.to_string().contains("Time-Out Timer"), "{e}");
+                assert!(radio.commands().iter().all(|(_, b)| is_read(b)));
+            }
+            // `radio setup` never transmits: it only warns.
+            let (r, _) = open(&mock(menu), Stage::Done, Action::Setup, 10);
+            assert!(r.is_ok(), "setup at {tot:02X}");
         }
-        let (r, _) = open(&mock(Menu::default()), Stage::Done, Action::Run, 40);
-        assert!(r.is_ok());
+        for action in ACTIONS {
+            let (r, _) = open(&mock(Menu::default()), Stage::Done, action, 10);
+            assert!(r.is_ok(), "{action:?} at 3 min");
+        }
+    }
+
+    #[test]
+    fn tx_inhibit_on_refuses_every_command_that_can_transmit_but_setup() {
+        for action in [Action::Tune, Action::Cw, Action::Run] {
+            let radio = mock_with(|c| c.tx_inhibit = true);
+            let (r, _) = open(&radio, Stage::Done, action, 10);
+            assert!(r.is_err(), "{action:?}");
+            assert!(radio.commands().iter().all(|(_, b)| is_read(b)));
+        }
+        // `radio setup` is how a person clears it: only a warning.
+        let radio = mock_with(|c| c.tx_inhibit = true);
+        assert!(open(&radio, Stage::Done, Action::Setup, 10).0.is_ok());
     }
 
     #[test]

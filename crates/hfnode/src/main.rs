@@ -937,7 +937,7 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
         }
         RadioCmd::Check => {
             let mut rig = open_radio(cfg)?;
-            let report = civ::preflight::preflight(&mut rig, false);
+            let report = civ::preflight::preflight(&mut rig, civ::preflight::Purpose::Check);
             print!("{report}");
             println!(
                 "bring-up stage passed (station.commissioned): {}",
