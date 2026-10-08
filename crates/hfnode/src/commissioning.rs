@@ -18,6 +18,7 @@ use civ::ic7300::{Ic7300, Port};
 use civ::preflight::Purpose;
 use serde::Deserialize;
 use std::fmt;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,8 +117,78 @@ pub fn check(stage: Stage, action: Action, power_watts: u32) -> Result<()> {
     Ok(())
 }
 
+/// Most `station.max_key_seconds` that `run` accepts: below the hardware transmit
+/// timer's 60 s (docs/hardware-test-plan.md, step 10), so that the node's own
+/// watchdog acts first and the timer stays the backstop. The bench may set more,
+/// to test that timer.
+pub const RUN_MAX_KEY_SECONDS: u64 = 55;
+
+/// For `run`: `max_key_seconds` below [`RUN_MAX_KEY_SECONDS`], and enough for one
+/// character at `key_speed_wpm` ([`crate::station::shortest_max_key`]), so that
+/// every piece can be keyed whole under the watchdog; and the longest reply the
+/// session builds ([`protocol::MAX_CHUNKS`] chunks of `chunk_chars`) within
+/// [`crate::station::MAX_TRANSMISSION`] at that speed, counting 10 Morse units a
+/// character (PARIS is 50 with its word gap), or the station would refuse it.
+/// Other commands take any value the config allows: the bench sets these low, or
+/// high, on purpose to test the watchdog and the hardware timer.
+pub fn check_keying(action: Action, l: Limits) -> Result<()> {
+    if action != Action::Run {
+        return Ok(());
+    }
+    let (secs, wpm) = (l.max_key_seconds, l.key_speed_wpm);
+    if secs > RUN_MAX_KEY_SECONDS {
+        bail!(
+            "station.max_key_seconds is {secs}: `run` needs {RUN_MAX_KEY_SECONDS} or less, \
+             below the hardware transmit timer (docs/hardware-test-plan.md, step 10)"
+        );
+    }
+    let least = crate::station::shortest_max_key(wpm).as_secs_f32().ceil() as u64;
+    if secs < least {
+        bail!(
+            "station.max_key_seconds is {secs}: at {wpm} wpm `run` needs at least {least}, \
+             or one character keyed would outlast the watchdog"
+        );
+    }
+    let dot = Duration::from_millis(1200) / wpm.max(1);
+    let longest = dot * (protocol::MAX_CHUNKS * l.chunk_chars * 10) as u32;
+    let limit = crate::station::MAX_TRANSMISSION;
+    if longest > limit {
+        bail!(
+            "station.chunk_chars {} at {wpm} wpm: the longest reply ({} chunks) would key for \
+             about {:.0} min, more than the {:.0} min one transmission may take; lower \
+             chunk_chars or raise key_speed_wpm",
+            l.chunk_chars,
+            protocol::MAX_CHUNKS,
+            longest.as_secs_f32() / 60.0,
+            limit.as_secs_f32() / 60.0
+        );
+    }
+    Ok(())
+}
+
+/// The `[station]` settings [`open_for`] checks before it opens the port.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub power_watts: u32,
+    pub max_key_seconds: u64,
+    pub key_speed_wpm: u32,
+    pub chunk_chars: usize,
+}
+
+impl Limits {
+    pub fn of(s: &crate::config::Station) -> Self {
+        Self {
+            power_watts: s.power_watts,
+            max_key_seconds: s.max_key_seconds,
+            key_speed_wpm: s.key_speed_wpm,
+            chunk_chars: s.chunk_chars,
+        }
+    }
+}
+
 /// Open the radio for `action`, a command that writes to it: the bring-up stage
-/// must allow the command, checked before `open` is called, so that a refused
+/// and, for `run`, the keying limit ([`check_keying`]) must allow the command,
+/// checked before `open` is called, so that a refused
 /// command opens no port and sends nothing; then the read-only preflight must pass
 /// (for a command that can transmit, with the radio's own Time-Out Timer at 3 min
 /// and its TX Inhibit OFF), or the radio is closed again with nothing written.
@@ -125,10 +196,11 @@ pub fn check(stage: Stage, action: Action, power_watts: u32) -> Result<()> {
 pub fn open_for<P: Port>(
     stage: Stage,
     action: Action,
-    power_watts: u32,
+    limits: Limits,
     open: impl FnOnce() -> Result<Ic7300<P>>,
 ) -> Result<Ic7300<P>> {
-    check(stage, action, power_watts)?;
+    check(stage, action, limits.power_watts)?;
+    check_keying(action, limits)?;
     let mut rig = open()?;
     let report = civ::preflight::preflight(&mut rig, action.purpose());
     for line in report.to_string().lines() {
@@ -169,6 +241,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn run_keeps_the_watchdog_below_the_hardware_timer_and_above_one_character() {
+        // The safety audit's K14: up to 120 s was accepted, and nothing checked that
+        // one character fits under the watchdog.
+        let limits = |max_key_seconds, key_speed_wpm, chunk_chars| Limits {
+            power_watts: 40,
+            max_key_seconds,
+            key_speed_wpm,
+            chunk_chars,
+        };
+        for (secs, wpm, ok) in [
+            (45, 18, true),
+            (55, 18, true),
+            (56, 18, false),
+            (120, 18, false),
+            (5, 18, true),
+            (4, 18, false),
+            (8, 6, false),
+            (9, 6, true),
+        ] {
+            assert_eq!(
+                check_keying(Action::Run, limits(secs, wpm, 30)).is_ok(),
+                ok,
+                "{secs} s at {wpm} wpm"
+            );
+        }
+        // The longest reply within the 30 minutes of one transmission (K13): 26
+        // chunks of 60 characters at 11 wpm or faster.
+        assert!(check_keying(Action::Run, limits(45, 11, 60)).is_ok());
+        assert!(check_keying(Action::Run, limits(45, 10, 60)).is_err());
+        assert!(check_keying(Action::Run, limits(45, 6, 34)).is_ok());
+        assert!(check_keying(Action::Run, limits(45, 6, 35)).is_err());
+        // The bench tests the watchdog and the hardware timer with values outside.
+        for action in [Action::Setup, Action::Tune, Action::Cw] {
+            assert!(check_keying(action, limits(120, 6, 60)).is_ok());
+            assert!(check_keying(action, limits(1, 6, 60)).is_ok());
+        }
+        // Refused before the port is opened.
+        let radio = MockRadio::new(MockConfig::default());
+        let limits = limits(60, 18, 60);
+        let mut opened = false;
+        let Err(e) = open_for(Stage::Done, Action::Run, limits, || {
+            opened = true;
+            Ok(Ic7300::with_port(radio.port(), 0x94))
+        }) else {
+            panic!("run opened with max_key_seconds 60");
+        };
+        assert!(e.to_string().contains("hardware transmit timer"), "{e}");
+        assert!(!opened);
     }
 
     #[test]
@@ -229,7 +352,13 @@ mod tests {
         watts: u32,
     ) -> (Result<Ic7300<MockPort>>, bool) {
         let mut opened = false;
-        let r = open_for(stage, action, watts, || {
+        let limits = Limits {
+            power_watts: watts,
+            max_key_seconds: 45,
+            key_speed_wpm: 18,
+            chunk_chars: 60,
+        };
+        let r = open_for(stage, action, limits, || {
             opened = true;
             Ok(Ic7300::with_port(radio.port(), 0x94))
         });

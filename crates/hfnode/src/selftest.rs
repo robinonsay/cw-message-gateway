@@ -1622,7 +1622,8 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
     // As `hfnode run` opens the radio, on a station past every bring-up stage: the
     // read-only preflight, with the radio's Time-Out Timer at 3 min and its TX
     // Inhibit OFF required, before anything is written.
-    let opened = commissioning::open_for(Stage::Done, Action::Run, cfg.station.power_watts, || {
+    let limits = commissioning::Limits::of(&cfg.station);
+    let opened = commissioning::open_for(Stage::Done, Action::Run, limits, || {
         Ok(Ic7300::with_port(radio.port(), cfg.station.civ_address))
     });
     let inner = match (opened, s.expect.refused) {

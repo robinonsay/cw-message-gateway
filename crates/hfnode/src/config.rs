@@ -933,6 +933,11 @@ impl Config {
         if s.max_key_seconds == 0 || s.max_key_seconds > 120 {
             bail!("station.max_key_seconds must be 1-120");
         }
+        // Each chunk is read back and acknowledged on its own: at least a few words,
+        // and at most two keyer commands (17 takes 30 characters, p. 19-13).
+        if !(10..=60).contains(&s.chunk_chars) {
+            bail!("station.chunk_chars must be 10-60");
+        }
         if !(1.1..=3.0).contains(&s.swr_limit) {
             bail!("station.swr_limit must be between 1.1 and 3.0");
         }
@@ -1367,6 +1372,16 @@ mod tests {
         let mut c = cfg;
         c.station.rig = RigKind::Ic7300;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn chunk_chars_is_bounded() {
+        // The safety audit's K13: it was not checked at all.
+        for (chars, ok) in [(0, false), (9, false), (10, true), (60, true), (61, false)] {
+            let mut cfg = example();
+            cfg.station.chunk_chars = chars;
+            assert_eq!(cfg.validate().is_ok(), ok, "{chars}");
+        }
     }
 
     #[test]

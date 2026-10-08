@@ -161,10 +161,8 @@ impl StationConfig {
             // A quarter of the set power: well clear of key-up (0) and of the
             // CW envelope's rise and fall.
             swr_min_po: (c.power_watts as f32 * 0.25).max(2.0),
-            // 10 dots: 3 dots more than a word gap. At most 2 s (at 6 wpm), which
-            // the 3 s stuck margin covers.
-            break_in_delay_dots: 10.0,
-            stuck_margin: Duration::from_secs(3),
+            break_in_delay_dots: BREAK_IN_DELAY_DOTS,
+            stuck_margin: STUCK_MARGIN,
             // The manual's tuner takes "2~3 seconds" (p. 11-2), and "15 seconds
             // (maximum)" (p. 16-3, manual text line 8119): leave room above that.
             tune_timeout: Duration::from_secs(20),
@@ -178,6 +176,23 @@ impl StationConfig {
             radio_wait: Duration::from_secs(10),
         }
     }
+}
+
+/// The semi break-in delay the node sets, in dots: 3 dots more than a word gap. At
+/// most 2 s (at 6 wpm), which [`STUCK_MARGIN`] covers.
+pub const BREAK_IN_DELAY_DOTS: f32 = 10.0;
+
+/// Time allowed past a piece's keying time and break-in delay before the radio is
+/// taken to be stuck on transmit.
+pub const STUCK_MARGIN: Duration = Duration::from_secs(3);
+
+/// The least `max_key` a piece of one character fits under at `wpm` (a zero, the
+/// longest there is), with the break-in delay and stuck margin the node uses: below
+/// it the watchdog cuts off pieces that cannot be split further
+/// ([`Station::pieces`]).
+pub fn shortest_max_key(wpm: u32) -> Duration {
+    let dot = Duration::from_millis(1200) / wpm.max(1);
+    dot.mul_f32(cw::units("0") as f32 + BREAK_IN_DELAY_DOTS) + STUCK_MARGIN
 }
 
 /// The Po meter reading (percent of full output, 100 W) that stops a piece at
@@ -202,8 +217,9 @@ pub fn duty_for_power(watts: u32) -> f32 {
 
 /// The most keying time one transmission may take: the longest reply the session
 /// builds at the default settings (26 chunks of 60 characters) is about 18 minutes
-/// at 18 wpm.
-pub const MAX_TRANSMISSION: Duration = Duration::from_secs(20 * 60);
+/// at 18 wpm, and `run` checks that it fits at the configured speed
+/// ([`crate::commissioning::check_keying`]).
+pub const MAX_TRANSMISSION: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, PartialEq)]
 pub enum TxError {

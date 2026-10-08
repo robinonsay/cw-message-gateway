@@ -429,8 +429,12 @@ impl<P: Port> Ic7300<P> {
         self.drain()?;
         // Once anything may have gone out, a failure can leave a reply on its way.
         self.resync = true;
+        // Not followed by flush(): on a serial port that is tcdrain (FlushFileBuffers on
+        // Windows), which has no timeout, and a port that never drains would hold the
+        // radio's lock for good, against the watchdog and the stop signal (the safety
+        // audit's K4). The write has the port's timeout, and what it took goes out
+        // without waiting for it here.
         self.port.write_all(&out)?;
-        self.port.flush()?;
         let sent = Instant::now();
         log::trace!("CI-V > {out:02X?}");
         let deadline = sent + self.timeout;
@@ -886,7 +890,8 @@ mod tests {
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            // A real port's flush waits, with no timeout, for the bytes to go out.
+            panic!("the driver must not wait for the port to drain (the safety audit's K4)");
         }
     }
 

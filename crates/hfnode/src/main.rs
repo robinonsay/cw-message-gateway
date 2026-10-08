@@ -10,7 +10,7 @@ use hfnode::handheld::{self, Handheld};
 use hfnode::inbox::Inbox;
 use hfnode::keyer;
 use hfnode::session::{Outcome, Services};
-use hfnode::station::{check_state_dir, InhibitLatch, Station, StationConfig};
+use hfnode::station::{check_state_dir, InhibitLatch, Station, StationConfig, INHIBIT_FILE};
 use hfnode::storm::StormHold;
 use hfnode::{alert, audio, gateway, node, selftest};
 use protocol::sanitize;
@@ -458,9 +458,14 @@ fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
     let Some((radio, inhibit)) = guarded else {
         return exit(130);
     };
-    let (_held, code) = stop_radio(&radio, &inhibit);
+    let (_held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
     exit(code)
 }
+
+/// Longest a stop signal waits for a radio another call is still using: no call to
+/// a radio that answers takes this long (the CI-V driver gives up on a reply after
+/// half a second, and on a link that stays busy after four times that).
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// Take the radio, stop the keyer and confirm receive. The radio may first finish
 /// the text already in its keyer (at most 30 characters). Returns the radio, still
@@ -469,13 +474,23 @@ fn stop_guarded<T>(exit: impl FnOnce(i32) -> T) -> T {
 /// A stop that cannot confirm receive latches the transmit inhibit, so that the node
 /// transmits nothing after a restart until someone has looked at the radio: the
 /// process exiting here is the one thing that cannot be taken back (the safety
-/// audit's KB-2(iii) for the keyer box, K5 for the IC-7300).
+/// audit's KB-2(iii) for the keyer box, K5 for the IC-7300). So does one that cannot
+/// get the radio within `wait`, from a call to it that has not returned (a serial
+/// port that never drains, the audit's K4): it exits 1 without it.
 fn stop_radio<'a>(
     radio: &'a Mutex<DynRig>,
     inhibit: &InhibitLatch,
-) -> (MutexGuard<'a, DynRig>, i32) {
+    wait: Duration,
+) -> (Option<MutexGuard<'a, DynRig>>, i32) {
     log::warn!("stop requested: stopping the keyer and forcing receive");
-    let mut rig = radio.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut rig) = hfnode::station::lock_within(radio, wait) else {
+        inhibit.latch(&format!(
+            "stop requested, and the radio could not be reached for {wait:?} to put it on \
+             receive (a call to it did not return)"
+        ));
+        log::error!("radio NOT confirmed on receive; check it before restarting");
+        return (None, 1);
+    };
     let code = match hfnode::station::force_receive_or_latch(&mut *rig, inhibit) {
         Ok(()) => {
             log::info!("radio confirmed on receive; exiting");
@@ -486,7 +501,7 @@ fn stop_radio<'a>(
             1
         }
     };
-    (rig, code)
+    (Some(rig), code)
 }
 
 fn keygen(out: &Path) -> Result<()> {
@@ -884,7 +899,7 @@ fn open_for(cfg: &Config, action: Action) -> Result<civ::ic7300::Ic7300> {
     commissioning::open_for(
         cfg.station.commissioned,
         action,
-        cfg.station.power_watts,
+        commissioning::Limits::of(&cfg.station),
         || open_radio(cfg),
     )
 }
@@ -960,7 +975,10 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             };
             // The health log and any transmit inhibit are written there.
             check_state_dir(&cfg.state_dir)?;
-            let rig = open_for(cfg, needs)?;
+            let mut rig = open_for(cfg, needs)?;
+            if matches!(action, RadioCmd::Setup) {
+                release_tx_inhibit(&mut rig, &cfg.state_dir)?;
+            }
             let mut st = Station::new(
                 rig,
                 StationConfig::from_config(&cfg.station),
@@ -987,6 +1005,32 @@ fn radio(cfg: &Config, action: RadioCmd) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// `radio setup`: turn the radio's TX Inhibit (16 66) off again, which the node
+/// turns on when it cannot confirm the radio back on receive
+/// ([`civ::Rig::inhibit_transmit`]), but only once [`INHIBIT_FILE`] is gone from the
+/// state directory: someone has checked the radio and removed it. Until then
+/// nothing is written, and every command that can transmit is refused by the
+/// preflight as well as by the file.
+fn release_tx_inhibit<P: civ::ic7300::Port>(
+    rig: &mut civ::ic7300::Ic7300<P>,
+    state_dir: &Path,
+) -> Result<()> {
+    if !rig.tx_inhibit()? {
+        return Ok(());
+    }
+    if InhibitLatch::in_dir(state_dir).is_set() {
+        log::warn!(
+            "the radio's TX Inhibit is ON, and {INHIBIT_FILE} is in {}: left ON until the \
+             radio has been checked and the file removed",
+            state_dir.display()
+        );
+        return Ok(());
+    }
+    rig.release_tx_inhibit()?;
+    log::warn!("the radio's TX Inhibit was ON (the node turns it on when it cannot confirm receive): turned OFF");
     Ok(())
 }
 
@@ -2059,7 +2103,7 @@ key_file = '{}'
         let dir = tempfile::tempdir().unwrap();
         let inhibit = InhibitLatch::in_dir(dir.path());
         let radio: Radio = Arc::new(Mutex::new(keying()));
-        let (held, code) = stop_radio(&radio, &inhibit);
+        let (held, code) = stop_radio(&radio, &inhibit, STOP_WAIT);
         assert_eq!(code, 0);
         drop(held);
         assert!(!radio.lock().unwrap().is_transmitting().unwrap());
@@ -2078,13 +2122,55 @@ key_file = '{}'
         let mut sim = keying();
         sim.tx_jammed = true;
         let radio: Radio = Arc::new(Mutex::new(sim));
-        assert_eq!(stop_radio(&radio, &inhibit).1, 1);
+        assert_eq!(stop_radio(&radio, &inhibit, STOP_WAIT).1, 1);
         assert!(inhibit.is_set());
         let file = dir.path().join(hfnode::station::INHIBIT_FILE);
         let why = std::fs::read_to_string(&file).expect("inhibit file written");
         assert!(why.contains("not confirmed on receive"), "{why}");
         // A node starting in that state transmits nothing.
         assert!(InhibitLatch::in_dir(dir.path()).is_set());
+    }
+
+    #[test]
+    fn a_stop_that_cannot_reach_the_radio_inhibits_transmitting() {
+        // A call to the radio that never returns (a serial port that never drains)
+        // holds it: the stop must not wait for it for ever, and must leave the
+        // inhibit behind (the safety audit's K4).
+        let dir = tempfile::tempdir().unwrap();
+        let inhibit = InhibitLatch::in_dir(dir.path());
+        let radio: Radio = Arc::new(Mutex::new(keying()));
+        let busy = radio.lock().unwrap();
+        let t0 = Instant::now();
+        let (held, code) = stop_radio(&radio, &inhibit, Duration::from_millis(200));
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(held.is_none());
+        assert_eq!(code, 1);
+        drop(busy);
+        let why = std::fs::read_to_string(dir.path().join(hfnode::station::INHIBIT_FILE))
+            .expect("inhibit file written");
+        assert!(why.contains("could not be reached"), "{why}");
+    }
+
+    #[test]
+    fn radio_setup_turns_the_radios_tx_inhibit_off_only_once_the_file_is_gone() {
+        use civ::mock::{MockConfig, MockRadio};
+        let dir = tempfile::tempdir().unwrap();
+        let radio = MockRadio::new(MockConfig {
+            tx_inhibit: true,
+            ..MockConfig::default()
+        });
+        let mut rig = civ::ic7300::Ic7300::with_port(radio.port(), 0x94);
+        InhibitLatch::in_dir(dir.path()).latch("stuck");
+        release_tx_inhibit(&mut rig, dir.path()).unwrap();
+        assert!(
+            rig.tx_inhibit().unwrap(),
+            "left on while tx-inhibited is there"
+        );
+        std::fs::remove_file(dir.path().join(INHIBIT_FILE)).unwrap();
+        release_tx_inhibit(&mut rig, dir.path()).unwrap();
+        assert!(!rig.tx_inhibit().unwrap());
+        let violations = radio.report().violations;
+        assert!(violations.is_empty(), "{violations:?}");
     }
 
     #[test]
