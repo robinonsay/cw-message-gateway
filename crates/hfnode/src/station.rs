@@ -1978,11 +1978,16 @@ impl<R: Rig + 'static> Station<R> {
             Ok(()) if meters => self.watch_piece(at, keying, stuck_at),
             Ok(()) => self.watch_unmetered(at, keying, stuck_at),
         };
+        // Seen back on receive: the keying is over. Cleared before the duty file is
+        // written below, which a busy disk can hold up for longer than the watchdog's
+        // limit: timed as keying, a good piece was forced to receive and the
+        // transmission stopped before its next one.
+        if watched.is_ok() {
+            *lock(&self.keying_since) = None;
+        }
         // All of it, also if it was cut off: a lost reply may still have keyed it.
         self.record_carrier(carrier);
-        watched?;
-        *lock(&self.keying_since) = None;
-        Ok(())
+        watched
     }
 
     /// Watch a piece the keyer accepted at `sent`, on a rig without meters: the
@@ -3493,6 +3498,47 @@ mod tests {
         let rig = st.rig();
         let r = rig.lock().unwrap();
         assert!(r.hold_up_in_hang.is_none(), "the hold-up happened");
+        assert_eq!(r.stops, 0, "receive was not forced");
+    }
+
+    /// A piece seen back on receive has stopped keying, however long the disk then
+    /// takes to write the duty file. Timed as keying, a write held up past
+    /// `max_key` had the watchdog force receive after a good piece, and the
+    /// transmission stopped before its next piece, locked out (Windows CI:
+    /// `pending-timeout` and `lost-result`, cut before their read-back's `K`).
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_duty_file_write_after_a_piece_is_not_keying() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg();
+        c.max_key = Duration::from_secs(1);
+        let mut st = Station::new(
+            Radio::new(fast_rig()),
+            c,
+            Some(dir.path().join("health.csv")),
+        );
+        st.configure().unwrap();
+        // The next write of the duty file waits until something reads it: a disk
+        // that holds it up for two seconds, twice `max_key`.
+        let tmp = dir.path().join(DUTY_FILE).with_extension("tmp");
+        let made = std::process::Command::new("mkfifo").arg(&tmp).status();
+        assert!(made.unwrap().success(), "mkfifo {}", tmp.display());
+        let reader = {
+            let tmp = tmp.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(2));
+                std::fs::read(tmp)
+            })
+        };
+        let sent = st.transmit(&tx(&["E", "E"]));
+        // Whatever happened, let the reader go: a pipe still there takes a writer.
+        let _ = std::fs::OpenOptions::new().write(true).open(&tmp);
+        let written = reader.join().unwrap().unwrap();
+        assert!(!written.is_empty(), "the duty file went through the pipe");
+        assert_eq!(sent, Ok(()));
+        let rig = st.rig();
+        let r = rig.lock().unwrap();
+        assert_eq!(r.sim.sent, ["E", "E"]);
         assert_eq!(r.stops, 0, "receive was not forced");
     }
 
