@@ -724,7 +724,8 @@ Fastest first:
 3. **The box's link timeout** (2 s) and **USB going away**.
 4. **The box's PTT cap.** It refuses an `MCW` whose PTT time is not under 60 s, and
    the PTT down for 60 s trips the box, both by its timeline and by its own watch
-   on the PTT pin. The cap is `PTT_MS` in crates/keyer-core/src/lib.rs. The tests
+   on the PTT pin, which holds to the box's 60 s whatever limits the keyer was
+   given. The cap is `PTT_MS` in crates/keyer-core/src/lib.rs. The tests
    that fail without it are `the_ptt_limit_trips_the_box_whatever_holds_the_run_open`
    (crates/keyer-core/src/keyer/tests.rs) and
    `the_ptt_pin_guard_trips_at_the_ptt_limit_whatever_the_keyer_says`

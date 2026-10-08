@@ -534,9 +534,9 @@ fn mcw_holds_the_ptt_pin_and_keys_the_tone_pin() {
     assert!(b.replies().contains(&"OK MCW".to_string()));
 }
 
-/// The pin guard on the PTT: the keyer's timeline is wrong (limits made for the
-/// test let it hold the PTT for two minutes), but the loop's own watch on the PTT
-/// pin trips the box at the box's PTT limit.
+/// The pin guard on the PTT, as `Control::new` builds it: the keyer's timeline is
+/// wrong (limits made for the test let it hold the PTT for two minutes), but the
+/// loop's own watch on the PTT pin trips the box at the box's PTT limit.
 #[test]
 fn the_ptt_pin_guard_trips_at_the_ptt_limit_whatever_the_keyer_says() {
     let loose = Limits {
@@ -547,7 +547,6 @@ fn the_ptt_pin_guard_trips_at_the_ptt_limit_whatever_the_keyer_says() {
     let mut b = Board::new();
     let k = Keyer::new(loose, Boot::Power, 0);
     let mut c = Control::new(k, &b);
-    c.ptt_guard = PinGuard::ptt(0, limits::PTT_MS);
     c.pass(&mut b);
     b.send(1, "TEST ARM");
     b.send(2, "MCW 20 E");
