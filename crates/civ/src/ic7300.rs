@@ -136,11 +136,6 @@ mod cmd {
     /// codes; "“FF” stops sending CW messages" (p. 19-13).
     pub const SEND_CW: &[u8] = &[0x17];
     pub const STOP_CW: u8 = 0xFF;
-    /// 16 66: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; manual
-    /// text lines 8788-8789). "When the exciter tries to transmit, “TX Inhibit” is
-    /// displayed and cannot transmit" (p. 13-14, lines 7500-7506; described there
-    /// for the IC-PW2's transmitter lockout, and not yet checked on the radio).
-    pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
     /// 1C 00: "Send/read transceiver's status" "00" RX, "01" TX (p. 19-7).
     pub const TX_STATUS: &[u8] = &[0x1C, 0x00];
     /// 1C 01: "00=Send/read the antenna tuner OFF, 01=Send/read the antenna tuner ON,
@@ -149,8 +144,11 @@ mod cmd {
     pub const TUNER_TUNE: u8 = 0x02;
     /// 16 66: "Send/read the TX Inhibit function (00=OFF, 01=ON)" (p. 19-4; lines
     /// 8788-8789). While it is ON, "When the exciter tries to transmit, “TX
-    /// Inhibit” is displayed and cannot transmit" (p. 13-6; lines 7505-7506). A
-    /// function, not a menu item: the preflight reads it.
+    /// Inhibit” is displayed and cannot transmit" (p. 13-6; lines 7505-7506;
+    /// described there for the IC-PW2's transmitter lockout, and not yet checked on
+    /// the radio). A function, not a menu item: the preflight reads it, the node
+    /// turns it on when it cannot confirm receive ([`Rig::inhibit_transmit`]), and
+    /// only `hfnode radio setup` turns it off.
     pub const TX_INHIBIT: &[u8] = &[0x16, 0x66];
 
     // Read only. Each of these is sent without data, which reads the item; none of
