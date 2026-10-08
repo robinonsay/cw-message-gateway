@@ -1420,6 +1420,25 @@ mod tests {
     }
 
     #[test]
+    fn the_keying_watchdog_is_45_seconds_unless_set() {
+        // The bring-up (docs/hardware-test-plan.md) and the audit assume the
+        // watchdog forces receive after 45 s of keying: in the example, and when
+        // the line is left out.
+        assert_eq!(example().station.max_key_seconds, 45);
+        let text = include_str!("../../../hfnode.example.toml")
+            .lines()
+            .filter(|l| !l.starts_with("max_key_seconds"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.station.max_key_seconds, 45);
+        assert_eq!(
+            crate::station::StationConfig::from_config(&c.station).max_key,
+            std::time::Duration::from_secs(45)
+        );
+    }
+
+    #[test]
     fn rejects_frequency_outside_tx_coverage() {
         for (hz, ok) in [
             (7_030_000, true),

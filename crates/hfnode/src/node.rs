@@ -574,8 +574,9 @@ fn run_with<R: Rig + 'static>(
     let mut overtime: Option<&str> = None;
     let check_secs = u64::from(cfg.schedule.check_minutes) * 60;
     let retune_secs = u64::from(cfg.schedule.retune_minutes) * 60;
-    // Clock times of the last tune (whatever came of it, once the tuner started)
-    // and of the last time the radio was set up and checked.
+    // Clock times of the last tune that finished (the tuner matched, or could not
+    // and locked the node out; not one that failed: see `Station::tuned`) and of
+    // the last time the radio was set up and checked.
     let mut tuned_at: Option<u64> = None;
     let mut checked_at = 0;
     // Audio since the decoder last started from its initial speed, or last heard
@@ -630,7 +631,7 @@ fn run_with<R: Rig + 'static>(
             if let Err(e) = station.open_window() {
                 log::error!("{e}");
             }
-            (tuned_at, checked_at) = (station.tuner_ran().then(clock), clock());
+            (tuned_at, checked_at) = (station.tuned().then(clock), clock());
             guard.ended(Instant::now(), recovery);
             decoder = decoder_for(cfg);
             speed_age_ms = 0;
@@ -742,8 +743,9 @@ fn run_with<R: Rig + 'static>(
                         if let Err(e) = station.start_window() {
                             log::error!("tune before the reply failed: {e}");
                         }
-                        // A tune that never started is tried again before the next.
-                        tuned_at = station.tuner_ran().then(clock);
+                        // A tune that never started, or failed, is tried again
+                        // before the next.
+                        tuned_at = station.tuned().then(clock);
                     }
                     log::info!("sending: {}", t.text());
                     // Sets the radio up and checks it before keying.
