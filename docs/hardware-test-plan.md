@@ -798,6 +798,27 @@ break-in delay, and the command exits with `radio confirmed on receive; exiting`
 `status` shows `transmitting: false`. This is the stop that Ctrl-C and the start-up
 scripts rely on, on every system; on a Mac or Windows PC it is its first real test.
 
+**Link loss** (added by the safety audit; unattended use needs it passed). The node
+only ever keys text that the radio's own keyer sends, at most 30 characters, and the
+driver refuses to turn transmit on (`1C 00 01`, `crates/civ/src/ic7300.rs:783-788`).
+This shows that the radio ends that text with the computer gone. Still at 6 wpm,
+with `max_key_seconds = 45`, start the same command and `kill -9` hfnode a few
+seconds into the transmission (on Windows, `taskkill /F /IM hfnode.exe`):
+
+```sh
+hfnode radio --config $C cw "0000000000"
+```
+
+Then repeat it, pulling the radio's USB cable a few seconds in instead of killing
+hfnode. Plug the cable back in once the radio is on receive.
+
+**Pass:** each time, the radio stops at the end of those zeros (about 44 s after
+they start), returns to receive after its break-in delay and stays there; `status`
+afterwards shows `transmitting: false`.
+
+**Fail:** the radio goes on transmitting after the zeros end. Turn it off and do not
+continue: unattended use depends on this.
+
 Restore `key_speed_wpm = 18`.
 
 ## Step 8: high-SWR lockout (transmits briefly into a mismatch)
@@ -1156,6 +1177,7 @@ weeks: a slow rise in SWR readings means a connector or the antenna needs attent
 | 5 Tune (`tune`) | | | tune ms: / Po while tuning: |
 | 6 Short CW, SWR | | | node SWR: / radio SWR: |
 | 7 Watchdog | | | stopped after: s |
+| 7 Link loss | | | kill -9: stopped after zeros? / USB cable pulled: stopped after zeros? |
 | 8 SWR lockout (`keying`) | | | load: / node SWR: |
 | 9 Power | | | 10 W: / 25 W: / 40 W: / 50 W: |
 | 10 Hardware timer (`done`) | | | set: s / stopped after: s / TOT returned after: |
