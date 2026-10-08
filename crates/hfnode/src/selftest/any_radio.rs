@@ -746,9 +746,15 @@ pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
                 text: "OK 43 {43} K".into(),
                 expect: Some(done.clone()),
             },
+            // The decoder prints stray characters in a handheld's receive noise
+            // (its squelch is open), and one just before a call can garble it (E + A
+            // = U). Where they fall moves with how long the node took, since the
+            // noise comes back when the radio's timer lets go. A field operator who
+            // gets silence sends the AGN again: the node copies one of the two and
+            // keys nothing for either.
             Step::Unanswered {
                 text: "AGN 44 {44} K".into(),
-                tries: 1,
+                tries: 2,
             },
         ];
         s.expect.keyed = full(&[&read_back, &done]);
