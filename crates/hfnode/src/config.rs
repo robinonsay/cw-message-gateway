@@ -122,6 +122,16 @@ pub struct Keyer {
     /// reporting any other is refused (so the box keeps running the firmware whose
     /// UF2 was checked).
     pub firmware_build: Option<String>,
+    /// What the box keys: "key" (the default), a radio's key jack with `CW`; or
+    /// "ptt", an FM handheld's PTT through its headset jack, holding it while it
+    /// keys an MCW tone into the microphone (docs/keyer.md, "A handheld through its
+    /// headset jack").
+    #[serde(default)]
+    pub output: crate::keyer::Output,
+    /// With `output = "ptt"`: the DC voltage measured on the handheld's PTT
+    /// contact, radio on and PTT open (docs/keyer.md, "The cable"). Nothing is
+    /// keyed until it is recorded, and only if it is 2.5-25 V.
+    pub ptt_contact_volts: Option<f32>,
 }
 
 /// A handheld (a Quansheng UV-K1 or UV-K5 v3) running the CW firmware in

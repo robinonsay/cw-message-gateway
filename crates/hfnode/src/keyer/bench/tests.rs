@@ -1,6 +1,6 @@
 use super::*;
 use crate::keyer::mock::RadioSettings;
-use crate::keyer::testbench::{bench, radio_secs, tx, SCALE};
+use crate::keyer::testbench::{bench, handheld, radio_secs, tx, SCALE};
 
 #[test]
 fn check_passes_on_a_working_station_and_keys_nothing() {
@@ -191,4 +191,57 @@ fn rx_latches_the_inhibit_when_the_key_is_not_confirmed_open() {
             std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("{name}: no inhibit latched"));
         assert!(latched.contains(why), "{name}: {latched}");
     }
+}
+
+// An FM handheld on the box's PTT.
+
+#[test]
+fn check_on_a_handheld_reports_the_ptt_line() {
+    let b = handheld(|_| {});
+    let rig = b.station.rig();
+    let (report, ok) = check(&mut lock(&rig), -65.0);
+    assert!(ok, "{report}");
+    assert!(report.contains("PTT limit 60 s"), "{report}");
+    assert!(report.contains("PTT line high"), "{report}");
+    assert_eq!(b.cw_lines(), 0);
+}
+
+#[test]
+fn check_fails_with_the_handheld_off() {
+    let b = handheld(|r| r.off = true);
+    let rig = b.station.rig();
+    let (report, ok) = check(&mut lock(&rig), -65.0);
+    assert!(!ok, "{report}");
+    assert!(report.contains("PTT line LOW"), "{report}");
+    assert!(report.contains("squelch must be open"), "{report}");
+}
+
+#[test]
+fn key_reports_a_handheld_keyed() {
+    let mut b = handheld(|_| {});
+    let j = key(&mut b.station, "DE N0DE").unwrap().unwrap();
+    assert!(j.heard, "{j}");
+    assert!(j.to_string().starts_with("keyed"), "{j}");
+}
+
+#[test]
+fn hangtest_on_a_handheld_sees_the_watchdog_release_the_ptt() {
+    let mut b = handheld(|_| {});
+    let rep = hangtest(&mut b.station, "DE N0DE", SCALE).unwrap();
+    assert!(rep.passed, "{rep:?}");
+    // The lead, then the watchdog's 0.5 s from the first element.
+    assert!(rep.longest >= Duration::from_millis(800), "{rep:?}");
+    let st = b.keyer_box.now();
+    assert_eq!(st.resets, 1);
+    assert!(st.lines.iter().any(|l| l.contains("MCW 20 DE N0DE")));
+}
+
+#[test]
+fn stucktest_on_a_handheld_sees_the_key_down_limit_trip_the_box() {
+    let mut b = handheld(|_| {});
+    let rep = stucktest(&mut b.station, "DE N0DE", SCALE).unwrap();
+    assert!(rep.passed, "{rep:?}");
+    // The lead, then the tone held for the 1 s limit.
+    assert!(rep.longest >= Duration::from_millis(1300), "{rep:?}");
+    assert_eq!(b.keyer_box.now().trip(), Trip::Down);
 }

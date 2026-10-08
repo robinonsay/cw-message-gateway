@@ -11,6 +11,9 @@ enum Call {
     Read,
     Write,
     Key(bool),
+    Tone(bool),
+    Ptt(bool),
+    Line,
     Led(bool),
     Feed,
 }
@@ -25,7 +28,14 @@ struct Board {
     /// How many bytes `usb_write` takes per call; `usize::MAX` for all.
     room: usize,
     key: bool,
+    tone: bool,
+    ptt: bool,
     led: bool,
+    /// The handheld on the PTT: the line reads low while the box's PTT is down,
+    /// or while `held` (something else holds it); high otherwise.
+    held: bool,
+    /// The box's PTT does not reach the radio: the line stays high.
+    open: bool,
     calls: std::cell::RefCell<Vec<Call>>,
 }
 
@@ -38,7 +48,11 @@ impl Board {
             tx: Vec::new(),
             room: usize::MAX,
             key: false,
+            tone: false,
+            ptt: false,
             led: false,
+            held: false,
+            open: false,
             calls: Default::default(),
         }
     }
@@ -97,6 +111,18 @@ impl Hardware for Board {
     fn set_key(&mut self, down: bool) {
         self.call(Call::Key(down));
         self.key = down;
+    }
+    fn set_tone(&mut self, on: bool) {
+        self.call(Call::Tone(on));
+        self.tone = on;
+    }
+    fn set_ptt(&mut self, down: bool) {
+        self.call(Call::Ptt(down));
+        self.ptt = down;
+    }
+    fn ptt_line(&mut self) -> bool {
+        self.call(Call::Line);
+        !(self.held || (self.ptt && !self.open))
     }
     fn set_led(&mut self, on: bool) {
         self.call(Call::Led(on));
@@ -263,12 +289,28 @@ fn each_pass_feeds_the_watchdog_once_after_driving_the_pin() {
             .iter()
             .position(|c| matches!(c, Call::Led(_)))
             .expect("LED driven");
+        let tone = calls
+            .iter()
+            .position(|c| matches!(c, Call::Tone(_)))
+            .expect("tone driven");
+        let ptt = calls
+            .iter()
+            .position(|c| matches!(c, Call::Ptt(_)))
+            .expect("PTT driven");
+        let line = calls.iter().position(|&c| c == Call::Line).unwrap();
         let read = calls.iter().position(|&c| c == Call::Read).unwrap();
-        assert!(read < key && key < led, "{calls:?}");
-        assert_eq!(
-            calls.iter().filter(|c| matches!(c, Call::Key(_))).count(),
-            1
+        assert!(line < read, "the line is read before the lines: {calls:?}");
+        assert!(
+            read < key && key < tone && tone < ptt && ptt < led,
+            "{calls:?}"
         );
+        for pin in [Call::Key(true), Call::Tone(true), Call::Ptt(true)] {
+            let n = calls
+                .iter()
+                .filter(|&&c| core::mem::discriminant(&c) == core::mem::discriminant(&pin))
+                .count();
+            assert_eq!(n, 1, "{pin:?} once: {calls:?}");
+        }
     }
     assert_eq!(b.replies(), vec!["OK CW".to_string()]);
 }
@@ -376,7 +418,7 @@ fn replies_wait_for_room_in_the_usb_buffer() {
     }
     let r = b.replies();
     assert_eq!(r.len(), 1);
-    assert!(r[0].starts_with("OK HELLO 2 "), "{r:?}");
+    assert!(r[0].starts_with("OK HELLO 3 "), "{r:?}");
 }
 
 /// A tripped box flashes its LED; one keying shows the key.
@@ -412,4 +454,227 @@ fn the_led_shows_the_key_and_flashes_when_tripped() {
     }
     assert_eq!(c.keyer().trip(), Trip::Down);
     assert!(flips > 10, "{flips}");
+}
+
+// The PTT, the tone and the PTT line: an FM handheld through its headset jack.
+
+/// A box on a board with the PTT line high (a handheld on, its PTT open).
+fn ptt_rig() -> (Control, Board) {
+    let (mut c, mut b) = rig();
+    c.pass(&mut b);
+    (c, b)
+}
+
+/// Run passes 1 ms apart over `from..=to`, keeping the link alive with `STATUS`
+/// every 250 ms.
+fn run_to(c: &mut Control, b: &mut Board, from: u64, to: u64) {
+    for t in from..=to {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(9, "STATUS");
+        }
+        c.pass(b);
+    }
+}
+
+#[test]
+fn mcw_holds_the_ptt_pin_and_keys_the_tone_pin() {
+    let (mut c, mut b) = ptt_rig();
+    b.send(1, "MCW 20 E");
+    let mut ptt = PinRecord::default();
+    let mut tone = PinRecord::default();
+    let mut led_on = 0;
+    for t in 1..=2000u64 {
+        b.t = t;
+        c.pass(&mut b);
+        ptt.pass(b.ptt);
+        tone.pass(b.tone);
+        assert!(!b.key, "the key line is not used");
+        assert!(!b.tone || b.ptt, "the tone only under the PTT, at {t}");
+        led_on += u64::from(b.led);
+        assert_eq!(
+            c.pins(),
+            Outputs {
+                key: b.key,
+                tone: b.tone,
+                ptt: b.ptt
+            }
+        );
+    }
+    // 500 ms lead, one dot of 60 ms, 200 ms tail.
+    assert_eq!((ptt.longest, tone.longest), (760, 60));
+    assert_eq!(led_on, ptt.total, "the LED shows the PTT");
+    assert_eq!(c.keyer().ended(), Ended::Done);
+    assert!(b.replies().contains(&"OK MCW".to_string()));
+}
+
+/// The pin guard on the PTT: the keyer's timeline is wrong (limits made for the
+/// test let it hold the PTT for two minutes), but the loop's own watch on the PTT
+/// pin trips the box at the box's PTT limit.
+#[test]
+fn the_ptt_pin_guard_trips_at_the_ptt_limit_whatever_the_keyer_says() {
+    let loose = Limits {
+        ptt_ms: 120_000,
+        run_ms: 120_000,
+        ..Limits::BOX
+    };
+    let mut b = Board::new();
+    let k = Keyer::new(loose, Boot::Power, 0);
+    let mut c = Control::new(k, &b);
+    c.ptt_guard = PinGuard::ptt(0, limits::PTT_MS);
+    c.pass(&mut b);
+    b.send(1, "TEST ARM");
+    b.send(2, "MCW 20 E");
+    b.send(3, "TEST HOLD");
+    let mut ptt = PinRecord::default();
+    for t in 1..=70_000u64 {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(9, "STATUS");
+        }
+        c.pass(&mut b);
+        ptt.pass(b.ptt);
+    }
+    assert_eq!(ptt.longest, 60_000, "{} ms", ptt.longest);
+    assert_eq!(c.keyer().trip(), Trip::Pin);
+    assert!(!b.ptt && !b.tone);
+}
+
+/// A slow pass with the tone on trips the box, as with the key; with only the PTT
+/// down (the lead) it does not.
+#[test]
+fn a_slow_pass_trips_with_the_tone_on_but_not_with_the_ptt_alone() {
+    let (mut c, mut b) = ptt_rig();
+    b.send(1, "MCW 5 TTTT");
+    run_to(&mut c, &mut b, 1, 100);
+    assert!(b.ptt && !b.tone);
+    // 50 ms with no pass, in the lead: nothing.
+    b.t = 150;
+    c.pass(&mut b);
+    assert_eq!(c.keyer().trip(), Trip::None);
+    run_to(&mut c, &mut b, 151, 600);
+    assert!(b.ptt && b.tone);
+    b.t = 611;
+    c.pass(&mut b);
+    assert_eq!(c.keyer().trip(), Trip::Slow);
+    assert!(!b.ptt && !b.tone);
+}
+
+/// The PTT line read on each pass reaches the keyer: a PTT that does not take ends
+/// the run, and one still held after the box lets go trips it.
+#[test]
+fn the_line_check_runs_on_the_pins_the_board_reads() {
+    let (mut c, mut b) = ptt_rig();
+    b.open = true;
+    b.send(1, "MCW 20 E");
+    run_to(&mut c, &mut b, 1, 300);
+    assert_eq!(c.keyer().ended(), Ended::Line);
+    assert!(!b.ptt && !b.tone);
+    assert_eq!(c.keyer().trip(), Trip::None);
+    b.open = false;
+    let (mut c, mut b) = ptt_rig();
+    b.send(1, "MCW 20 E");
+    run_to(&mut c, &mut b, 1, 300);
+    b.held = true;
+    run_to(&mut c, &mut b, 301, 1200);
+    assert_eq!(c.keyer().ended(), Ended::Done);
+    assert_eq!(c.keyer().trip(), Trip::Line);
+    // The radio's line is held low before a run: `MCW` is refused.
+    let (mut c, mut b) = ptt_rig();
+    b.held = true;
+    b.send(1, "MCW 20 E");
+    run_to(&mut c, &mut b, 1, 10);
+    assert!(b.replies().contains(&"ERR MCW LINE".to_string()));
+    assert!(!b.ptt);
+}
+
+/// `TEST HANG` in an `MCW` run: the loop stops at the first tone element with
+/// the PTT down and the tone on. If the watchdog does not bite, the loop opens
+/// both `HANG_OPEN_MS` later, or sooner once the tone has been on for the
+/// key-down limit.
+#[test]
+fn a_hang_in_mcw_opens_the_ptt_and_the_tone_if_the_watchdog_does_not_bite() {
+    let (mut c, mut b) = ptt_rig();
+    b.send(1, "MCW 20 T");
+    b.send(2, "TEST ARM");
+    b.send(3, "TEST HANG");
+    let mut fed_after_hang = false;
+    for t in 1..=3000u64 {
+        b.t = t;
+        c.pass(&mut b);
+        let calls = b.take_calls();
+        // `MCW` taken on the pass at 1: the lead ends at 501.
+        if t >= 501 {
+            assert!(c.hung(), "at {t}");
+            fed_after_hang |= calls.contains(&Call::Feed);
+        }
+        let open_by = 501 + u64::from(limits::HANG_OPEN_MS);
+        assert_eq!(b.ptt, t < open_by, "at {t}");
+        // The dash (180 ms) would have ended at 681: hung, the tone stays on.
+        assert_eq!(b.tone, (501..open_by).contains(&t), "at {t}");
+    }
+    assert!(!fed_after_hang, "the watchdog was fed while hung");
+}
+
+/// Whatever the host sends, a pass at a time: the PTT never down past its limit,
+/// the tone never on past the key-down limit nor outside the PTT, and the key
+/// never under the PTT.
+#[test]
+fn whatever_the_host_sends_the_pins_stay_within_their_limits() {
+    let mut rng = 0x2545F4914F6CDD1Du64;
+    let mut next = |n: u64| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % n
+    };
+    for round in 0..6 {
+        let (mut c, mut b) = ptt_rig();
+        let mut ptt = PinRecord::default();
+        let mut elem = PinRecord::default();
+        for t in 1..=150_000u64 {
+            b.t = t;
+            if t % 97 == 0 {
+                let body = match next(9) {
+                    0 => "MCW 5 TTTTTTTTTT",
+                    1 => "MCW 20 PARIS PARIS",
+                    2 => "CW 5 TT",
+                    3 => "TEST ARM",
+                    4 => "TEST HOLD",
+                    5 => "TEST STUCK",
+                    6 => "STOP",
+                    _ => "STATUS",
+                };
+                b.send((t % 200 + 1) as u8, body);
+            }
+            if t % 5003 == 0 {
+                b.held = next(4) == 0;
+            }
+            c.pass(&mut b);
+            b.replies();
+            ptt.pass(b.ptt);
+            elem.pass(b.key || b.tone);
+            assert!(
+                !b.tone || b.ptt,
+                "round {round}: tone without the PTT at {t}"
+            );
+            assert!(!(b.key && b.ptt), "round {round}: key under the PTT at {t}");
+        }
+        assert!(
+            ptt.longest <= 60_000,
+            "round {round}: PTT {} ms",
+            ptt.longest
+        );
+        assert!(
+            elem.longest <= 1000,
+            "round {round}: element {} ms",
+            elem.longest
+        );
+        // The duty budget bounds the carrier over the whole 150 s.
+        assert!(
+            ptt.total <= 150_000 / 2 + 60_000,
+            "round {round}: {}",
+            ptt.total
+        );
+    }
 }

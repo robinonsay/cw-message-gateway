@@ -1,12 +1,15 @@
 //! [`KeyerRig`]: [`Rig`] for any radio keyed by the keyer box and heard through its
-//! headphone jack.
+//! headphone jack; or, with `[keyer] output = "ptt"`, an FM handheld whose PTT the
+//! box holds while it keys an MCW tone into its microphone, heard through its
+//! speaker jack.
 //!
 //! Nothing is set on the radio, so the settings the station applies are kept
 //! (the frequency, only to log and check it) or ignored (power, break-in). What the
 //! station asks of the radio's state is answered from two sources that do not
-//! depend on each other: the box (`STATUS`: its key, its run) and the
-//! [`Monitor`] listening to the radio's sidetone. The radio counts as transmitting
-//! if either says so, or if the audio cannot yet show its key open after a run.
+//! depend on each other: the box (`STATUS`: its key or PTT, its run, the PTT line)
+//! and the [`Monitor`] listening to the radio's sidetone, or to a handheld's
+//! receive noise. The radio counts as transmitting if either says so, or if the
+//! audio cannot yet show its key (or PTT) open after a run.
 //!
 //! Once the audio has shown the radio's key held with the box's open, or the box
 //! has come back from its watchdog firing (outside `hfnode keyer hangtest`), the
@@ -15,12 +18,14 @@
 //!
 //! Before each run the rig waits ([`Rig::rest_needed`]) for the box's rest after
 //! its last run and its duty budget, and for `[keyer] max_duty_percent` of the
-//! last `duty_window_secs`.
+//! last `duty_window_secs`. With a handheld, all of the PTT time counts (an FM
+//! transmitter's carrier is on for all of it), and it also waits for a clear
+//! channel.
 
 use super::link::{refused, Link, Transport};
-use super::monitor::{KeyState, Monitor, MAX_LAG, STUCK_AFTER_RUN};
+use super::monitor::{KeyState, Monitor, MAX_LAG, RX_BACK, STUCK_AFTER_RUN};
 use super::proto::{Command, Hello, Reply, Status};
-use super::{check_hello, REPLY_TIMEOUT};
+use super::{check_hello, Output, REPLY_TIMEOUT};
 use anyhow::{anyhow, bail};
 use civ::{Result, Rig, RigError};
 use keyer_core::keyer::{Boot, Ended, Trip};
@@ -48,6 +53,37 @@ const JUDGE_WAIT: Duration = Duration::from_millis(1500);
 /// once it covers the longest audio delay and the stuck margin after it; this
 /// leaves room for the capture's blocks to arrive.
 const SETTLE_MARGIN: Duration = Duration::from_millis(500);
+/// With the receiver quieted (a station on the channel), how long to wait before
+/// asking again (radio time) ...
+const QUIET_WAIT: Duration = Duration::from_secs(2);
+/// ... and how long to wait in all before giving the transmission up.
+const QUIET_GIVE_UP: Duration = Duration::from_secs(60);
+
+/// An `MCW` run's PTT time: its Morse, with the box's lead and tail.
+pub fn ptt_time(morse: Duration) -> Duration {
+    morse
+        + Duration::from_millis(u64::from(
+            keyer_core::mcw::LEAD_MS + keyer_core::mcw::TAIL_MS,
+        ))
+}
+
+/// What a box's trip means.
+pub fn trip_note(trip: Trip) -> &'static str {
+    match trip {
+        Trip::None => "not tripped",
+        Trip::Down => "its key (or tone) stayed on past its key-down limit",
+        Trip::Pin => {
+            "its own watch on its pins: the key or tone pin on past the key-down limit, or \
+             the PTT pin down past the PTT limit"
+        }
+        Trip::Slow => "its control loop ran slow with the key or tone on",
+        Trip::Ptt => "its PTT stayed down past its PTT limit",
+        Trip::Line => {
+            "the PTT line stayed low after it let the PTT up: something else holds the \
+             radio's PTT, and the radio may still be transmitting"
+        }
+    }
+}
 
 /// What the rig needs from the configuration.
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +98,8 @@ pub struct Settings {
     pub duty: f32,
     /// `[keyer] duty_window_secs`, radio time.
     pub duty_window: Duration,
+    /// `[keyer] output`: the key line (`CW`), or a handheld's PTT (`MCW`).
+    pub output: Output,
 }
 
 /// A run the box took.
@@ -82,7 +120,8 @@ struct Shared {
     last: Option<u64>,
     /// Something that fails the transmission, reported once.
     failure: Option<String>,
-    /// The box's key-downs as keyed, for the duty window (wall clock).
+    /// The box's key-downs (with a handheld, its PTT time) as keyed, for the duty
+    /// window (wall clock).
     on_air: VecDeque<(Instant, Instant)>,
 }
 
@@ -124,8 +163,13 @@ fn ended(shared: &Mutex<Shared>, monitor: &Mutex<Monitor>, st: &Status, now: Ins
         Ended::Usb => "the USB link dropped",
         Ended::Limit => "its run limit",
         Ended::Down => {
-            "it tripped (its key-down limit, or its watch on its key pin): unplug it and plug \
-             it in again"
+            "it tripped (its key-down limit, or its watch on its pins): unplug it and plug it \
+             in again"
+        }
+        Ended::Ptt => "its PTT limit; it has tripped: unplug it and plug it in again",
+        Ended::Line => {
+            "the PTT line did not read low after it closed the PTT: the radio was not keyed \
+             (the cable out, the radio off, or the line not wired)"
         }
         Ended::None => "no run at all (did it restart?)",
     };
@@ -153,6 +197,10 @@ pub struct KeyerRig {
     /// Why nothing is keyed until the box is plugged in again: it last started other
     /// than by being plugged in (as after flashing it).
     replug: Option<String>,
+    /// The box last read its PTT line low with its PTT up.
+    line_low: bool,
+    /// Waiting for the channel to clear since then.
+    quiet_since: Option<Instant>,
 }
 
 impl KeyerRig {
@@ -204,12 +252,18 @@ impl KeyerRig {
         let st = status(&mut link).map_err(|e| anyhow!("keyer box: STATUS: {e}"))?;
         if st.trip != Trip::None {
             bail!(
-                "the keyer box has tripped (its key stayed down past its limit): unplug it \
-                 and plug it in again"
+                "the keyer box has tripped ({}): unplug it and plug it in again",
+                trip_note(st.trip)
             );
         }
         if st.busy() {
-            bail!("the keyer box still reads its key down after STOP");
+            bail!("the keyer box still reads its key or PTT down after STOP");
+        }
+        if s.output == Output::Ptt && !st.line {
+            log::warn!(
+                "keyer box: the PTT line reads low: the radio is off, the cable is out, or \
+                 the PTT is held; nothing is keyed until it reads high"
+            );
         }
         let link = Arc::new(Mutex::new(link));
         let shared = Arc::new(Mutex::new(Shared::default()));
@@ -234,6 +288,8 @@ impl KeyerRig {
             held: false,
             fault,
             replug,
+            line_low: false,
+            quiet_since: None,
         })
     }
 
@@ -301,6 +357,19 @@ impl KeyerRig {
         &self.hello
     }
 
+    pub fn output(&self) -> Output {
+        self.s.output
+    }
+
+    /// Wall-clock time the box keeps the radio on transmit for runs whose Morse
+    /// lasts `keying` in all: with a handheld, `runs` runs' PTT lead and tail too.
+    fn on_air_for(&self, keying: Duration, runs: u32) -> Duration {
+        match self.s.output {
+            Output::Key => keying,
+            Output::Ptt => keying + (ptt_time(Duration::ZERO) * runs).div_f32(self.s.scale),
+        }
+    }
+
     pub fn monitor(&self) -> Arc<Mutex<Monitor>> {
         self.monitor.clone()
     }
@@ -328,10 +397,13 @@ impl KeyerRig {
         Ok(st)
     }
 
-    /// Bring-up only: `TEST HANG` or `TEST STUCK`, during a run, each after the
-    /// `TEST ARM` the box needs just before it.
+    /// Bring-up only: `TEST HANG` or `TEST STUCK` (or, in tests, `TEST HOLD`),
+    /// during a run, each after the `TEST ARM` the box needs just before it.
     pub fn test(&mut self, cmd: &Command) -> Result<()> {
-        if !matches!(cmd, Command::TestHang | Command::TestStuck) {
+        if !matches!(
+            cmd,
+            Command::TestHang | Command::TestStuck | Command::TestHold
+        ) {
             return Err(RigError::Protocol(format!("{} is not a test", cmd.body())));
         }
         let mut l = lock(&self.link);
@@ -551,12 +623,15 @@ impl Rig for KeyerRig {
         let text = text.trim().to_ascii_uppercase();
         let segs = Segments::of(text.as_bytes())
             .map_err(|e| RigError::Protocol(format!("the keyer box cannot key {text:?}: {e:?}")))?;
+        let ptt = self.s.output == Output::Ptt;
         let now = Instant::now();
         let band = lock(&self.monitor).band(now);
         if !band.audio {
-            return Err(RigError::Protocol(
-                "no audio from the radio: without its sidetone the node does not key".into(),
-            ));
+            return Err(RigError::Protocol(if ptt {
+                "no audio from the radio: without its receive noise the node does not key".into()
+            } else {
+                "no audio from the radio: without its sidetone the node does not key".into()
+            }));
         }
         // First: a carrier is also why the band's level may not be known.
         if let Some(db) = band.carrier_db {
@@ -574,11 +649,23 @@ impl Rig for KeyerRig {
             Some(db) if db < self.s.min_level_dbfs => {
                 return Err(RigError::Protocol(format!(
                     "the radio's audio is at {db:.0} dBFS, under keyer.min_level_dbfs {:.0}: \
-                     is the radio on, and its volume up?",
-                    self.s.min_level_dbfs
+                     is the radio on, {}and its volume up?",
+                    self.s.min_level_dbfs,
+                    if ptt {
+                        "its squelch open (SQL 0), "
+                    } else {
+                        ""
+                    }
                 )))
             }
             Some(_) => {}
+        }
+        if ptt && lock(&self.monitor).quieted() {
+            return Err(RigError::Protocol(
+                "the radio's receive noise has dropped: a station is on the channel; not \
+                 keying over it"
+                    .into(),
+            ));
         }
         match self.key_state() {
             KeyState::Open => {}
@@ -593,30 +680,40 @@ impl Rig for KeyerRig {
             return Err(RigError::Protocol("a keying run is still under way".into()));
         }
         let st = self.status()?;
+        let wpm = self.wpm;
+        let cmd = if ptt {
+            Command::Mcw { wpm, text }
+        } else {
+            Command::Cw { wpm, text }
+        };
         if st.trip != Trip::None {
-            return Err(refused(
-                &Command::Cw {
-                    wpm: self.wpm,
-                    text,
-                },
-                "TRIP",
-            ));
+            return Err(refused(&cmd, "TRIP"));
         }
         if st.busy() {
             return Err(RigError::Protocol(
                 "the keyer box reads busy with no run from the node".into(),
             ));
         }
+        if ptt && !st.line {
+            return Err(refused(&cmd, "LINE"));
+        }
         let dot_ms = morse::dot_ms(self.wpm).map_err(|_| no("such speed"))?;
-        let run = Duration::from_millis(u64::from(segs.units()) * u64::from(dot_ms));
+        let morse = Duration::from_millis(u64::from(segs.units()) * u64::from(dot_ms));
+        // With a handheld the box's PTT is down, and the radio's carrier on, for the
+        // whole run, its lead and tail too.
+        let run = if ptt { ptt_time(morse) } else { morse };
         // The station waits these out first (`rest_needed`): the box would refuse.
-        let down: u32 = segs
-            .as_slice()
-            .iter()
-            .filter(|s| s.down)
-            .map(|s| u32::from(s.units))
-            .sum();
-        let down = Duration::from_millis(u64::from(down) * u64::from(dot_ms));
+        let down = if ptt {
+            run
+        } else {
+            let down: u32 = segs
+                .as_slice()
+                .iter()
+                .filter(|s| s.down)
+                .map(|s| u32::from(s.units))
+                .sum();
+            Duration::from_millis(u64::from(down) * u64::from(dot_ms))
+        };
         if !st.rest_left.is_zero() || st.budget < down {
             return Err(RigError::Protocol(format!(
                 "the keyer box is resting: {} ms of its rest after the last run to go, {:.1} s \
@@ -626,10 +723,6 @@ impl Rig for KeyerRig {
                 down.as_secs_f32()
             )));
         }
-        let cmd = Command::Cw {
-            wpm: self.wpm,
-            text,
-        };
         let mut link = lock(&self.link);
         let t0 = Instant::now();
         let reply = link.request_reply(&cmd);
@@ -638,21 +731,29 @@ impl Rig for KeyerRig {
         }
         // From here the box may be keying: CW is never sent twice, and a lost reply
         // may hide a run taken, so the run is watched in every case.
-        let id = lock(&self.monitor).run_started(
-            t0,
-            Duration::from_millis(dot_ms.into()),
-            segs.as_slice(),
-        );
+        let id = if ptt {
+            lock(&self.monitor).ptt_started(t0, run)
+        } else {
+            lock(&self.monitor).run_started(
+                t0,
+                Duration::from_millis(dot_ms.into()),
+                segs.as_slice(),
+            )
+        };
         let ends = t0 + run.div_f32(self.s.scale);
         let mut sh = lock(&self.shared);
-        let dot = Duration::from_millis(dot_ms.into()).div_f32(self.s.scale);
-        let mut t = t0;
-        for seg in segs.as_slice() {
-            let len = dot * u32::from(seg.units);
-            if seg.down {
-                sh.on_air.push_back((t, t + len));
+        if ptt {
+            sh.on_air.push_back((t0, ends));
+        } else {
+            let dot = Duration::from_millis(dot_ms.into()).div_f32(self.s.scale);
+            let mut t = t0;
+            for seg in segs.as_slice() {
+                let len = dot * u32::from(seg.units);
+                if seg.down {
+                    sh.on_air.push_back((t, t + len));
+                }
+                t += len;
             }
-            t += len;
         }
         sh.last = Some(id);
         sh.failure = None;
@@ -666,7 +767,10 @@ impl Rig for KeyerRig {
         match reply {
             Ok(_) => Ok(()),
             Err(e) => {
-                log::error!("keyer box: no reply to CW ({e}): stopping it in case it took it");
+                log::error!(
+                    "keyer box: no reply to {} ({e}): stopping it in case it took it",
+                    cmd.name()
+                );
                 Err(e)
             }
         }
@@ -695,17 +799,25 @@ impl Rig for KeyerRig {
         if let Some(f) = &self.fault {
             return Err(RigError::Protocol(f.clone()));
         }
+        let ptt = self.s.output == Output::Ptt;
+        self.line_low = false;
         let unreachable = match self.status() {
             Ok(st) if st.busy() => return Ok(true),
             // Its key is open, but it will key nothing more until it is power-cycled,
-            // and it tripped because a key-down went on past its limit: an error each
-            // time, so that the station inhibits transmitting and tells the owner.
+            // and it tripped because a limit was reached: an error each time, so that
+            // the station inhibits transmitting and tells the owner.
             Ok(st) if st.trip != Trip::None => {
-                return Err(RigError::Protocol(
-                    "the keyer box has tripped (a key-down went on past its limit): check \
-                     it, then unplug it and plug it in again"
-                        .into(),
-                ))
+                return Err(RigError::Protocol(format!(
+                    "the keyer box has tripped ({}): check it and the radio, then unplug the \
+                     box and plug it in again",
+                    trip_note(st.trip)
+                )))
+            }
+            // Its PTT is up, but the line reads it held (or the radio is off): until
+            // it reads high, the radio counts as transmitting.
+            Ok(st) if ptt && !st.line => {
+                self.line_low = true;
+                return Ok(true);
             }
             Ok(_) => false,
             Err(e) => {
@@ -769,7 +881,14 @@ impl Rig for KeyerRig {
     }
 
     fn receive_settle(&self) -> Duration {
-        (MAX_LAG + STUCK_AFTER_RUN).div_f32(self.s.scale) + SETTLE_MARGIN
+        match self.s.output {
+            Output::Key => (MAX_LAG + STUCK_AFTER_RUN).div_f32(self.s.scale) + SETTLE_MARGIN,
+            // From the end of the Morse: the box's tail, the audio delay and the
+            // radio's switch back to receive.
+            Output::Ptt => {
+                (ptt_time(Duration::ZERO) + MAX_LAG + RX_BACK).div_f32(self.s.scale) + SETTLE_MARGIN
+            }
+        }
     }
 
     fn held_key(&mut self) -> Option<String> {
@@ -783,12 +902,15 @@ impl Rig for KeyerRig {
     }
 
     /// The box's rest after its last run and its duty budget, then the duty window
-    /// (`[keyer] max_duty_percent`); `keying` counts as all key-down.
+    /// (`[keyer] max_duty_percent`); `keying` counts as all key-down, and with a
+    /// handheld so do two runs' PTT lead and tail (`keying` holds at most two runs:
+    /// an ID and a piece). Then, with a handheld, a clear channel.
     fn rest_needed(&mut self, keying: Duration) -> Result<Duration> {
         if let Some(why) = self.refusal() {
             return Err(RigError::Protocol(why.to_string()));
         }
         let scale = self.s.scale;
+        let keying = self.on_air_for(keying, 2);
         let on_box = keying.mul_f32(scale);
         if on_box > self.hello.duty_budget {
             return Err(RigError::Protocol(format!(
@@ -807,11 +929,33 @@ impl Rig for KeyerRig {
                 on_box.as_secs_f32(),
                 wait.mul_f32(scale).as_secs_f32()
             );
+            return Ok(wait);
         }
-        Ok(wait)
+        if self.s.output != Output::Ptt || !lock(&self.monitor).quieted() {
+            self.quiet_since = None;
+            return Ok(Duration::ZERO);
+        }
+        let since = *self.quiet_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= QUIET_GIVE_UP.div_f32(scale) {
+            self.quiet_since = None;
+            return Err(RigError::Protocol(format!(
+                "the radio's receive noise has stayed quiet for {} s: a station on the \
+                 channel, or the radio off or its squelch closed; not keying",
+                QUIET_GIVE_UP.as_secs()
+            )));
+        }
+        log::info!("the channel is in use: waiting for it to clear");
+        Ok(QUIET_WAIT.div_f32(scale))
     }
 
     fn transmit_detail(&mut self) -> Option<String> {
+        if self.line_low {
+            return Some(
+                "the keyer box's PTT is up but its PTT line reads low: the PTT is held at \
+                 the radio (a shorted optocoupler or cable), or the radio is off"
+                    .into(),
+            );
+        }
         match self.key_state() {
             KeyState::Held(why) => Some(why),
             KeyState::Unsure => {

@@ -18,11 +18,11 @@ bench = false
 [dependencies]
 # The box's rules, shared with hfnode's mock box.
 keyer-core = { path = "../../crates/keyer-core" }
-# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at the
-# master commit that merged its clocks, timer, watchdog and USB serial drivers
-# (rustos PR #1).
-api = { git = "https://github.com/robinonsay/rustos", rev = "cfc2b140af7d13e91d79f0fb40e36bc84a4a3ca4" }
-pico2 = { git = "https://github.com/robinonsay/rustos", rev = "cfc2b140af7d13e91d79f0fb40e36bc84a4a3ca4" }
+# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers. Its
+# clocks, timer, watchdog and USB serial drivers are on master (rustos PR #1); the
+# PWM driver for the tone is rustos PR #2, pinned at its head commit until it merges.
+api = { git = "https://github.com/robinonsay/rustos", rev = "c1c82c9af53e3da8c823d4cd4ca26bbb04a1fcf1" }
+pico2 = { git = "https://github.com/robinonsay/rustos", rev = "c1c82c9af53e3da8c823d4cd4ca26bbb04a1fcf1" }
 
 # The runtime has no unwinder.
 [profile.dev]

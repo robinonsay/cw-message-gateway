@@ -6,6 +6,7 @@ use super::link::SerialTransport;
 use super::monitor::{self, Band, Judge, KeyState, Monitor};
 use super::proto::Command;
 use super::rig::{self, KeyerRig};
+use super::Output;
 use crate::audio::Capture;
 use crate::config::Config;
 use crate::session::Transmission;
@@ -43,7 +44,16 @@ pub fn monitor_settings(cfg: &Config, scale: f32) -> monitor::Settings {
         pitch_hz: pitch(cfg),
         min_level_dbfs: min_level(cfg),
         scale,
+        mode: match output(cfg) {
+            Output::Key => monitor::Mode::Sidetone,
+            Output::Ptt => monitor::Mode::Mute,
+        },
     }
+}
+
+/// `[keyer] output`.
+pub fn output(cfg: &Config) -> Output {
+    cfg.keyer.as_ref().map_or(Output::Key, |k| k.output)
 }
 
 pub fn rig_settings(cfg: &Config, scale: f32) -> rig::Settings {
@@ -56,6 +66,7 @@ pub fn rig_settings(cfg: &Config, scale: f32) -> rig::Settings {
             .as_ref()
             .map_or(0.5, |k| k.max_duty_percent as f32 / 100.0),
         duty_window: Duration::from_secs(cfg.keyer.as_ref().map_or(600, |k| k.duty_window_secs)),
+        output: output(cfg),
     }
 }
 
@@ -128,12 +139,15 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
     let mut out = String::new();
     let mut ok = true;
     let h = rig.hello().clone();
+    let ptt = rig.output() == Output::Ptt;
     let _ = writeln!(
         out,
-        "box: {} protocol {}, run limit {} s, key-down limit {} ms, link timeout {} ms",
+        "box: {} protocol {}, run limit {} s, PTT limit {} s, key-down limit {} ms, link \
+         timeout {} ms",
         h.name,
         h.version,
         h.run_limit.as_secs(),
+        h.ptt_limit.as_secs(),
         h.key_down_limit.as_millis(),
         h.link_timeout.as_millis()
     );
@@ -165,15 +179,19 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
         Ok(st) => {
             let _ = writeln!(
                 out,
-                "box: key {}, {}, last run ended {}{}",
+                "box: key {}, PTT {}, {}, last run ended {}{}",
                 if st.key { "DOWN" } else { "up" },
+                if st.ptt { "DOWN" } else { "up" },
                 if st.run { "keying a run" } else { "idle" },
                 st.ended.as_str(),
                 if st.trip == Trip::None {
                     String::new()
                 } else {
                     ok = false;
-                    ", TRIPPED: unplug the box and plug it in again".into()
+                    format!(
+                        ", TRIPPED ({}): unplug the box and plug it in again",
+                        rig::trip_note(st.trip)
+                    )
                 }
             );
             let _ = writeln!(
@@ -183,6 +201,18 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
                 st.budget.as_secs_f32()
             );
             ok &= !st.busy();
+            if ptt {
+                if st.line {
+                    let _ = writeln!(out, "box: PTT line high (the PTT contact open): ok");
+                } else {
+                    ok = false;
+                    let _ = writeln!(
+                        out,
+                        "box: PTT line LOW: the radio is off, or something holds its PTT (the \
+                         cable, a shorted optocoupler); nothing is keyed until it reads high"
+                    );
+                }
+            }
         }
         Err(e) => {
             ok = false;
@@ -210,7 +240,12 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
             let _ = writeln!(
                 out,
                 "audio: band at {db:.0} dBFS, under keyer.min_level_dbfs {min_level_dbfs:.0}: \
-                 turn the radio's volume up (or the sound card's input level)"
+                 turn the radio's volume up (or the sound card's input level){}",
+                if ptt {
+                    "; the handheld's squelch must be open (SQL 0)"
+                } else {
+                    ""
+                }
             );
         }
         None => {
@@ -225,6 +260,13 @@ pub fn check(rig: &mut KeyerRig, min_level_dbfs: f32) -> (String, bool) {
     if let KeyState::Held(why) = lock(&monitor).key_state() {
         ok = false;
         let _ = writeln!(out, "audio: {why}");
+    }
+    if ptt && lock(&monitor).quieted() {
+        let _ = writeln!(
+            out,
+            "audio: the receive noise has dropped: a station is on the channel (the node \
+             waits for it to clear before keying)"
+        );
     }
     (out, ok)
 }
@@ -402,10 +444,24 @@ pub fn sidetone(st: &mut Station<KeyerRig>, id: &str) -> Result<SidetoneReport> 
     })
 }
 
+/// With a handheld, room for its switch to transmit and back to receive in a
+/// box test's limit: the bench measures it (docs/keyer.md).
+const PTT_SWITCH_MARGIN: Duration = Duration::from_millis(600);
+
+/// What a box test allows on top of the box's own limit: for a handheld, its
+/// lead (the PTT is held through it) and its switching.
+fn test_allowance(r: &KeyerRig) -> Duration {
+    match r.output() {
+        Output::Key => Duration::ZERO,
+        Output::Ptt => Duration::from_millis(keyer_core::mcw::LEAD_MS.into()) + PTT_SWITCH_MARGIN,
+    }
+}
+
 /// What a box test saw.
 #[derive(Debug)]
 pub struct TestReport {
-    /// The longest the radio's sidetone sounded without a break.
+    /// The longest the radio was on the air without a break, as its audio shows:
+    /// its sidetone, or a handheld's receive noise gone quiet.
     pub longest: Duration,
     /// Its limit for the test to pass.
     pub limit: Duration,
@@ -428,13 +484,13 @@ const TEST_SPAN: Duration = Duration::from_secs(6);
 
 /// Printed before every test that holds the radio's key down, and again if one
 /// times out. See docs/keyer.md, "Stopping it by hand".
-pub const MANUAL_STOP: &str = "This test holds the radio's key down on purpose. If the radio \
-     keeps transmitting: pull the key plug out of the radio, then switch the radio off. Do that \
-     first and read the output afterwards.";
+pub const MANUAL_STOP: &str = "This test holds the radio's key (or a handheld's PTT) down on \
+     purpose. If the radio keeps transmitting: pull the key plug (a handheld's K-plug) out of the \
+     radio, then switch the radio off. Do that first and read the output afterwards.";
 
 /// What to tell the operator if a test leaves the radio transmitting.
-pub const STOP_NOW: &str = "THE RADIO MAY STILL BE TRANSMITTING: pull the key plug out of the \
-     radio now, then switch the radio off.";
+pub const STOP_NOW: &str = "THE RADIO MAY STILL BE TRANSMITTING: pull the key plug (a \
+     handheld's K-plug) out of the radio now, then switch the radio off.";
 
 /// The node's `DE <call>`, keyed and heard, before a test: the sidetone's level and
 /// the audio delay come from it, and without them [`Monitor::longest_tone`] has
@@ -451,7 +507,8 @@ fn identify_first(st: &mut Station<KeyerRig>, id: &str) -> Result<(Judge, Vec<St
     Ok((judge, vec![format!("identified first: {id}")]))
 }
 
-/// Wait out the box's rest and the duty window before keying again.
+/// Wait out the box's rest and the duty window (and, with a handheld, a busy
+/// channel) before keying again.
 fn rest(st: &Station<KeyerRig>, keying: Duration) -> Result<()> {
     let rig = st.rig();
     let mut r = lock(&rig);
@@ -467,9 +524,9 @@ fn rest(st: &Station<KeyerRig>, keying: Duration) -> Result<()> {
 /// Ctrl-C must get through while the key is down (the safety audit's KB-3).
 pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
     let (_, mut notes) = identify_first(st, id)?;
-    let watchdog = Duration::from_millis(keyer_core::limits::WATCHDOG_MS.into());
-    let limit = watchdog + Duration::from_millis(250);
     let rig = st.rig();
+    let watchdog = Duration::from_millis(keyer_core::limits::WATCHDOG_MS.into());
+    let limit = watchdog + Duration::from_millis(250) + test_allowance(&lock(&rig));
     let m = lock(&rig).monitor();
     rest(st, Duration::from_secs(2))?;
     let t0 = Instant::now();
@@ -498,7 +555,7 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
         }
         thread::sleep(Duration::from_millis(50).div_f32(scale));
     };
-    let longest = lock(&m).longest_tone(t0);
+    let longest = lock(&m).longest_on_air(t0);
     let span = open.saturating_duration_since(t0).mul_f32(scale);
     // The box comes back as a new USB device after its reset.
     let back = Instant::now() + Duration::from_secs(5).div_f32(scale);
@@ -536,8 +593,9 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
 fn check_measured(longest: Duration, span: Duration, notes: &mut Vec<String>) -> bool {
     if longest < MIN_TEST_TONE {
         notes.push(format!(
-            "nothing measured: the longest sidetone was {} ms, under the {} ms a key held down \
-             must give; check the audio (`hfnode keyer sidetone`) and run the test again",
+            "nothing measured: the longest the audio showed the radio on the air (its sidetone, or \
+             a handheld's receive noise gone) was {} ms, under the {} ms a key held down must \
+             give; check the audio (`hfnode keyer sidetone`) and run the test again",
             longest.as_millis(),
             MIN_TEST_TONE.as_millis()
         ));
@@ -560,9 +618,10 @@ fn check_measured(longest: Duration, span: Duration, notes: &mut Vec<String>) ->
 /// down; its key-down limit must open the key within its 1 s, and trip.
 pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
     let (_, mut notes) = identify_first(st, id)?;
-    let limit =
-        Duration::from_millis(keyer_core::limits::KEY_DOWN_MS.into()) + Duration::from_millis(250);
     let rig = st.rig();
+    let limit = Duration::from_millis(keyer_core::limits::KEY_DOWN_MS.into())
+        + Duration::from_millis(250)
+        + test_allowance(&lock(&rig));
     let m = lock(&rig).monitor();
     rest(st, Duration::from_secs(2))?;
     let t0 = Instant::now();
@@ -597,7 +656,7 @@ pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Tes
         }
         thread::sleep(Duration::from_millis(50).div_f32(scale));
     };
-    let longest = lock(&m).longest_tone(t0);
+    let longest = lock(&m).longest_on_air(t0);
     let span = open.saturating_duration_since(t0).mul_f32(scale);
     let tripped = lock(&rig).status().context("STATUS after the test")?.trip == Trip::Down;
     if tripped {

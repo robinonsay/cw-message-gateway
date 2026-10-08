@@ -296,21 +296,25 @@ enum RadioCmd {
 
 #[derive(Subcommand)]
 enum KeyerCmd {
-    /// Greet the box (its limits, why it last started, its key) and check the
-    /// radio's audio: band level, no key held at the radio. Keys nothing.
+    /// Greet the box (its limits, why it last started, its key and PTT, its PTT
+    /// line) and check the radio's audio: band level, no key held at the radio.
+    /// Keys nothing.
     Check,
-    /// Stop the box and confirm the radio's key open, by the box and the audio.
+    /// Stop the box and confirm the radio's key (or PTT) open, by the box and the
+    /// audio.
     Rx,
     /// Key TEXT through the box with every check `run` makes but the storm
     /// stand-down, and report whether the radio was heard sending it.
     Key { text: String },
-    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch.
+    /// Key `DE <call>` and measure the sidetone: its delay, level and pitch. Not
+    /// for a handheld (`keyer.output = "ptt"`), which has none.
     Sidetone,
     /// Hang the box's control loop mid-run: its watchdog must reset it and open
-    /// the key within 0.5 s. Then identifies.
+    /// the key (or release the PTT) within 0.5 s. Then identifies.
     Hangtest,
-    /// Identify, then make the box hold its key down: its 1 s limit must open the
-    /// key and trip it (unplug it and plug it in again afterwards).
+    /// Identify, then make the box hold its key (or a handheld's tone) down: its
+    /// 1 s limit must open it and trip the box (unplug it and plug it in again
+    /// afterwards).
     Stucktest,
     /// Key a long message and then stop talking to the box: its link timeout must
     /// open the key by itself, as it would if the node died or the cable came out.
@@ -1226,6 +1230,8 @@ fn open_keyer(
 ) -> Result<(keyer::rig::KeyerRig, Option<audio::Capture>)> {
     let k = keyer_section(cfg)?;
     keyer::check_stage(k.commissioned, needs.unwrap_or(keyer::Action::Run))?;
+    // Everything opened here keys: a handheld's PTT contact must be on record.
+    keyer::check_ptt_cable(k)?;
     let (cap, monitor) = keyer::bench::start_listening(cfg)?;
     let rig = keyer::bench::open_rig(cfg, monitor.clone())?;
     let band = keyer::bench::wait_for_band(&monitor, Duration::from_secs(5));
@@ -1273,7 +1279,14 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             let mut rig = bench::open_rig(cfg, monitor)?;
             if matches!(action, KeyerCmd::Rx) {
                 bench::rx(&mut rig, &cfg.state_dir, Duration::from_secs(5))?;
-                println!("key open: the box is idle and no sidetone is heard");
+                if k.output == keyer::Output::Ptt {
+                    println!(
+                        "PTT open: the box is idle, its PTT line reads high and the radio's \
+                         receive noise is heard"
+                    );
+                } else {
+                    println!("key open: the box is idle and no sidetone is heard");
+                }
                 return Ok(());
             }
             let (report, ok) = bench::check(&mut rig, k.min_level_dbfs);
@@ -1299,6 +1312,13 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
             };
             if let KeyerCmd::Key { text } = &action {
                 check_key_length(&sanitize(text), k.commissioned)?;
+            }
+            if matches!(action, KeyerCmd::Sidetone) && k.output == keyer::Output::Ptt {
+                bail!(
+                    "keyer.output is \"ptt\": a handheld has no sidetone. `hfnode keyer key` \
+                     reports whether its receive noise went quiet while the box held the PTT, \
+                     and came back after"
+                );
             }
             // The health log and any transmit inhibit are written there.
             std::fs::create_dir_all(&cfg.state_dir)
@@ -1359,7 +1379,7 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                         bench::stucktest(&mut st, &id, 1.0)?
                     };
                     println!(
-                        "longest sidetone {} ms (limit {} ms)",
+                        "longest on the air {} ms, as its audio shows (limit {} ms)",
                         rep.longest.as_millis(),
                         rep.limit.as_millis()
                     );

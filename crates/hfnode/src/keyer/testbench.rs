@@ -3,6 +3,7 @@
 use super::mock::{Clock, MockBox, MockRadio, RadioSettings};
 use super::monitor::{self, Monitor};
 use super::rig::{KeyerRig, Settings};
+use super::Output;
 use crate::session::Transmission;
 use crate::station::{Station, StationConfig, ID_INTERVAL, INHIBIT_FILE};
 use std::path::PathBuf;
@@ -66,12 +67,13 @@ impl Bench {
         self.keyer_box.clock.secs()
     }
 
+    /// `CW` and `MCW` lines sent to the box.
     pub fn cw_lines(&self) -> usize {
         self.keyer_box
             .now()
             .lines
             .iter()
-            .filter(|l| l.contains(" CW "))
+            .filter(|l| l.contains(" CW ") || l.contains(" MCW "))
             .count()
     }
 }
@@ -85,6 +87,19 @@ pub fn bench(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
 /// [`bench`] with radio time running `scale` times faster than real time: 1 for
 /// what depends on real-time waits.
 pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+    bench_with(scale, Output::Key, tweak)
+}
+
+/// [`bench`] for an FM handheld on the box's PTT (`[keyer] output = "ptt"`), on 2 m.
+pub fn handheld(tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+    bench_with(SCALE, Output::Ptt, tweak)
+}
+
+/// [`bench_at`] for the box's `output`: a radio on its key line, or a handheld on
+/// its PTT.
+pub fn bench_with(scale: f32, output: Output, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
+    let ptt = output == Output::Ptt;
+    let frequency_hz = if ptt { 144_150_000 } else { 7_030_000 };
     let clock = Clock::new(scale);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
@@ -93,26 +108,40 @@ pub fn bench_at(scale: f32, tweak: impl FnOnce(&mut RadioSettings)) -> Bench {
             pitch_hz: 600.0,
             min_level_dbfs: -65.0,
             scale,
+            mode: if ptt {
+                monitor::Mode::Mute
+            } else {
+                monitor::Mode::Sidetone
+            },
         },
         clock.epoch,
     )));
-    let mut rs = RadioSettings::new(8000, 600.0);
+    let mut rs = if ptt {
+        RadioSettings::handheld(8000, 600.0)
+    } else {
+        RadioSettings::new(8000, 600.0)
+    };
     tweak(&mut rs);
     let radio = MockRadio::start(rs, keyer_box.clone(), monitor.clone(), None, None);
     let rig = KeyerRig::open(
         keyer_box.transport(),
         monitor,
         Settings {
-            frequency_hz: 7_030_000,
+            frequency_hz,
             min_level_dbfs: -65.0,
             scale,
             duty: 0.5,
             duty_window: Duration::from_secs(600),
+            output,
         },
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let station = Station::new(rig, cfg_at(scale), Some(dir.path().join("health.csv")));
+    let cfg = StationConfig {
+        frequency_hz,
+        ..cfg_at(scale)
+    };
+    let station = Station::new(rig, cfg, Some(dir.path().join("health.csv")));
     station.configure().unwrap();
     thread::sleep(Duration::from_secs_f64(2.5 / f64::from(scale)));
     Bench {
