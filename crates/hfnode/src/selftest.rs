@@ -133,8 +133,8 @@ const OVERHANG_SLACK_REAL: Duration = Duration::from_millis(20);
 /// safety check's for a radio left on transmit. A busy machine that stops the
 /// process for longer while the radio is on transmit makes the station look slow
 /// to force receive (a CI runner once stopped it for about 0.7 s at 20x: 14 s of
-/// radio time). Such a run is not judged and runs again ([`run`]); the check's own limit
-/// stays as it is.
+/// radio time). Such a run, if it failed, is not judged and runs again ([`run`],
+/// [`pause_excuses_only_failures`]); the check's own limit stays as it is.
 fn pause_limit(scale: f32) -> Duration {
     OVERHANG_SLACK.div_f32(scale) + OVERHANG_SLACK_REAL
 }
@@ -1733,7 +1733,33 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         .push(safety(&cfg, e, &left, &r, &settings, inhibited, scale));
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
+    pause_excuses_only_failures(out);
     Ok(())
+}
+
+/// The pause limit of a mock IC-7300 scenario ([`pause_limit`]) is the least slack
+/// its checks leave: a longer pause can only make the node look slow and fail a
+/// check, never pass one it would fail. So a pause excuses a run that failed
+/// ([`judged`] runs it again), but a run that passed every other check stands.
+fn pause_excuses_only_failures(out: &mut Outcome) {
+    if !out.checks.iter().all(|c| c.pass || c.name == "machine") {
+        return;
+    }
+    if let Some(c) = out
+        .checks
+        .iter_mut()
+        .find(|c| c.name == "machine" && !c.pass)
+    {
+        let measured = c
+            .detail
+            .split_once(": the machine")
+            .map_or(&*c.detail, |(m, _)| m);
+        c.detail = format!(
+            "{measured}: longer than the scenario's timing allows, but every other check \
+             passed, which a pause cannot cause"
+        );
+        c.pass = true;
+    }
 }
 
 /// The node refused to start: the preflight named `item`, and only its reads went
@@ -5027,6 +5053,33 @@ mod tests {
         let out = judged(|| runs.next().expect("run once more than expected"));
         assert!(!out.passed());
         assert!(out.not_judged[0].contains("passed every other check"));
+    }
+
+    #[test]
+    fn an_ic7300_run_that_passed_every_other_check_stands_through_a_pause() {
+        let paused = || {
+            let ms = Duration::from_millis;
+            any_radio::machine_check_within(ms(50), 1.0, 20.0, pause_limit(20.0))
+        };
+        let mut out = outcome_with(&[("keyed", true), ("safety", true)]);
+        out.checks.push(paused());
+        pause_excuses_only_failures(&mut out);
+        assert!(out.passed(), "{}", out.render());
+        assert!(out.render().contains("every other check passed"));
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            out.clone()
+        });
+        assert_eq!(runs, 1);
+        assert!(out.not_judged.is_empty());
+
+        // A failure in a run the machine paused in is still not judged.
+        let mut out = outcome_with(&[("keyed", true), ("safety", false)]);
+        out.checks.push(paused());
+        pause_excuses_only_failures(&mut out);
+        let machine = out.checks.iter().find(|c| c.name == "machine").unwrap();
+        assert!(!machine.pass && machine.detail.contains("says nothing about the node"));
     }
 
     #[test]

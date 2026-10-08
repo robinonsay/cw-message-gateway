@@ -563,11 +563,21 @@ pub(super) fn scenarios(ic7300: &[Scenario]) -> Vec<Scenario> {
             "keyer-rx-long",
             "a 26-chunk readout through the keyer box, one run per piece, IDs between chunks",
         ),
-        on_keyer(
-            like("agn"),
-            "keyer-agn",
-            "AGN through the keyer box repeats the last over; bare and unknown AGNs ignored",
-        ),
+        {
+            let mut s = on_keyer(
+                like("agn"),
+                "keyer-agn",
+                "AGN through the keyer box repeats the last over; bare and unknown AGNs ignored",
+            );
+            // Its AGNs that get silence must be copied for certain (see `agn`), but
+            // the decoder prints a stray E in band noise a few times a minute, and
+            // one just before a call turns its A into a U. So the operator brings
+            // the band noise instead of the radio, as loud (27 dB under its
+            // signal): the noise before and in each call is then the same however
+            // long the node took over the one before.
+            s.fist.snr_db = Some(27.0);
+            s
+        },
     ];
     v.push({
         let mut s = on_keyer(
