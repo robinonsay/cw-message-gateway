@@ -2,3 +2,4 @@
 # Secret HOTP keys must never be committed.
 *.key
 /.claude/worktrees/
+**/.DS_Store
