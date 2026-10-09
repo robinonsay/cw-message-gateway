@@ -1010,6 +1010,24 @@ GP16 ──4.7 kΩ── GND
   the key wire becomes a second ground path between the Pico and the radio, which
   can bring hum into the receive audio. That is a nuisance, not damage; if it
   confuses the node, use the PC817.
+- **RF on the key wire.** With the PC817, RF picked up on the long key wire stays on
+  the radio's side; with a transistor it reaches the Pico's ground. What that can do
+  fails safe, as far as the code shows: a Pico that resets drives nothing and the
+  4.7 kΩ holds the switch off, and a USB link that drops makes the box open its key
+  within its 2 s link timeout. A switch that RF turns on, or a key held by any fault,
+  is caught by the box's 1 s key-down limit and the node's sidetone monitor, the same
+  as with the PC817. The radio runs on its battery, so its ground floats and the
+  shared ground carries no supply current: it is not a path for damage. With the
+  Mac's built-in microphone in place of the wired feed, the PC817 would leave the
+  box and the radio with no wire in common; a transistor makes the key wire and its
+  ground the only one.
+- **Change to the PC817 and tell the safety audit** if keying on the air (the first
+  RF stage of "Bring-up on NR7Y CW") shows the radio keying by itself, a key held
+  after the box lets go, box resets or USB drop-outs.
+- **The audit's grades:** on the bench, GO WITH STEPS, as for the PC817. Unattended,
+  a transistor is acceptable in principle on this battery handheld, graded with the
+  rest of the route after the bench; the hardware timer ("What stops a stuck key on
+  NR7Y CW") is still required.
 
 Conditions for the MOSFET:
 
