@@ -1,14 +1,28 @@
 # A handheld for testing on 2 m
 
-> **Parked.** This route (custom firmware on the radio, commands over its USB-C
-> port) is parked: nothing here is to be flashed onto a radio. A handheld is now
-> driven with its stock firmware through its headset jack, by the keyer box: see
-> [A handheld through its headset jack](keyer.md#a-handheld-through-its-headset-jack)
-> in keyer.md, which also has the jack's wiring from evidence and the checks to make
-> on your own cable. The code below stays, tested against simulations only. The
-> stock firmware's settings that can transmit by themselves are in
+> **Parked.** This route (a custom `hfnode` image built on NR7Y's CW firmware, in
+> `firmware/uv-k1`, taking commands over the radio's USB-C port) is parked: nothing
+> here is to be flashed onto a radio. A UV-K1 is now driven through its headset jack
+> (the K-plug) by the keyer box, on its firmware as released, unmodified, in one of
+> two ways:
+>
+> - **A stock radio by MCW**: its stock firmware and no paddle rework, the box
+>   holding its PTT and keying a tone into its microphone. See
+>   [A handheld through its headset jack](keyer.md#a-handheld-through-its-headset-jack)
+>   in keyer.md, which also has the jack's wiring from evidence and the checks to
+>   make on your own cable.
+> - **A radio with NR7Y's paddle rework, on NR7Y's v1.3 or v1.3.1 release firmware,
+>   by CW**: the box keying it as a straight key. See
+>   [A UV-K1 on NR7Y in CW mode (paddle-reworked)](keyer.md#a-uv-k1-on-nr7y-in-cw-mode-paddle-reworked)
+>   in keyer.md.
+>
+> The code below stays, tested against simulations only, and the radio settings on
+> this page are the parked image's, not either route's. The stock firmware's
+> settings that can transmit by themselves are in
 > [The stock firmware's own transmissions](#the-stock-firmwares-own-transmissions)
-> at the end.
+> at the end; NR7Y's are in
+> [Setting up NR7Y, every session](keyer.md#setting-up-nr7y-every-session) in
+> keyer.md.
 
 `hfnode` can drive a Quansheng handheld (a UV-K1 or UV-K5 v3; not the older UV-K5,
 which has a different processor, from memory) instead of the IC-7300, so that the
@@ -16,10 +30,11 @@ whole system can be tried locally on 2 m before going on HF: the code sheet, the
 protocol, the decoder, the gateways and the filter, all with two handhelds across
 the room.
 
-The node's handheld runs the NR7Y CW firmware with commands added for `hfnode`
-([firmware/uv-k1](../firmware/uv-k1/README.md)): the node sends it text over the
-radio's USB-C port and its keyer sends it, the way the IC-7300's keyer takes CI-V
-commands. The command set is in [handheld-protocol.md](handheld-protocol.md).
+In this parked route, the node's handheld runs the NR7Y CW firmware with commands
+added for `hfnode` ([firmware/uv-k1](../firmware/uv-k1/README.md)): the node sends
+it text over the radio's USB-C port and its keyer sends it, the way the IC-7300's
+keyer takes CI-V commands. The command set is in
+[handheld-protocol.md](handheld-protocol.md).
 Everything in `hfnode` has been tested against a simulated firmware, and the
 firmware's own logic against a simulated radio; nothing here has keyed a real
 radio.
@@ -249,7 +264,10 @@ somewhere other than the agreed frequency, whatever the box does. The box's limi
 do not cover them and the node cannot read them, so they are checked at the radio
 every session, with the rest of the list in
 [Setting up the radio, every session](keyer.md#setting-up-the-radio-every-session)
-in keyer.md. Line numbers are in the radio's manual, `K1_EN.txt`.
+in keyer.md. Line numbers are in the radio's manual, `K1_EN.txt`. For a radio on
+NR7Y in CW mode, the list in
+[Setting up NR7Y, every session](keyer.md#setting-up-nr7y-every-session) takes the
+place of this one.
 
 - **WX (menu 18) OFF**, no "DW" on the display. At CHAN_A or CHAN_B, every
   transmission goes out on that channel, whatever the main channel shows (:299-302,

@@ -381,7 +381,7 @@ the air.
 | `hfnode keyer --config C hangtest` | **yes** | Identify, then hang the box's control loop mid-transmission: its watchdog must open the key within 0.5 s. |
 | `hfnode keyer --config C stucktest` | **yes** | Identify, then make the box hold its key down: its 1 s limit must open the key and lock the box until it is unplugged. |
 | `hfnode keyer --config C linktest` | **yes** | Key a long message, then stop talking to the box: its link timeout must open the key by itself, as if the node had died. |
-| `hfnode handheld --config C check` | no | A handheld running the CW firmware in `firmware/uv-k1` ([docs/handheld.md](docs/handheld.md)): its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
+| `hfnode handheld --config C check` | no | Parked route ([docs/handheld.md](docs/handheld.md)): a handheld running the custom CW firmware in `firmware/uv-k1`: its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
 | `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
 | `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it, as given: include your call. |
 | `hfnode handheld --config C linktest` | **yes** | Bring-up: check that the firmware stops on its own when the node goes silent. |
@@ -420,9 +420,9 @@ files listed in [docs/texting.md](docs/texting.md#files-in-state_dir).
 - [docs/macos-setup.md](docs/macos-setup.md): running the node on a Mac.
 - [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
-- [docs/keyer.md](docs/keyer.md): any radio through the keyer box: parts, wiring, flashing, radio settings, bring-up. Its protocol: [docs/keyer-protocol.md](docs/keyer-protocol.md).
+- [docs/keyer.md](docs/keyer.md): any radio through the keyer box: parts, wiring, flashing, radio settings, bring-up, including a Quansheng UV-K1 through its headset jack (stock firmware by MCW, or NR7Y's firmware on a paddle-reworked radio by CW). Its protocol: [docs/keyer-protocol.md](docs/keyer-protocol.md).
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/texting.md](docs/texting.md): reaching contacts by text (Google Voice) and iMessage, and checking it.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.
-- [docs/handheld.md](docs/handheld.md): testing locally on 2 m with a Quansheng handheld instead of the IC-7300; [docs/handheld-protocol.md](docs/handheld-protocol.md): the commands `hfnode` keys it with; [firmware/uv-k1](firmware/uv-k1/README.md): the handheld's firmware with those commands, and how to build and flash it.
+- [docs/handheld.md](docs/handheld.md): **parked**: a Quansheng handheld driven over its USB-C port by a custom firmware, for testing locally on 2 m (a UV-K1 is now keyed by the keyer box: [docs/keyer.md](docs/keyer.md)); [docs/handheld-protocol.md](docs/handheld-protocol.md): the commands `hfnode` keys it with; [firmware/uv-k1](firmware/uv-k1/README.md): that firmware, not to be flashed.
 - [hfnode.example.toml](hfnode.example.toml): every config key, with comments.

@@ -18,7 +18,9 @@ afterwards.
 
 The same box can also drive an FM handheld through its headset jack, holding its
 PTT and keying a Morse tone into its microphone: see "A handheld through its
-headset jack" below.
+headset jack" below. A Quansheng UV-K1 with NR7Y's paddle rework, running NR7Y's
+firmware in its CW mode, is keyed instead as a straight key through the same jack:
+see "A UV-K1 on NR7Y in CW mode (paddle-reworked)" below.
 
 The IC-7300 over CI-V ([hardware-test-plan.md](hardware-test-plan.md)) works as
 before; `station.rig` picks one or the other.
@@ -430,6 +432,15 @@ rest, its duty budget, or the node's duty window. It says which, and waits.
 
 ## A handheld through its headset jack
 
+**This section is for a stock UV-K1: its own firmware, and no paddle rework.**
+NR7Y's paddle rework removes R72, which cuts the 3.5 mm sleeve, the contact this
+cable holds as the PTT, from the radio's PTT (NR7Y's rework guide, as the safety
+audit read it). So the cable below cannot key a reworked radio: for one running
+NR7Y's firmware, see "A UV-K1 on NR7Y in CW mode (paddle-reworked)" below. Any
+other combination (NR7Y without the rework, or the rework on the stock firmware) is
+not covered here: ask the safety audit first. The settings list in this
+section ("Setting up the radio, every session") is the stock firmware's.
+
 The same box can drive an FM handheld, here the Quansheng UV-K1, through its
 two-pin headset jack (the "K-plug"). The radio keeps its own firmware and needs no
 programming cable. An FM handheld has no key jack and no CW mode: it transmits
@@ -823,6 +834,499 @@ something else is holding.
 
 1. **Pull the K-plug out of the radio.** That opens the PTT, whatever the box, the
    computer or the software is doing.
+2. **Switch the radio off.**
+3. Then the box's USB cable, then the computer, as in "Stopping it by hand" above.
+
+## A UV-K1 on NR7Y in CW mode (paddle-reworked)
+
+For a Quansheng UV-K1 that has NR7Y's paddle rework and runs NR7Y's CW firmware,
+v1.3 or v1.3.1, the release build as published, unmodified. The radio sends real
+CW from its own CW mode. The box's key output, through the PC817 of "Wiring the
+box" or through one MOSFET (below), closes the radio's PTT line as a straight key,
+with `[keyer] output = "key"`, and NR7Y keys its carrier while the line is closed.
+The node hears the radio's sidetone in its speaker, through a sound card, and checks
+it with the same sidetone monitor as on any radio.
+
+```
+radio speaker, 2.5 mm tip   ──10 kΩ / 1 kΩ / 1 µF──► sound card ──► hfnode: decoder, sidetone
+radio PTT line, 3.5 mm tip  ◄──PC817 or MOSFET (GP16)── keyer box ◄──USB── hfnode: keyer
+radio ground, 2.5 mm sleeve ── PC817 emitter or MOSFET source, sound card ground
+```
+
+NR7Y references below are to its source, github.com/briand/uv-k1-k5v3-firmware-custom
+at tag v1.3.1 (commit 47075bf), with paths under `App/` unless noted, as the
+project's safety audit read it. v1.3 differs from v1.3.1 only in the hand key's
+release debounce (`app/cwkeyer.c:99`). The rework is NR7Y's rework guide
+(github.com/briand/cw-firmware-docs at 5320013: `docs/hardware/rework-overview.md`,
+`rework-uv-k1.md` and `cw-paddle-input.md`) and the older "Paddle Rework" PDF in the
+firmware's repository. The wiring, settings and stages are the audit's rulings for
+this route (`audit/req-handheld-nr7y-cw-ruling.md`, and
+`audit/req-handheld-nr7y-ruling.md` for the settings it keeps).
+
+**Nothing here has been tried on a radio.** The audit's grade is GO WITH STEPS for
+connecting with no RF and for keying on the bench with you at the radio, at Power
+LOW 1, into a 2 m dummy load, with the wiring, settings and stages below. Never key
+the radio through coax to an antenna (K1_EN.txt:68). Running it unattended is not
+cleared: see "What stops a stuck key on NR7Y CW" below.
+
+### The rework, and what it does to the jack
+
+NR7Y's rework guide ("Rework Description" in `rework-overview.md`) makes four
+changes:
+
+1. R72 removed: the 3.5 mm sleeve is cut from the PTT. It is now only the radio's
+   serial-input line (PA10), which the firmware drives low as a paddle's ground in
+   its Port modes (`app/cwhardware.c:546-551`).
+2. R70 removed: the 3.5 mm tip loses its +3.3 V feed.
+3. A wire from the 3.5 mm ring to the SWDIO pad: the dah input, PA13
+   (`app/cwhardware.c:456-457`, `:616-629`). The ring is still the microphone line
+   too.
+4. A wire from the 3.5 mm tip to the PTT pin (PB10): the dit, or straight-key,
+   input.
+
+The older PDF calls change 3 the sleeve; the docs site and the firmware both say the
+ring. After the rework a speaker-mic's PTT no longer works, which is why the MCW
+cable of the section above cannot key this radio. The key contact is expected on the
+**3.5 mm tip**, and the touch test in "Bring-up on NR7Y CW" finds it with no RF.
+
+**If your radio's rework is not this one** (R72 and R70 out, the tip wired to the
+PTT, the ring to the SWDIO pad), for example NR7Y's older beta (a wire to a
+transistor leg) or only its older "straight key mod", or you are not sure which you
+did: stop and ask the safety audit before anything else here. A photo of the board
+settles it.
+
+### Wiring for NR7Y CW
+
+- **The key is the box's key output**, GP16, through one of two switches, both
+  GO WITH STEPS for the bench and both with the audited firmware unchanged:
+  - **The PC817**, the 470 Ω and the required 4.7 kΩ pull-down, exactly as in
+    "Wiring the box" above. Its **collector** goes to the **3.5 mm tip** (the PTT
+    line) and its **emitter** to the **2.5 mm sleeve** (the radio's ground).
+  - **Or one logic-level N-channel MOSFET** (a 2N7000 in TO-92, or similar) and the
+    same required 4.7 kΩ pull-down: two parts, the fewest that are safe. See "The
+    one-MOSFET key" below.
+
+  Either way the return goes to the 2.5 mm sleeve, **never to the 3.5 mm sleeve**,
+  which after the rework is the radio's serial input.
+- In CW mode with `CWkin` at `PTT HandKey`, NR7Y reads the PTT line itself as a
+  straight key (`app/cwkeyer.c:600-660`): closing the contact is key down, and
+  opening it is key up after the release debounce. It is the same line a
+  speaker-mic's PTT pulls.
+- **Ground is the radio's true ground**: the 2.5 mm sleeve if the AIOC label in "The
+  cable" above holds, confirmed by continuity to the battery's negative contact with
+  the radio off. Never a contact NR7Y drives as a "port ground".
+- **The speaker to a USB sound card**, as in "The cable" above: from the speaker
+  contact (the 2.5 mm tip if the AIOC label holds), 10 kΩ in series, 1 kΩ from there
+  to ground, and 1 µF from there to the sound card's mic or line input. Its ground is
+  the 2.5 mm sleeve. None of the three can be left out: the 1 µF blocks DC both
+  ways (the speaker amplifier's DC is not known, and a mic input puts a bias on its
+  plug), the 10 kΩ keeps the amplifier's load at 11 kΩ or more whether or not it is
+  bridge-tied, and the 1 kΩ cuts up to about 2 V RMS to a mic input's level.
+- **Never connected:** the 2.5 mm ring (the radio's serial output), the 3.5 mm ring
+  (the microphone and the rework's SWDIO wire) and the 3.5 mm sleeve (the serial
+  input). Cut them short and insulate them. Only three contacts are used: key,
+  ground and speaker.
+- The key and ground can be on one two-pin K-plug or on two separate plugs: the key
+  on a 3.5 mm plug's tip, and ground and speaker on a 2.5 mm plug. Either way the
+  switch's return (the PC817's emitter or the MOSFET's source) goes to the 2.5 mm
+  sleeve.
+- A clip-on ferrite at each end of the cable (the audit's C10).
+
+Not any of these:
+
+- **Not NR7Y's own straight-key hookup for a reworked radio**: a plain TRS key in the
+  3.5 mm jack with `CWkin` at `Port HandKey` (`rework-uv-k1.md`, "Post rework"). The
+  safety audit has not cleared it, for two reasons. Its return is the 3.5 mm sleeve,
+  the radio's serial input driven low by the firmware (`app/cwhardware.c:546-551`),
+  which would put the cable on the serial contact that stays unconnected here. And
+  in `Port HandKey` either the tip or the ring keys the radio
+  (`app/cwkeyer.c:610-620`), so a mono plug, or any short from the ring to the
+  sleeve, is a key held down, with no time-out in CW to end it; NR7Y's own stuck-key
+  check runs only at power-on and when that menu item is chosen (`main.c:222`,
+  `app/menu.c:1137`). With `PTT HandKey` and the return on the 2.5 mm sleeve, only
+  the tip keys the radio, and a short on the 3.5 mm ring or sleeve keys nothing.
+- **Not a mono plug.** It shorts the ring to the sleeve inside the jack, and both
+  rings stay unconnected here.
+- **Not a 2.5 mm to 3.5 mm adapter from the radio straight into the computer.** It
+  would pass the 2.5 mm ring, the radio's serial line, and the full speaker level
+  with no DC block. A TRS plug in a Mac's headset jack meets the Mac's headphone
+  output, not an input: the Mac would then drive the radio's speaker and serial
+  lines. A Mac's own mic and headset jack can't take the radio: use the USB sound
+  card.
+- **Not a Pico 2 pin wired straight to the key contact** (the audit's grade: NO-GO).
+  The box's safe state is its key pin driven low: at power-up, in every fault
+  handler and through a watchdog reset (`firmware/pico2-keyer/src/main.rs:14-17`,
+  `:174-181`). The radio's PTT transmits when it is pulled low (`App/board.c:86-88`,
+  `driver/gpio.h:79`). Wired directly, every safe state of the box would key the
+  radio, with no radio time-out in CW to stop it, and a Pico that is resetting, in
+  BOOTSEL or unpowered does not leave the line open either. A switch turns "pin
+  low" into "line open": the PC817's or the MOSFET's output is open whenever GP16 is
+  low or undriven, whatever the Pico does. A direct wire would need new firmware,
+  with a new build id and hash and a fresh audit, and would still leave the
+  resetting and unpowered cases unresolved.
+- **Not any other switch** than the PC817, the one MOSFET below, or the photoMOS
+  named under "Bring-up" above (an AQY212GH or AQY211EH) if the key line's
+  measurement rules out the PC817. The safety audit also allows an NPN transistor
+  (a 2N3904 or similar, with a 4.7-10 kΩ base resistor and the pull-down), but it
+  saves nothing over the PC817 and is not described here. Any other part or circuit
+  goes to the audit first.
+- **Not without the 4.7 kΩ pull-down**, whichever switch. It is the only guard
+  against erratum RP2350-E9: a pad nothing drives (while the chip starts, resets,
+  sits in BOOTSEL or is unplugged) can float near 2 V ("Wiring the box"), enough to
+  turn on a MOSFET, a transistor or the optocoupler's LED and key the radio at
+  power-up, with no radio time-out in CW.
+
+### The one-MOSFET key
+
+The fewest parts the safety audit clears on the key side: one logic-level N-channel
+MOSFET (a 2N7000 in TO-92, or similar) and the 4.7 kΩ pull-down.
+
+```
+Pico 2                   2N7000 (or similar)       K1
+GP16 (pin 21) ─────────► gate      drain ───────── 3.5 mm tip (the PTT line)
+GND  (pin 23) ───────────────────► source ──────── 2.5 mm sleeve (ground)
+GP16 ──4.7 kΩ── GND
+```
+
+- Gate to GP16 (pin 21), the 4.7 kΩ from the gate to GND (pin 23), drain to the
+  3.5 mm tip, source to the Pico's GND and the radio's true ground (the 2.5 mm
+  sleeve).
+- GP16 high turns it on and closes the key, exactly as it lights the PC817's LED,
+  so the audited firmware is unchanged: only the wiring differs.
+- **The MOSFET sits in the box**, at GP16, so the gate wire is a few centimetres
+  long. The long wire to the radio is the drain, with a clip-on ferrite on it at the
+  radio end (the audit's C10).
+- **What only the PC817 adds:** a key path isolated from the Pico's ground, and an
+  output that takes a line of either polarity or a higher voltage. On this radio
+  neither is needed once the key line's measurement shows a positive logic-level
+  line, since the line is a 3.3 V processor pin with a pull-up (`App/board.c:73`,
+  `:85-87`) and the audio cable ties the two grounds anyway. The one side effect:
+  the key wire becomes a second ground path between the Pico and the radio, which
+  can bring hum into the receive audio. That is a nuisance, not damage; if it
+  confuses the node, use the PC817.
+
+Conditions for the MOSFET:
+
+- **The key line's measurement** (stage zero of "Bring-up on NR7Y CW", step 2) must
+  read **+2.5 V to +5 V** open and carry **under 1 mA** through 1 kΩ. A negative
+  reading means stop: the MOSFET's body diode would conduct and key the radio. Over
+  5 V means stop and use the PC817.
+- **Its own box meter checks**, in place of steps 1 and 2 of "Wiring the box": box
+  plugged into the computer, nothing running, nothing in the radio.
+  - Volts, drain to source: **0 V**.
+  - Diode test, red on the drain and black on the source: **open**.
+  - Red on the source and black on the drain: **one diode drop** (about 0.4-0.8 V).
+    That is the body diode, and it is normal.
+  - A beep, or near 0 V either way round, means it is shorted: do not plug it in.
+  - Volts, gate to GND: **0 V**.
+  - With the box unplugged from USB, gate to GND reads about **4.7 kΩ**: the
+    pull-down is there.
+- **The zero-RF stages prove the rest**, at break-in off with no RF: leakage
+  pulling the line low with the box idle shows as a sidetone with no keying (the
+  30 s watch in stage none), and a MOSFET that does not turn fully on at 3.3 V shows
+  as "not heard" (stage listen, step 3).
+
+### Parts for NR7Y CW
+
+The Pico 2 with its key output, either:
+
+- **the fewest parts:** one logic-level N-channel MOSFET (a 2N7000 or similar) and
+  one 4.7 kΩ resistor ("The one-MOSFET key");
+- **or as audited:** one PC817, a 470 Ω and a 4.7 kΩ resistor ("Wiring the box");
+- if the key line's measurement rules both out, one AQY212GH or AQY211EH photoMOS
+  with the same two resistors as the PC817;
+
+and:
+
+- for the speaker, a 10 kΩ and a 1 kΩ resistor and a 1 µF film or ceramic capacitor
+  rated 25 V or more;
+- a USB sound card with a mic or line input;
+- a two-pin K-plug with its six contacts on separate wires: a cut-up Kenwood-style
+  speaker-mic. Not an AIOC, and not a 2.5 mm to 3.5 mm adapter as it is;
+- two clip-on ferrites;
+- a multimeter, a 1 kΩ resistor and a clip lead;
+- a 2 m dummy load, 50 Ω, rated 5 W or more, with an adapter for the radio's
+  antenna socket;
+- the box's USB cable, and solder, tape or a terminal block.
+
+Not needed here: the second PC817, the BAT85 and the 1 nF of the PTT output, and
+the MCW tone parts (the microphone stays unconnected). A second 2 m receiver is
+optional, handy for hearing the signal.
+
+### Setting up NR7Y, every session
+
+This list replaces the stock one ("Setting up the radio, every session" above) for
+these radios. The node can read none of it. Go through it each time before the node
+keys. Lock the keypad last: unlocking it for any change means going through the list
+again. The names are NR7Y's menu items.
+
+**First, stop if the menu shows `AlarmT`, `ANI ID` or `D Resp`.** Those items exist
+only in builds with the alarm or DTMF calling (`ui/menu.c:113-124`), so the radio is
+not running the CW release build this list was read from. Stop and ask the safety
+audit.
+
+CW:
+
+- **`Mode`: `CW`.** It puts the radio's keyer in charge of its PTT (`radio.c:809`;
+  `app.c:1510`).
+- **`CWkin`: `PTT HandKey`** (the first item). It reads only the PTT line
+  (`app/cwkeyer.c:600-660`; `settings.h:68-80`). **Never a Port mode**
+  (`Port HandKey`, a Port iambic or a Port+Btn mode), even on a reworked radio: they
+  drive the serial input (PA10) low as a paddle's ground and make PA13 an input
+  (`app/cwhardware.c:536-551`, `:616-629`). Never a `USB Port` mode (the USB-C data
+  lines), and never an iambic or bug mode, in which a held contact becomes
+  auto-repeated elements.
+- **`CWbkin` (break-in): `OFF` for every zero-RF stage, `ON` only for the keyed
+  stages**, when you decide to key. Off, a key-down plays the sidetone and transmits
+  nothing (`app/cwapp.c:102-144`). On, the radio puts out a real carrier and goes
+  back to receive 300 ms after key-up (`misc.c:89`, `app/cwapp.c:204-208`).
+- **`CWvol`: 1 to 6, never 0** (4 is the default). Write it down and keep it. At 0
+  there is no sidetone (`app/cwkeyer.c:191-215`): the node then cannot hear its own
+  keying and refuses to key, which is safe, but a stuck key could not be heard
+  either.
+- **`CWfreq`: the same as `[keyer] sidetone_hz`** (600 Hz for both by default). It
+  runs 450-1200 Hz in 50 Hz steps (`settings.c:365`; `app/menu.c:1111`).
+- **`CWmsg1` to `CWmsg4` and `CWmrpt`: never play, repeat or record a message.** A
+  message playing or repeating transmits by itself, and repeats on a timer
+  (`app/app.c:2086-2092`; `app/menu.c:1188`).
+
+What else can make it transmit, for longer, or somewhere else:
+
+- **`F1Shrt`, `F1Long`, `F2Shrt`, `F2Long` and `M Long`: all five `NONE`.** The side
+  key actions include PLAY and REPEAT CW MSG, CODE PRACTICE, MODE, POWER HIGH, PTT,
+  1750Hz, MUTE (a calibration write, below), VOX, SCAN and RX MODE
+  (`ui/menu.c:502-563`).
+- **`VOX`: `OFF`.** A VOX trigger prepares a transmission, and in CW mode that starts
+  a CW carrier (`app.c:1146-1157`, `:1365-1366`; `functions.c:370-375`,
+  `:251-283`).
+- **`Power`: `LOW 1`**, the lowest. Never `USER` (a level stored apart,
+  `radio.c:665-666`) or `HIGH`, and nothing above LOW 1 without the safety audit. CW
+  uses the channel's power (`radio.c:1555`). The watts at LOW 1 have not been
+  measured.
+- **`Roger`, `PTT ID`, `STE` and `RP STE`: all `OFF`.** The end of a CW transmission
+  sends the end-of-transmission tail (`app/cwapp.c:57`): Roger adds a burst
+  (`radio.c:1525-1534`), PTT ID adds tones, STE a tail tone and 200 ms of carrier
+  (`radio.c:1496-1511`), and RP STE holds the transmitter up to 1 s more
+  (`app.c:1094-1097`, `:1856-1864`).
+- **`RxMode`: `MAIN ONLY`**, and VFO B set to the same frequency as A.
+  `DUAL RX RESPOND` and `CROSS BAND` can transmit on the other VFO
+  (`ui/menu.c:257-263`).
+- **`TxODir`: `OFF`**: no repeater offset, and no + or - on the display.
+- **The frequency: 144.1-148.0 MHz on the display, the same as
+  `station.frequency_hz`, checked before every keyed step.** `F Lock`, in the hidden
+  menu, can be anything up to UNLOCK ALL (`ui/menu.c:348-367`): the FCC label does
+  not limit where this firmware transmits.
+- **Not scanning.**
+- **`BusyCL`: `OFF`.** With it on, a busy channel refuses the PTT: safe, but it would
+  confuse the keyed stages.
+- **`TxTOut`: `01m:00s`, `SetPTT`: `CLASSIC`, `SetTOT`: `VISUAL`.** None of them does
+  anything in CW; they matter if `Mode` is ever FM again (`ONEPUSH` latches the
+  transmitter on with one press, `app.c:1522-1548`; `SOUND` and `ALL` play the
+  time-out alert through the transmitter, `app.c:1187-1226`).
+- **`SetLck`: `KEYS ACTIONS`**, so that with the keypad locked the side keys are
+  locked too (`app.c:2479-2480`). Not the PTT option, which blocks the PTT while
+  locked (`app.c:2456-2459`).
+- **The keypad locked, last**: a long press of F (`generic.c:45-56`).
+
+For the node to hear the radio:
+
+- **Squelch 0** (open). The node needs the band noise (`[keyer] min_level_dbfs`) to
+  tell the sidetone from the band.
+- **`BatSav`, `Scramb`, `RxDCS`, `RxCTCS`, `TxDCS` and `TxCTCS`: all `OFF`**, for a
+  continuous receive noise.
+- **`Mic`, `Compnd` and `Filter`**: write them down as found, and keep them.
+
+At the radio:
+
+- **Battery only.** No USB-C cable and no charging base while anything can key: the
+  manual forbids transmitting while charging (K1_EN.txt:108), and nothing in the
+  firmware stops it (`battery.c:167-187` only shows it on the display).
+- **Hands off the keypad and the side keys while anything can hold the key.** The
+  keypad lock does not apply while the radio transmits (`app.c:2456`). In CW the
+  digits send no DTMF (`app.c:2569-2573`), but any key stops or starts something.
+  Lay the radio on its back with nothing pressing on its sides.
+- **Power the radio on with nothing holding its key**, and **never power it on
+  holding PTT and side key 1**: that opens the hidden menu (`helper/boot.c:60-61`),
+  which clears the keypad lock and saves (`main.c:172-184`).
+
+Calibration: stay out of the three things that write it. The radio's calibration has
+a flash sector of its own, which the menu's Reset never touches
+(`settings.c:764-785`), so a damaged one stays damaged.
+
+- **The hidden menu** (`FrCali`, `BatCal`, `BatTyp`, `F Lock`, `350 En`, `Reset`;
+  `app/menu.c:58-80`, `settings.c:1285-1288`). Never enter it.
+- **`SetVol`.** It sets a gain that every settings save writes into the calibration
+  sector (`app/menu.c:1081-1082`, `settings.c:1451-1457`). Never change it. The
+  volume knob is fine.
+- **`MUTE`** (a side-key action). It sets that gain to 0 (`app/action.c:806`), and a
+  save while muted writes the 0 into calibration, so the radio boots silent. The
+  side keys at `NONE` cover it.
+
+Ordinary menu changes do not damage calibration: the flash is rewritten only where
+its bytes differ (`driver/py25q16.c:284`), and with `SetVol` untouched that byte
+does not. Recommended, not required: keep any calibration file saved before NR7Y was
+flashed. If there is none, one read-only dump (UVTools2 read, once, with the K-plug
+out and nothing keyed) makes a loss recoverable. Never restore or write calibration.
+
+### Configuration for NR7Y CW
+
+```toml
+[station]
+rig = "keyer"
+serial_port = "/dev/ttyACM0"   # the box
+frequency_hz = 144_150_000     # what the radio is set to, in 144.1-148 MHz
+key_speed_wpm = 18
+max_key_seconds = 46           # at least 46 at 18 wpm: hfnode says if too low
+
+[audio]
+device = "..."                 # the sound card the radio's speaker goes into
+pitch_hz = 600                 # the radio's CW pitch
+
+[keyer]
+output = "key"                 # the key output, as a straight key (the default)
+commissioned = "none"
+firmware_build = "a1b2c3d4"    # the build id CI printed for the UF2 you flashed
+# sidetone_hz = 600            # the radio's CWfreq, if it differs from pitch_hz
+```
+
+- **`output = "key"`.** Never `"ptt"` with the radio in CW: the PTT output would
+  hold a steady carrier for each whole piece. The key output's 1 s key-down limit
+  fits CW elements (a dash at 18 wpm is 200 ms), and with it the node runs its
+  sidetone monitor.
+- **`sidetone_hz`** (by default `pitch_hz`) must be the radio's `CWfreq`.
+- **No `ptt_contact_volts`.** It belongs to the PTT output: leave it out.
+- The node accepts 144-148 MHz with `output = "key"`
+  (`crates/hfnode/src/keyer.rs`, `BANDS_HZ`). Keep to 144.1-148.0 MHz, as the list
+  above says.
+- `firmware_build` as in "Configuration for a handheld" above.
+
+### Bring-up on NR7Y CW
+
+As "Bring-up" above, with these differences. You do every step yourself, at the
+radio, at Power LOW 1, into the 2 m dummy load, with the plug in reach: pulling it
+out of the 3.5 mm jack opens the key. `CWbkin` stays `OFF` until the keyed steps.
+The time-out test of "Bring-up with a handheld" is dropped: NR7Y has no time-out in
+CW ("What stops a stuck key on NR7Y CW" below), and holding a carrier for over a
+minute would prove nothing the code doesn't already show. C is your `hfnode.toml`.
+
+**Stage zero** (no computer, no RF):
+
+1. **Find the contacts** (the audit's C1), with the bare plug in the jack and each
+   of its six contacts on its own wire, as in "The cable" above. Radio off, battery
+   out: continuity from each contact to the battery's negative contact; the ones
+   that beep are ground (expect the 2.5 mm sleeve). Then radio on, on its battery
+   only: DC volts from each contact to ground. Expect about 3.3 V on the 3.5 mm tip
+   (the PTT line), and possibly on the serial input. AC volts show the hiss on the
+   speaker contact.
+2. **Measure the key line**, radio in CW, nothing on the 3.5 mm tip but the meter.
+   Open, tip to ground must read **+2.5 V to +15 V** for the PC817, and **+2.5 V to
+   +5 V** for the MOSFET. Shorted to ground through a milliammeter (or the 1 kΩ,
+   measuring the volts across it), it must carry **well under 1 mA** for the PC817,
+   and **under 1 mA** for the MOSFET. A negative reading rules out the MOSFET (its
+   body diode would key the radio), and over 5 V means the PC817 instead. If the
+   PC817's limits fail too, use the photoMOS, as in "Bring-up" above.
+3. **The touch test.** Radio in CW, `CWkin` at `PTT HandKey`, `CWbkin` `OFF`. Touch
+   the 3.5 mm tip to ground through the 1 kΩ for a second, and touch no other
+   contact. The sidetone must sound and the red transmit light stay off: that
+   identifies the key contact, and shows that break-in off puts out no carrier. If
+   the red light comes on, pull the plug out and stop. If the sidetone comes from
+   any contact other than the 3.5 mm tip, stop and ask the safety audit before the
+   cable goes in.
+4. The box's own meter checks on its key output: under "Wiring the box" above for
+   the PC817, under "The one-MOSFET key" for the MOSFET.
+
+Write the results down:
+
+| Contact | Ground (radio off) | DC volts (radio on) | Hiss | Touch test | Used for |
+|---|---|---|---|---|---|
+| 2.5 mm tip | | | | not tried | speaker |
+| 2.5 mm ring | | | | not tried | **not connected** (serial from the radio) |
+| 2.5 mm sleeve | | | | not tried | ground |
+| 3.5 mm tip | | | | | key (the PTT line) |
+| 3.5 mm ring | | | | not tried | **not connected** (microphone, dah) |
+| 3.5 mm sleeve | | | | not tried | **not connected** (serial to the radio) |
+
+Build the cable only if your table gives one ground, one contact with the hiss, and
+the 3.5 mm tip sounding the sidetone with +2.5 V to +15 V on it (+5 V at most for
+the MOSFET). If it does not,
+stop and ask. Do not guess.
+
+**Stage none** (no RF, `CWbkin` `OFF`), with the cable in:
+
+1. `hfnode keyer --config C check`, then `hfnode listen --config C`, as in
+   "Bring-up" above.
+2. **Watch for 30 s** with the box idle: no sidetone and no red light. A sidetone
+   here means the key is closed at the radio: pull the plug out.
+
+Then set `commissioned = "listen"`.
+
+**Stage listen, with no RF first** (`CWbkin` still `OFF`), the red light staying off
+throughout:
+
+3. `hfnode keyer --config C key "TEST"` must report `heard`.
+4. `hfnode keyer --config C sidetone` must pass.
+
+Then, **with RF**, when you decide to key: `CWbkin` `ON`, Power LOW 1, the dummy
+load on, the plug in reach and the ferrites fitted.
+
+5. `hfnode keyer --config C key "TEST"`, several times: `heard`, and a clean unkey
+   every time (the audit's C10).
+
+Nothing above LOW 1 without the safety audit. Then set `commissioned = "keying"`.
+
+**Stage keying** (RF): `hangtest`, `stucktest` and `linktest`, as in "Bring-up"
+above. Write down what each showed: the safety audit grades unattended use from
+these results. Then `commissioned = "done"` lets `hfnode run` start, with you at the
+radio: running it unattended is not cleared (below).
+
+**If the node reports the radio not heard.** NR7Y v1.3 holds each key-up 40 ms late
+(v1.3.1: 10 ms), so every element sounds up to 40 ms long, which at 18 wpm takes up
+most of a 67 ms gap. The node may then judge the keying not heard and refuse to key,
+which is safe. Whether it does is for the bench to show. If it does, the fix is a
+change to the node or NR7Y v1.3.1, and either goes through the safety audit first;
+reflashing the radio is not cleared.
+
+### What stops a stuck key on NR7Y CW
+
+Fastest first:
+
+1. **The box's key-down limit** (1 s), here the first stop. It opens the key and
+   trips the box.
+2. **The box's watchdog** (0.5 s), **its clock check**, and **a panic or fault**,
+   which open the key.
+3. **The box's link timeout** (2 s) and **USB going away**.
+4. **The box's run limit** (60 s), **its rest and its duty budget.**
+5. **The node's sidetone monitor**, with the key output's rules (the MCW section's
+   receive-noise check does not apply here). The sidetone must be at least 15 dB
+   over the band noise (`hfnode keyer sidetone`), and at least 10 dB over the key-up
+   audio in 85% of the slices, at an audio delay of up to 500 ms. A stuck key is the
+   tone held 0.5 s past the box's key-up, or a steady tone for 30 s. NR7Y plays the
+   sidetone in the speaker while it transmits (`functions.c:279-283`;
+   `radio.c:1557-1564`) and stops it at key-up (`radio.c:1571-1581`). A stuck key
+   latches the transmit inhibit and emails `alert_to`, but the node cannot open the
+   line.
+6. **You, at the radio**: pull the plug out of the 3.5 mm jack.
+
+Not there:
+
+- **The radio's time-out.** NR7Y switches it off in CW: every poll with the key held
+  sets the countdown to 0 (`app/cwapp.c:151`, `:181`), and the countdown fires only
+  from a value that is not 0 (`scheduler.c:38-43`, `:65`).
+- **A check of the key line.** The key output has no line sense; the BAT85 sense is
+  the PTT output's only.
+
+So nothing independent of the box ends a carrier held by a shorted optocoupler or by
+RF on the lead. **Running it unattended is not cleared on this route**, and it needs
+one thing more than the MCW route: an independent hardware timer that opens the key
+line (or cuts the radio's power) after a few seconds of continuous key-down. Even
+after the bench and with that timer, the safety audit grades unattended use RISK at
+best, and never on coax.
+
+### Stopping NR7Y CW by hand
+
+1. **Pull the plug out of the radio's 3.5 mm jack** (the K-plug, or the 3.5 mm plug
+   if the key has its own). That opens the key, whatever the box, the computer or
+   the software is doing.
 2. **Switch the radio off.**
 3. Then the box's USB cable, then the computer, as in "Stopping it by hand" above.
 
