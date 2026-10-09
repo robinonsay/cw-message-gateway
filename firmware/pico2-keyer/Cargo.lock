@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "api"
 version = "0.1.0"
-source = "git+https://github.com/robinonsay/rustos?rev=c9852112283c741b19d7337f30966c2eaab75751#c9852112283c741b19d7337f30966c2eaab75751"
+source = "git+https://github.com/robinonsay/rustos?rev=8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c#8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c"
 
 [[package]]
 name = "keyer-core"
@@ -14,7 +14,7 @@ version = "0.1.0"
 [[package]]
 name = "pico2"
 version = "0.1.0"
-source = "git+https://github.com/robinonsay/rustos?rev=c9852112283c741b19d7337f30966c2eaab75751#c9852112283c741b19d7337f30966c2eaab75751"
+source = "git+https://github.com/robinonsay/rustos?rev=8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c#8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c"
 dependencies = [
  "api",
 ]

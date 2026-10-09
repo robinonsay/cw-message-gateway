@@ -18,14 +18,17 @@ bench = false
 [dependencies]
 # The box's rules, shared with hfnode's mock box.
 keyer-core = { path = "../../crates/keyer-core" }
-# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at the
-# commit that adds the timer no debugger pauses, SysTick, the application's
-# watchdog scratch registers and the fault handlers' safe state, stacked on the
-# PWM driver and its reset-safe silence_all (rustos branch
-# claude/keyer-unattended-d05o6i, on rustos #2 at c1c82c9 and
-# master cfc2b140; merged with merge commits, it stays reachable from master).
-api = { git = "https://github.com/robinonsay/rustos", rev = "c9852112283c741b19d7337f30966c2eaab75751" }
-pico2 = { git = "https://github.com/robinonsay/rustos", rev = "c9852112283c741b19d7337f30966c2eaab75751" }
+# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at
+# master's merge of rustos #4. Its api and pico2 sources are those of c9852112,
+# the commit audited before (the timer no debugger pauses, SysTick, the
+# application's watchdog scratch registers and the fault handlers' safe state,
+# on the PWM driver and its reset-safe silence_all: rustos #2 and #3). #4 renames
+# a template's Cargo.toml, which cargo read in every build and printed an error
+# for. Moving this pin can change the UF2 with no source change, since cargo
+# mixes the commit into the crate hashes that order the code. This one does
+# not: built with the same build id, the UF2 is byte for byte the audited one.
+api = { git = "https://github.com/robinonsay/rustos", rev = "8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c" }
+pico2 = { git = "https://github.com/robinonsay/rustos", rev = "8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c" }
 
 # The runtime has no unwinder.
 [profile.dev]
