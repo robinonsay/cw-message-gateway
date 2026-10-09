@@ -841,16 +841,16 @@ something else is holding.
 
 For a Quansheng UV-K1 that has NR7Y's paddle rework and runs NR7Y's CW firmware,
 v1.3 or v1.3.1, the release build as published, unmodified. The radio sends real
-CW from its own CW mode. The box's key output, the same PC817 as in "Wiring the
-box", closes the radio's PTT line as a straight key, with `[keyer] output = "key"`,
-and NR7Y keys its carrier while the line is closed. The node hears the radio's
-sidetone in its speaker, through a sound card, and checks it with the same sidetone
-monitor as on any radio.
+CW from its own CW mode. The box's key output, through the PC817 of "Wiring the
+box" or through one MOSFET (below), closes the radio's PTT line as a straight key,
+with `[keyer] output = "key"`, and NR7Y keys its carrier while the line is closed.
+The node hears the radio's sidetone in its speaker, through a sound card, and checks
+it with the same sidetone monitor as on any radio.
 
 ```
 radio speaker, 2.5 mm tip   ──10 kΩ / 1 kΩ / 1 µF──► sound card ──► hfnode: decoder, sidetone
-radio PTT line, 3.5 mm tip  ◄──PC817 (GP16)── keyer box ◄──USB── hfnode: keyer rig (CW)
-radio ground, 2.5 mm sleeve ── PC817 emitter, sound card ground
+radio PTT line, 3.5 mm tip  ◄──PC817 or MOSFET (GP16)── keyer box ◄──USB── hfnode: keyer
+radio ground, 2.5 mm sleeve ── PC817 emitter or MOSFET source, sound card ground
 ```
 
 NR7Y references below are to its source, github.com/briand/uv-k1-k5v3-firmware-custom
@@ -897,11 +897,17 @@ settles it.
 
 ### Wiring for NR7Y CW
 
-- **The key is the box's key output**: GP16, the PC817, the 470 Ω and the required
-  4.7 kΩ pull-down, exactly as in "Wiring the box" above. The PC817's **collector**
-  goes to the **3.5 mm tip** (the PTT line) and its **emitter** to the **2.5 mm
-  sleeve** (the radio's ground), **never to the 3.5 mm sleeve**, which after the
-  rework is the radio's serial input.
+- **The key is the box's key output**, GP16, through one of two switches, both
+  GO WITH STEPS for the bench and both with the audited firmware unchanged:
+  - **The PC817**, the 470 Ω and the required 4.7 kΩ pull-down, exactly as in
+    "Wiring the box" above. Its **collector** goes to the **3.5 mm tip** (the PTT
+    line) and its **emitter** to the **2.5 mm sleeve** (the radio's ground).
+  - **Or one logic-level N-channel MOSFET** (a 2N7000 in TO-92, or similar) and the
+    same required 4.7 kΩ pull-down: two parts, the fewest that are safe. See "The
+    one-MOSFET key" below.
+
+  Either way the return goes to the 2.5 mm sleeve, **never to the 3.5 mm sleeve**,
+  which after the rework is the radio's serial input.
 - In CW mode with `CWkin` at `PTT HandKey`, NR7Y reads the PTT line itself as a
   straight key (`app/cwkeyer.c:600-660`): closing the contact is key down, and
   opening it is key up after the release debounce. It is the same line a
@@ -912,14 +918,18 @@ settles it.
 - **The speaker to a USB sound card**, as in "The cable" above: from the speaker
   contact (the 2.5 mm tip if the AIOC label holds), 10 kΩ in series, 1 kΩ from there
   to ground, and 1 µF from there to the sound card's mic or line input. Its ground is
-  the 2.5 mm sleeve.
+  the 2.5 mm sleeve. None of the three can be left out: the 1 µF blocks DC both
+  ways (the speaker amplifier's DC is not known, and a mic input puts a bias on its
+  plug), the 10 kΩ keeps the amplifier's load at 11 kΩ or more whether or not it is
+  bridge-tied, and the 1 kΩ cuts up to about 2 V RMS to a mic input's level.
 - **Never connected:** the 2.5 mm ring (the radio's serial output), the 3.5 mm ring
   (the microphone and the rework's SWDIO wire) and the 3.5 mm sleeve (the serial
   input). Cut them short and insulate them. Only three contacts are used: key,
   ground and speaker.
 - The key and ground can be on one two-pin K-plug or on two separate plugs: the key
   on a 3.5 mm plug's tip, and ground and speaker on a 2.5 mm plug. Either way the
-  PC817's emitter goes to the 2.5 mm sleeve.
+  switch's return (the PC817's emitter or the MOSFET's source) goes to the 2.5 mm
+  sleeve.
 - A clip-on ferrite at each end of the cable (the audit's C10).
 
 Not any of these:
@@ -949,23 +959,85 @@ Not any of these:
   `:174-181`). The radio's PTT transmits when it is pulled low (`App/board.c:86-88`,
   `driver/gpio.h:79`). Wired directly, every safe state of the box would key the
   radio, with no radio time-out in CW to stop it, and a Pico that is resetting, in
-  BOOTSEL or unpowered does not leave the line open either. The PC817's output is
-  open whenever its LED is dark, whatever the Pico does. A direct wire would need
-  new firmware, with a new build id and hash and a fresh audit, and would still
-  leave the resetting and unpowered cases unresolved.
-- **Not a MOSFET or a transistor** in place of the PC817, unless the safety audit
-  has graded the exact part and circuit first. The only other switch cleared is the
-  photoMOS named under "Bring-up" above (an AQY212GH or AQY211EH), if the key line's
-  measurement rules out the PC817. Any switch keeps the 4.7 kΩ pull-down
-  (RP2350-E9).
+  BOOTSEL or unpowered does not leave the line open either. A switch turns "pin
+  low" into "line open": the PC817's or the MOSFET's output is open whenever GP16 is
+  low or undriven, whatever the Pico does. A direct wire would need new firmware,
+  with a new build id and hash and a fresh audit, and would still leave the
+  resetting and unpowered cases unresolved.
+- **Not any other switch** than the PC817, the one MOSFET below, or the photoMOS
+  named under "Bring-up" above (an AQY212GH or AQY211EH) if the key line's
+  measurement rules out the PC817. The safety audit also allows an NPN transistor
+  (a 2N3904 or similar, with a 4.7-10 kΩ base resistor and the pull-down), but it
+  saves nothing over the PC817 and is not described here. Any other part or circuit
+  goes to the audit first.
+- **Not without the 4.7 kΩ pull-down**, whichever switch. It is the only guard
+  against erratum RP2350-E9: a pad nothing drives (while the chip starts, resets,
+  sits in BOOTSEL or is unplugged) can float near 2 V ("Wiring the box"), enough to
+  turn on a MOSFET, a transistor or the optocoupler's LED and key the radio at
+  power-up, with no radio time-out in CW.
+
+### The one-MOSFET key
+
+The fewest parts the safety audit clears on the key side: one logic-level N-channel
+MOSFET (a 2N7000 in TO-92, or similar) and the 4.7 kΩ pull-down.
+
+```
+Pico 2                   2N7000 (or similar)       K1
+GP16 (pin 21) ─────────► gate      drain ───────── 3.5 mm tip (the PTT line)
+GND  (pin 23) ───────────────────► source ──────── 2.5 mm sleeve (ground)
+GP16 ──4.7 kΩ── GND
+```
+
+- Gate to GP16 (pin 21), the 4.7 kΩ from the gate to GND (pin 23), drain to the
+  3.5 mm tip, source to the Pico's GND and the radio's true ground (the 2.5 mm
+  sleeve).
+- GP16 high turns it on and closes the key, exactly as it lights the PC817's LED,
+  so the audited firmware is unchanged: only the wiring differs.
+- **The MOSFET sits in the box**, at GP16, so the gate wire is a few centimetres
+  long. The long wire to the radio is the drain, with a clip-on ferrite on it at the
+  radio end (the audit's C10).
+- **What only the PC817 adds:** a key path isolated from the Pico's ground, and an
+  output that takes a line of either polarity or a higher voltage. On this radio
+  neither is needed once the key line's measurement shows a positive logic-level
+  line, since the line is a 3.3 V processor pin with a pull-up (`App/board.c:73`,
+  `:85-87`) and the audio cable ties the two grounds anyway. The one side effect:
+  the key wire becomes a second ground path between the Pico and the radio, which
+  can bring hum into the receive audio. That is a nuisance, not damage; if it
+  confuses the node, use the PC817.
+
+Conditions for the MOSFET:
+
+- **The key line's measurement** (stage zero of "Bring-up on NR7Y CW", step 2) must
+  read **+2.5 V to +5 V** open and carry **under 1 mA** through 1 kΩ. A negative
+  reading means stop: the MOSFET's body diode would conduct and key the radio. Over
+  5 V means stop and use the PC817.
+- **Its own box meter checks**, in place of steps 1 and 2 of "Wiring the box": box
+  plugged into the computer, nothing running, nothing in the radio.
+  - Volts, drain to source: **0 V**.
+  - Diode test, red on the drain and black on the source: **open**.
+  - Red on the source and black on the drain: **one diode drop** (about 0.4-0.8 V).
+    That is the body diode, and it is normal.
+  - A beep, or near 0 V either way round, means it is shorted: do not plug it in.
+  - Volts, gate to GND: **0 V**.
+  - With the box unplugged from USB, gate to GND reads about **4.7 kΩ**: the
+    pull-down is there.
+- **The zero-RF stages prove the rest**, at break-in off with no RF: leakage
+  pulling the line low with the box idle shows as a sidetone with no keying (the
+  30 s watch in stage none), and a MOSFET that does not turn fully on at 3.3 V shows
+  as "not heard" (stage listen, step 3).
 
 ### Parts for NR7Y CW
 
-The box with its key output ("What you need" and "Wiring the box" above: the
-PC817, the 470 Ω and the 4.7 kΩ), and:
+The Pico 2 with its key output, either:
 
-- if the key line's measurement rules out the PC817, an AQY212GH or AQY211EH
-  photoMOS instead;
+- **the fewest parts:** one logic-level N-channel MOSFET (a 2N7000 or similar) and
+  one 4.7 kΩ resistor ("The one-MOSFET key");
+- **or as audited:** one PC817, a 470 Ω and a 4.7 kΩ resistor ("Wiring the box");
+- if the key line's measurement rules both out, one AQY212GH or AQY211EH photoMOS
+  with the same two resistors as the PC817;
+
+and:
+
 - for the speaker, a 10 kΩ and a 1 kΩ resistor and a 1 µF film or ceramic capacitor
   rated 25 V or more;
 - a USB sound card with a mic or line input;
@@ -1147,10 +1219,12 @@ minute would prove nothing the code doesn't already show. C is your `hfnode.toml
    (the PTT line), and possibly on the serial input. AC volts show the hiss on the
    speaker contact.
 2. **Measure the key line**, radio in CW, nothing on the 3.5 mm tip but the meter.
-   Open, tip to ground must read **+2.5 V to +15 V**. Shorted to ground through a
-   milliammeter (or the 1 kΩ, measuring the volts across it), it must carry **well
-   under 1 mA**. If it does not, do not use the PC817: use the photoMOS, as in
-   "Bring-up" above.
+   Open, tip to ground must read **+2.5 V to +15 V** for the PC817, and **+2.5 V to
+   +5 V** for the MOSFET. Shorted to ground through a milliammeter (or the 1 kΩ,
+   measuring the volts across it), it must carry **well under 1 mA** for the PC817,
+   and **under 1 mA** for the MOSFET. A negative reading rules out the MOSFET (its
+   body diode would key the radio), and over 5 V means the PC817 instead. If the
+   PC817's limits fail too, use the photoMOS, as in "Bring-up" above.
 3. **The touch test.** Radio in CW, `CWkin` at `PTT HandKey`, `CWbkin` `OFF`. Touch
    the 3.5 mm tip to ground through the 1 kΩ for a second, and touch no other
    contact. The sidetone must sound and the red transmit light stay off: that
@@ -1158,7 +1232,8 @@ minute would prove nothing the code doesn't already show. C is your `hfnode.toml
    the red light comes on, pull the plug out and stop. If the sidetone comes from
    any contact other than the 3.5 mm tip, stop and ask the safety audit before the
    cable goes in.
-4. The box's own meter checks on its key output, under "Wiring the box" above.
+4. The box's own meter checks on its key output: under "Wiring the box" above for
+   the PC817, under "The one-MOSFET key" for the MOSFET.
 
 Write the results down:
 
@@ -1172,7 +1247,8 @@ Write the results down:
 | 3.5 mm sleeve | | | | not tried | **not connected** (serial to the radio) |
 
 Build the cable only if your table gives one ground, one contact with the hiss, and
-the 3.5 mm tip sounding the sidetone with +2.5 V to +15 V on it. If it does not,
+the 3.5 mm tip sounding the sidetone with +2.5 V to +15 V on it (+5 V at most for
+the MOSFET). If it does not,
 stop and ask. Do not guess.
 
 **Stage none** (no RF, `CWbkin` `OFF`), with the cable in:
