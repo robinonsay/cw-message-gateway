@@ -1,5 +1,9 @@
 # Handheld CW firmware: serial command set, version 1
 
+> **Parked**, with the route it serves ([handheld.md](handheld.md)): the custom
+> firmware here is not to be flashed. A UV-K1 is now keyed by the keyer box, on its
+> firmware as released ([keyer.md](keyer.md)).
+
 How `hfnode` keys a handheld (`station.rig = "handheld"`, [handheld.md](handheld.md)):
 the commands added to the NR7Y CW firmware for the Quansheng UV-K1 and UV-K5 v3 in
 [firmware/uv-k1](../firmware/uv-k1/README.md) (`app/hfnode.c`). The node's side is

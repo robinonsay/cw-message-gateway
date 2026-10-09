@@ -14,9 +14,9 @@ pending_timeout_secs = 600
 [station]
 # rig = "keyer"                   # any radio, keyed through its key jack by the keyer
                                   # box: see [keyer] below.
-# rig = "handheld"                # a Quansheng running the CW firmware: see [handheld]
-                                  # at the end, docs/handheld.md. Left out, the IC-7300
-                                  # over CI-V.
+# rig = "handheld"                # parked: a Quansheng running the custom CW
+                                  # firmware: see [handheld] at the end,
+                                  # docs/handheld.md. Left out, the IC-7300 over CI-V.
 node_call = "N0CALL"              # your callsign; sent as DE N0CALL on every transmission
 field_calls = ["N0CALL/P"]        # callsigns allowed to open transactions
 frequency_hz = 7_030_000          # the agreed listening frequency
@@ -185,9 +185,11 @@ api_key_env = "ANTHROPIC_API_KEY" # Claude only
 # timeout_secs = 600              # default 120 for Claude, 600 for Ollama
 extra_policy = ""
 
-# A Quansheng UV-K1 or UV-K5 v3 running the CW firmware in firmware/uv-k1
-# (docs/handheld.md), for testing locally on 2 m, with station.rig = "handheld". The
-# [station] settings still apply: frequency_hz (simplex, e.g. 144_060_000),
+# Parked (docs/handheld.md): a Quansheng UV-K1 or UV-K5 v3 running the custom CW
+# firmware in firmware/uv-k1, not to be flashed; a UV-K1 is now keyed by the keyer
+# box (rig = "keyer", docs/keyer.md). For testing locally on 2 m, with
+# station.rig = "handheld". The [station] settings still apply: frequency_hz
+# (simplex, e.g. 144_060_000),
 # serial_port (the handheld's USB-C port), key_speed_wpm and max_key_seconds (60 or
 # less: the firmware's own limit); the CI-V ones (baud, civ_address, commissioned,
 # power_watts) do not. The node sets nothing on the handheld: set the frequency, CW,
