@@ -47,8 +47,8 @@ sudo apt install -y alsa-utils
 sudo apt install -y build-essential git curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # accept the defaults
 source ~/.cargo/env
-git clone https://github.com/robinonsay/ic-7300-hf-server.git
-cd ic-7300-hf-server
+git clone https://github.com/robinonsay/cw-message-gateway.git
+cd cw-message-gateway
 cargo test --workspace
 cargo build --release -p hfnode
 sudo install -m 0755 target/release/hfnode /usr/local/bin/hfnode

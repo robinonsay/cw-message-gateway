@@ -1,4 +1,4 @@
-# ic-7300-hf-server
+# cw-message-gateway
 
 A home-station node that relays texts and email over QRP Morse code. A computer (a
 Raspberry Pi, a Mac or a Windows PC), connected to an ICOM IC-7300 by one USB cable,

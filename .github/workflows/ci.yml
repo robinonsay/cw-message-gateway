@@ -176,7 +176,7 @@ jobs:
       # one at the first; build.sh is what makes the two the same.
       - name: the UF2 does not depend on where the checkout is
         run: |
-          other="$RUNNER_TEMP/copy/ic-7300-hf-server"
+          other="$RUNNER_TEMP/copy/cw-message-gateway"
           git worktree add --detach "$other" HEAD
           sh "$other/firmware/pico2-keyer/build.sh"
           cmp pico2-keyer.uf2 "$other/firmware/pico2-keyer/pico2-keyer.uf2"

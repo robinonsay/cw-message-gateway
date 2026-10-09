@@ -31,8 +31,8 @@ is still the old one:
 
 ```sh
 mkdir -p ~/rust && cd ~/rust
-git clone -b main https://github.com/robinonsay/ic-7300-hf-server.git ic7300-hf-server
-cd ic7300-hf-server
+git clone -b main https://github.com/robinonsay/cw-message-gateway.git cw-message-gateway
+cd cw-message-gateway
 cargo test --workspace
 cargo install --locked --path crates/hfnode   # installs ~/.cargo/bin/hfnode
 hfnode selftest                               # the whole node against a mock radio
@@ -277,7 +277,7 @@ refuses to start while it is on, unless the file is still there. With `[email] a
 emails you the reason and the steps to clear it when this happens, and at each
 start while the file is there.
 
-**Updating.** Stop the node, then in `~/rust/ic7300-hf-server`: `git pull`,
+**Updating.** Stop the node, then in `~/rust/cw-message-gateway`: `git pull`,
 `cargo install --locked --path crates/hfnode`, copy the start-up scripts again
 (`cp deploy/hfnode-supervise.sh deploy/macos/hfnode.command "$D/"`), and start it
 again. `last_seq` and the inbox stay in the node's folder. With iMessage set up,

@@ -5,4 +5,4 @@ members = ["crates/civ", "crates/auth", "crates/cw", "crates/protocol", "crates/
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/robinonsay/ic-7300-hf-server"
+repository = "https://github.com/robinonsay/cw-message-gateway"

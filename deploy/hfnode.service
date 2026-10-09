@@ -7,7 +7,7 @@
 
 [Unit]
 Description=HF CW message gateway node (IC-7300, or any radio through the keyer box)
-Documentation=https://github.com/robinonsay/ic-7300-hf-server
+Documentation=https://github.com/robinonsay/cw-message-gateway
 Wants=network-online.target time-sync.target
 After=network-online.target time-sync.target sound.target
 # Give up after 3 starts in an hour rather than restarting (and re-tuning, which
