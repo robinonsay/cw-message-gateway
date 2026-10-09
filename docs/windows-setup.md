@@ -28,8 +28,8 @@ Then, in a new PowerShell window. `-b main` matters while the repository's defau
 branch is still the old one:
 
 ```powershell
-git clone -b main https://github.com/robinonsay/ic-7300-hf-server.git
-cd ic-7300-hf-server
+git clone -b main https://github.com/robinonsay/cw-message-gateway.git
+cd cw-message-gateway
 cargo test --workspace
 cargo install --locked --path crates/hfnode   # installs %USERPROFILE%\.cargo\bin\hfnode.exe
 hfnode selftest                               # the whole node against a mock radio
