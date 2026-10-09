@@ -865,14 +865,15 @@ this route (`audit/req-handheld-nr7y-cw-ruling.md`, and
 the bench on the air (`audit/req-on-air-bench-ruling.md`).
 
 **Nothing here has been tried on a radio.** The audit's grade is GO WITH STEPS for
-connecting with no RF and for keying on the bench with you at the radio, at Power
-LOW 1, on the radio's own antenna screwed straight on, with the wiring, settings,
-stages and on-air routine below. A 2 m dummy load in place of the antenna keeps the
-bench off the air. Never key the radio through coax, an adapter cable or an external
-antenna (K1_EN.txt:68). Nothing in the radio or the box would notice a bad load, so
-the audit grades that risk (its H3) RISK on the bench too: the antenna is checked by
-eye every session. Running it unattended is not cleared: see "What stops a stuck key
-on NR7Y CW" below.
+connecting with no RF and for keying on the bench with you at the radio, with the
+wiring, settings, stages and on-air routine below: into a 2 m dummy load, or on the
+radio's own antenna screwed straight on, at Power LOW 1, never coax. One or the other
+is on the radio even in the stages with no RF: a fault can key it, and the manual
+says "Do not transmit when the antenna is not installed" (K1_EN.txt:68). On the air
+the radio has no protection against a bad load, and nothing in the box would notice
+one either, so the audit grades that risk (its H3) RISK on the bench too: check the
+antenna each session. Running it unattended is not cleared: see "What stops a stuck
+key on NR7Y CW" below.
 
 ### The rework, and what it does to the jack
 
@@ -956,7 +957,8 @@ Not any of these:
   would pass the 2.5 mm ring, the radio's serial line, and the full speaker level
   with no DC block. A TRS plug in a Mac's headset jack meets the Mac's headphone
   output, not an input: the Mac would then drive the radio's speaker and serial
-  lines. Use the USB sound card. On an attended bench only, the Mac's built-in
+  lines. A Mac's headset jack can't take the radio's wires: use the USB sound card.
+  On an attended bench only, the Mac's built-in
   microphone may listen to the radio's speaker instead ("The Mac's microphone, on
   the bench" below); a station left running keeps the wired feed.
 - **Not a Pico 2 pin wired straight to the key contact** (the audit's grade: NO-GO).
@@ -1006,9 +1008,9 @@ GP16 ──4.7 kΩ── GND
   output that takes a line of either polarity or a higher voltage. On this radio
   neither is needed once the key line's measurement shows a positive logic-level
   line, since the line is a 3.3 V processor pin with a pull-up (`App/board.c:73`,
-  `:85-87`) and the audio cable ties the two grounds anyway. The one side effect:
-  the key wire becomes a second ground path between the Pico and the radio, which
-  can bring hum into the receive audio. That is a nuisance, not damage; if it
+  `:85-87`), and with the wired speaker feed the audio cable ties the two grounds
+  anyway. The one side effect: the key wire becomes a second ground path between the
+  Pico and the radio, which can bring hum into the receive audio. That is a nuisance, not damage; if it
   confuses the node, use the PC817.
 - **RF on the key wire.** With the PC817, RF picked up on the long key wire stays on
   the radio's side; with a transistor it reaches the Pico's ground. What that can do
@@ -1110,7 +1112,8 @@ CW:
   keying and refuses to key, which is safe, but a stuck key could not be heard
   either.
 - **`CWfreq`: the same as `[keyer] sidetone_hz`** (600 Hz for both by default). It
-  runs 450-1200 Hz in 50 Hz steps (`settings.c:365`; `app/menu.c:1111`).
+  runs 450-800 Hz in 50 Hz steps: the menu runs 0-7 (`app/menu.c:404-407`,
+  `:1111`).
 - **`CWmsg1` to `CWmsg4` and `CWmrpt`: never play, repeat or record a message.** A
   message playing or repeating transmits by itself, and repeats on a timer
   (`app/app.c:2086-2092`; `app/menu.c:1188`).
@@ -1166,10 +1169,11 @@ At the radio:
 - **Battery only.** No USB-C cable and no charging base while anything can key: the
   manual forbids transmitting while charging (K1_EN.txt:108), and nothing in the
   firmware stops it (`battery.c:167-187` only shows it on the display).
-- **The radio's own antenna, screwed fully on and undamaged**, with nothing metal
-  touching it. Never coax, an adapter cable or an external antenna: the manual's
-  only rule on loads is "Do not transmit when the antenna is not installed"
-  (K1_EN.txt:68), and nothing in the radio or the box would notice a bad one.
+- **A 2 m dummy load, or the radio's own antenna screwed fully on and undamaged**
+  with nothing metal touching it, whenever the radio is on with anything plugged in.
+  Never coax, an adapter cable or an external antenna: the manual's only rule on
+  loads is "Do not transmit when the antenna is not installed" (K1_EN.txt:68), and
+  nothing in the radio or the box would notice a bad one.
 - **The radio on its back, its antenna pointing away from you, the box, the key lead
   and the computer**, and at least 30 cm from the box and the key lead. The manual's
   own exposure note is 25 mm from the face, antenna up and away (K1_EN.txt:16-18).
@@ -1236,11 +1240,10 @@ firmware_build = "a1b2c3d4"    # the build id CI printed for the UF2 you flashed
 ### Bring-up on NR7Y CW
 
 As "Bring-up" above, with these differences. You do every step yourself, at the
-radio, at Power LOW 1, on the radio's own antenna (or into a 2 m dummy load), with
-the plug in reach: pulling it out of the 3.5 mm jack opens the key. `CWbkin` stays
-`OFF` until the keyed steps; through the zero-RF stages the antenna stands where the
-dummy load would, in case a fault keys the radio.
-The time-out test of "Bring-up with a handheld" is dropped: NR7Y has no time-out in
+radio, at Power LOW 1, into a 2 m dummy load or on the radio's own antenna (never
+coax), with the plug in reach: pulling it out of the 3.5 mm jack opens the key. The
+dummy load or the antenna is on in the zero-RF stages too, in case a fault keys the
+radio. `CWbkin` stays `OFF` until the keyed steps. The time-out test of "Bring-up with a handheld" is dropped: NR7Y has no time-out in
 CW ("What stops a stuck key on NR7Y CW" below), and holding a carrier for over a
 minute would prove nothing the code doesn't already show. C is your `hfnode.toml`.
 
@@ -1249,10 +1252,12 @@ minute would prove nothing the code doesn't already show. C is your `hfnode.toml
 1. **Find the contacts** (the audit's C1), with the bare plug in the jack and each
    of its six contacts on its own wire, as in "The cable" above. Radio off, battery
    out: continuity from each contact to the battery's negative contact; the ones
-   that beep are ground (expect the 2.5 mm sleeve). Then radio on, on its battery
-   only: DC volts from each contact to ground. Expect about 3.3 V on the 3.5 mm tip
-   (the PTT line), and possibly on the serial input. AC volts show the hiss on the
-   speaker contact.
+   that beep are ground (expect the 2.5 mm sleeve). Continuity only with the battery
+   out; on a powered radio, the meter's volts ranges only. Then radio on, on its
+   battery only, in CW with `CWbkin` `OFF`, so that a slipped probe gives only a
+   sidetone: DC volts from each contact to ground. Expect about 3.3 V on the 3.5 mm
+   tip (the PTT line), and possibly on the serial input. AC volts show the hiss on
+   the speaker contact.
 2. **Measure the key line**, radio in CW, nothing on the 3.5 mm tip but the meter.
    Open, tip to ground must read **+2.5 V to +15 V** for the PC817, and **+2.5 V to
    +5 V** for the MOSFET. Shorted to ground through a milliammeter (or the 1 kΩ,
@@ -1424,8 +1429,8 @@ Not there:
 - **A check of the key line.** The key output has no line sense; the BAT85 sense is
   the PTT output's only.
 
-So nothing independent of the box ends a carrier held by a shorted optocoupler or by
-RF on the lead. **Running it unattended is not cleared on this route**, and it needs
+So nothing independent of the box ends a carrier held by a shorted optocoupler or
+MOSFET, or by RF on the lead. **Running it unattended is not cleared on this route**, and it needs
 one thing more than the MCW route: an independent hardware timer that opens the key
 line (or cuts the radio's power) after a few seconds of continuous key-down. Even
 after the bench and with that timer, the safety audit grades unattended use RISK at
