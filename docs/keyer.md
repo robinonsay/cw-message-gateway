@@ -861,13 +861,18 @@ release debounce (`app/cwkeyer.c:99`). The rework is NR7Y's rework guide
 `rework-uv-k1.md` and `cw-paddle-input.md`) and the older "Paddle Rework" PDF in the
 firmware's repository. The wiring, settings and stages are the audit's rulings for
 this route (`audit/req-handheld-nr7y-cw-ruling.md`, and
-`audit/req-handheld-nr7y-ruling.md` for the settings it keeps).
+`audit/req-handheld-nr7y-ruling.md` for the settings it keeps), and its ruling for
+the bench on the air (`audit/req-on-air-bench-ruling.md`).
 
 **Nothing here has been tried on a radio.** The audit's grade is GO WITH STEPS for
 connecting with no RF and for keying on the bench with you at the radio, at Power
-LOW 1, into a 2 m dummy load, with the wiring, settings and stages below. Never key
-the radio through coax to an antenna (K1_EN.txt:68). Running it unattended is not
-cleared: see "What stops a stuck key on NR7Y CW" below.
+LOW 1, on the radio's own antenna screwed straight on, with the wiring, settings,
+stages and on-air routine below. A 2 m dummy load in place of the antenna keeps the
+bench off the air. Never key the radio through coax, an adapter cable or an external
+antenna (K1_EN.txt:68). Nothing in the radio or the box would notice a bad load, so
+the audit grades that risk (its H3) RISK on the bench too: the antenna is checked by
+eye every session. Running it unattended is not cleared: see "What stops a stuck key
+on NR7Y CW" below.
 
 ### The rework, and what it does to the jack
 
@@ -951,8 +956,9 @@ Not any of these:
   would pass the 2.5 mm ring, the radio's serial line, and the full speaker level
   with no DC block. A TRS plug in a Mac's headset jack meets the Mac's headphone
   output, not an input: the Mac would then drive the radio's speaker and serial
-  lines. A Mac's own mic and headset jack can't take the radio: use the USB sound
-  card.
+  lines. Use the USB sound card. On an attended bench only, the Mac's built-in
+  microphone may listen to the radio's speaker instead ("The Mac's microphone, on
+  the bench" below); a station left running keeps the wired feed.
 - **Not a Pico 2 pin wired straight to the key contact** (the audit's grade: NO-GO).
   The box's safe state is its key pin driven low: at power-up, in every fault
   handler and through a watchdog reset (`firmware/pico2-keyer/src/main.rs:14-17`,
@@ -1040,13 +1046,14 @@ and:
 
 - for the speaker, a 10 kΩ and a 1 kΩ resistor and a 1 µF film or ceramic capacitor
   rated 25 V or more;
-- a USB sound card with a mic or line input;
+- a USB sound card with a mic or line input (on an attended bench, the Mac's
+  built-in microphone may stand in for it and the speaker parts);
 - a two-pin K-plug with its six contacts on separate wires: a cut-up Kenwood-style
   speaker-mic. Not an AIOC, and not a 2.5 mm to 3.5 mm adapter as it is;
 - two clip-on ferrites;
 - a multimeter, a 1 kΩ resistor and a clip lead;
-- a 2 m dummy load, 50 Ω, rated 5 W or more, with an adapter for the radio's
-  antenna socket;
+- the radio's own antenna; or, to keep the bench off the air, a 2 m dummy load,
+  50 Ω, rated 5 W or more, with an adapter for the radio's antenna socket;
 - the box's USB cable, and solder, tape or a terminal block.
 
 Not needed here: the second PC817, the BAT85 and the 1 nF of the PTT output, and
@@ -1141,6 +1148,14 @@ At the radio:
 - **Battery only.** No USB-C cable and no charging base while anything can key: the
   manual forbids transmitting while charging (K1_EN.txt:108), and nothing in the
   firmware stops it (`battery.c:167-187` only shows it on the display).
+- **The radio's own antenna, screwed fully on and undamaged**, with nothing metal
+  touching it. Never coax, an adapter cable or an external antenna: the manual's
+  only rule on loads is "Do not transmit when the antenna is not installed"
+  (K1_EN.txt:68), and nothing in the radio or the box would notice a bad one.
+- **The radio on its back, its antenna pointing away from you, the box, the key lead
+  and the computer**, and at least 30 cm from the box and the key lead. The manual's
+  own exposure note is 25 mm from the face, antenna up and away (K1_EN.txt:16-18).
+- **The clip-on ferrite on the key lead**, at the radio end.
 - **Hands off the keypad and the side keys while anything can hold the key.** The
   keypad lock does not apply while the radio transmits (`app.c:2456`). In CW the
   digits send no DTMF (`app.c:2569-2573`), but any key stops or starts something.
@@ -1203,8 +1218,10 @@ firmware_build = "a1b2c3d4"    # the build id CI printed for the UF2 you flashed
 ### Bring-up on NR7Y CW
 
 As "Bring-up" above, with these differences. You do every step yourself, at the
-radio, at Power LOW 1, into the 2 m dummy load, with the plug in reach: pulling it
-out of the 3.5 mm jack opens the key. `CWbkin` stays `OFF` until the keyed steps.
+radio, at Power LOW 1, on the radio's own antenna (or into a 2 m dummy load), with
+the plug in reach: pulling it out of the 3.5 mm jack opens the key. `CWbkin` stays
+`OFF` until the keyed steps; through the zero-RF stages the antenna stands where the
+dummy load would, in case a fault keys the radio.
 The time-out test of "Bring-up with a handheld" is dropped: NR7Y has no time-out in
 CW ("What stops a stuck key on NR7Y CW" below), and holding a carrier for over a
 minute would prove nothing the code doesn't already show. C is your `hfnode.toml`.
@@ -1248,8 +1265,7 @@ Write the results down:
 
 Build the cable only if your table gives one ground, one contact with the hiss, and
 the 3.5 mm tip sounding the sidetone with +2.5 V to +15 V on it (+5 V at most for
-the MOSFET). If it does not,
-stop and ask. Do not guess.
+the MOSFET). If it does not, stop and ask. Do not guess.
 
 **Stage none** (no RF, `CWbkin` `OFF`), with the cable in:
 
@@ -1266,16 +1282,23 @@ throughout:
 3. `hfnode keyer --config C key "TEST"` must report `heard`.
 4. `hfnode keyer --config C sidetone` must pass.
 
-Then, **with RF**, when you decide to key: `CWbkin` `ON`, Power LOW 1, the dummy
-load on, the plug in reach and the ferrites fitted.
+Then, **with RF**, when you decide to key: `CWbkin` `ON`, Power LOW 1, the antenna
+checked (or the dummy load on), the plug in reach and the ferrites fitted. On the
+air, go through "Before every keyed step" below first.
 
-5. `hfnode keyer --config C key "TEST"`, several times: `heard`, and a clean unkey
-   every time (the audit's C10).
+5. `hfnode keyer --config C key "TEST DE <call>"`, several times: `heard`, a clean
+   unkey every time, and the red light off between.
+6. `hfnode keyer --config C sidetone` passes again.
+
+On the antenna, RF reaches the key lead for real here (the audit's C10): the radio
+keying when nothing asked it to, or not unkeying, is what this stage looks for. Pull
+the plug out first.
 
 Nothing above LOW 1 without the safety audit. Then set `commissioned = "keying"`.
 
 **Stage keying** (RF): `hangtest`, `stucktest` and `linktest`, as in "Bring-up"
-above. Write down what each showed: the safety audit grades unattended use from
+above, each after the routine below. Each keys a few seconds at most and identifies
+itself. Write down what each showed: the safety audit grades unattended use from
 these results. Then `commissioned = "done"` lets `hfnode run` start, with you at the
 radio: running it unattended is not cleared (below).
 
@@ -1285,6 +1308,74 @@ most of a 67 ms gap. The node may then judge the keying not heard and refuse to 
 which is safe. Whether it does is for the bench to show. If it does, the fix is a
 change to the node or NR7Y v1.3.1, and either goes through the safety audit first;
 reflashing the radio is not cleared.
+
+**Before every keyed step, on the air** (the audit's on-air routine; `<call>` is
+your callsign):
+
+1. **The frequency**, inside your privileges, set on the radio and checked on its
+   display: 144.1-148.0 MHz. `F Lock` can allow more, so the display is the check.
+2. **Listen** until you are sure it is clear: the radio's speaker, or `hfnode
+   listen`.
+3. **`hfnode keyer --config C key "QRL? DE <call>"`** (`CWbkin` `ON`), then listen
+   again. Go on only if it is still clear.
+4. Run the step with your hand on the plug.
+5. **Identify** with `DE <call>` at the end of each group of steps, and at least
+   every 10 minutes. `sidetone`, `hangtest` and `stucktest` (before) and `linktest`
+   (after) send it already, and so does any text you key that includes it. A bare
+   `key "TEST"` does not: key `"TEST DE <call>"` instead.
+6. Stop at once if anyone reports interference.
+
+### The Mac's microphone, on the bench
+
+For an attended bench only (stages none to keying, with you at the radio), the Mac's
+built-in microphone may pick up the radio's speaker in place of the 10 kΩ / 1 kΩ /
+1 µF feed and the USB sound card (the audit's grade: GO WITH STEPS). A station left
+running keeps the wired feed, and before any unattended grade the node's results
+are repeated on it.
+
+It is acceptable on the bench because nothing keys on what the node hears: the
+monitor only refuses (sidetone not heard) or latches, both safe, the box's limits use
+no audio, and you are at the radio with the plug in reach. What gets weaker is the
+node's own second line:
+
+- The band level now includes the room, so the node cannot tell that the radio is
+  off or turned down; with the wired feed that shows as no audio.
+- Moving the radio, the Mac or yourself changes the level. A tone held by a stuck
+  key can then fail the steady-tone test (each slice within 1.5 dB of the last,
+  `crates/hfnode/src/keyer/monitor.rs`), or be dismissed as more than 10 dB under
+  the last good sidetone.
+- Room sounds near the sidetone pitch (a voice, a whistle, an alert) can make it
+  judge wrongly. That fails safe: it refuses or latches.
+
+The key output's checks apply unchanged: the sidetone 15 dB or more over the band,
+10 dB over the key-up audio in 85% of the slices, a delay of up to 500 ms.
+
+Every session:
+
+1. **Placement:** the radio on its back, speaker up, 10-30 cm from the Mac, its
+   antenna pointing away from the Mac. Mark both positions; nothing moves during the
+   session.
+2. **The room** quiet: the Mac's sound output muted and Do Not Disturb on (alerts
+   would reach the microphone), no music, TV or other radios, and no talking or
+   whistling during a keyed command.
+3. **The Mac's input:** System Settings > Sound > Input, the built-in microphone,
+   its input volume fixed (write it down). If Control Center offers a Mic Mode while
+   hfnode listens, choose Standard.
+4. **The radio:** squelch 0, the volume knob fixed (mark it with tape), `CWvol`
+   fixed (write it down).
+5. `hfnode keyer --config C check`: all ok. Write down the band level with the
+   radio's volume at zero and at the mark, as the record of how much of the "band"
+   is the radio.
+6. With `CWbkin` `OFF`: `key "TEST DE <call>"` reports `heard`, `sidetone` passes,
+   and the red light stays off. Then the 30 s idle watch: no steady-tone alarm.
+7. Run `sidetone` again after any change to the placement, the volume knob,
+   `CWvol` or the input volume: it keeps the level the node uses to recognise a held
+   key.
+
+If `sidetone` cannot reach 15 dB over the band with `CWvol` at 6, the radio 10 cm
+away and the room quiet, use the wired feed. Stage keying run with the microphone
+still proves the box's own limits, which use no audio; the sidetone level, delay and
+contrast it records hold for that placement only.
 
 ### What stops a stuck key on NR7Y CW
 
