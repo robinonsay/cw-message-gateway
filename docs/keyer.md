@@ -842,15 +842,16 @@ something else is holding.
 For a Quansheng UV-K1 that has NR7Y's paddle rework and runs NR7Y's CW firmware,
 v1.3 or v1.3.1, the release build as published, unmodified. The radio sends real
 CW from its own CW mode. The box's key output, through the PC817 of "Wiring the
-box" or through one MOSFET (below), closes the radio's PTT line as a straight key,
-with `[keyer] output = "key"`, and NR7Y keys its carrier while the line is closed.
+box" or through one transistor (below), closes the radio's PTT line as a straight
+key, with `[keyer] output = "key"`, and NR7Y keys its carrier while the line is
+closed.
 The node hears the radio's sidetone in its speaker, through a sound card, and checks
 it with the same sidetone monitor as on any radio.
 
 ```
 radio speaker, 2.5 mm tip   ──10 kΩ / 1 kΩ / 1 µF──► sound card ──► hfnode: decoder, sidetone
-radio PTT line, 3.5 mm tip  ◄──PC817 or MOSFET (GP16)── keyer box ◄──USB── hfnode: keyer
-radio ground, 2.5 mm sleeve ── PC817 emitter or MOSFET source, sound card ground
+radio PTT line, 3.5 mm tip  ◄──PC817 or transistor (GP16)── keyer box ◄──USB── hfnode
+radio ground, 2.5 mm sleeve ── the switch's return, sound card ground
 ```
 
 NR7Y references below are to its source, github.com/briand/uv-k1-k5v3-firmware-custom
@@ -908,9 +909,10 @@ settles it.
   - **The PC817**, the 470 Ω and the required 4.7 kΩ pull-down, exactly as in
     "Wiring the box" above. Its **collector** goes to the **3.5 mm tip** (the PTT
     line) and its **emitter** to the **2.5 mm sleeve** (the radio's ground).
-  - **Or one logic-level N-channel MOSFET** (a 2N7000 in TO-92, or similar) and the
-    same required 4.7 kΩ pull-down: two parts, the fewest that are safe. See "The
-    one-MOSFET key" below.
+  - **Or one transistor** and the same required 4.7 kΩ pull-down: a logic-level
+    N-channel MOSFET (a 2N7000 in TO-92, or similar), two parts, the fewest that are
+    safe; or an NPN transistor (a 2N3904, or similar) with a 4.7-10 kΩ base
+    resistor. See "A one-transistor key" below.
 
   Either way the return goes to the 2.5 mm sleeve, **never to the 3.5 mm sleeve**,
   which after the rework is the radio's serial input.
@@ -934,8 +936,8 @@ settles it.
   ground and speaker.
 - The key and ground can be on one two-pin K-plug or on two separate plugs: the key
   on a 3.5 mm plug's tip, and ground and speaker on a 2.5 mm plug. Either way the
-  switch's return (the PC817's emitter or the MOSFET's source) goes to the 2.5 mm
-  sleeve.
+  switch's return (the PC817's or the NPN's emitter, or the MOSFET's source) goes to
+  the 2.5 mm sleeve.
 - A clip-on ferrite at each end of the cable (the audit's C10).
 
 Not any of these:
@@ -968,26 +970,34 @@ Not any of these:
   `driver/gpio.h:79`). Wired directly, every safe state of the box would key the
   radio, with no radio time-out in CW to stop it, and a Pico that is resetting, in
   BOOTSEL or unpowered does not leave the line open either. A switch turns "pin
-  low" into "line open": the PC817's or the MOSFET's output is open whenever GP16 is
-  low or undriven, whatever the Pico does. A direct wire would need new firmware,
-  with a new build id and hash and a fresh audit, and would still leave the
-  resetting and unpowered cases unresolved.
-- **Not any other switch** than the PC817, the one MOSFET below, or the photoMOS
-  named under "Bring-up" above (an AQY212GH or AQY211EH) if the key line's
-  measurement rules out the PC817. The safety audit also allows an NPN transistor
-  (a 2N3904 or similar, with a 4.7-10 kΩ base resistor and the pull-down), but it
-  saves nothing over the PC817 and is not described here. Any other part or circuit
-  goes to the audit first.
+  low" into "line open": the PC817's or the transistor's output is open whenever
+  GP16 is low or undriven, whatever the Pico does. A direct wire would need new
+  firmware, with a new build id and hash and a fresh audit, and would still leave
+  the resetting and unpowered cases unresolved.
+- **Not any other switch** than the PC817, the one transistor below, or the
+  photoMOS named under "Bring-up" above (an AQY212GH or AQY211EH) if the key line's
+  measurement rules out the PC817. Any other part or circuit goes to the safety
+  audit first.
 - **Not without the 4.7 kΩ pull-down**, whichever switch. It is the only guard
   against erratum RP2350-E9: a pad nothing drives (while the chip starts, resets,
   sits in BOOTSEL or is unplugged) can float near 2 V ("Wiring the box"), enough to
   turn on a MOSFET, a transistor or the optocoupler's LED and key the radio at
   power-up, with no radio time-out in CW.
 
-### The one-MOSFET key
+### A one-transistor key
 
-The fewest parts the safety audit clears on the key side: one logic-level N-channel
-MOSFET (a 2N7000 in TO-92, or similar) and the 4.7 kΩ pull-down.
+The fewest parts the safety audit clears on the key side: one transistor and the
+4.7 kΩ pull-down, either a logic-level N-channel MOSFET (two parts) or an NPN
+transistor with its base resistor (three). GP16 high turns either one on and closes
+the key, exactly as it lights the PC817's LED, so the audited firmware is unchanged:
+only the wiring differs.
+
+What the switch has to do: the radio's key line is a processor pin (a PY32F071) with
+its internal pull-up of 30-70 kΩ, so it has at most about 110 µA to sink, and it
+reads low below 0.3 × VCC, about 1.0 V at 3.3 V (the PY32F071 data sheet, Table
+5-20; `App/board.c:85-87`). Any of these parts sinks that easily once it is on.
+
+**The MOSFET** (a 2N7000 in TO-92, or similar):
 
 ```
 Pico 2                   2N7000 (or similar)       K1
@@ -999,19 +1009,84 @@ GP16 ──4.7 kΩ── GND
 - Gate to GP16 (pin 21), the 4.7 kΩ from the gate to GND (pin 23), drain to the
   3.5 mm tip, source to the Pico's GND and the radio's true ground (the 2.5 mm
   sleeve).
-- GP16 high turns it on and closes the key, exactly as it lights the PC817's LED,
-  so the audited firmware is unchanged: only the wiring differs.
-- **The MOSFET sits in the box**, at GP16, so the gate wire is a few centimetres
-  long. The long wire to the radio is the drain, with a clip-on ferrite on it at the
-  radio end (the audit's C10).
+- **A standard-level MOSFET such as an IRFZ44** (an IRLZ44, marked IRL, is
+  logic-level) only after the static test below shows that unit fully on at 3.3 V,
+  and an IRLZ44 gets the same test. The IRFZ44's gate threshold is about 2-4 V (the
+  audit's figure from memory; no data sheet for it is in the project), so some units
+  barely turn on from a 3.3 V pin. A unit that does not turn on fails to key, which
+  is safe: the radio sees no key-down, and the node reports "not heard" and
+  refuses. Off is the same for every unit: the pull-down holds the gate at 0 V. A
+  power MOSFET also couples more RF from its drain wire to its gate than a 2N7000
+  does, so the ferrite on the drain wire and the antenna away from the box matter
+  more; the first RF stage on the air is the test.
+- **The static test**, on the bare MOSFET before it is soldered to GP16 (a jumper
+  to a gate already on GP16 would fight the pin): the Pico on USB and nothing else
+  connected. Source to GND (pin 38), drain to 3V3 OUT (pin 36) through 10 kΩ. With
+  the gate jumpered to GND the drain reads about 3.3 V; with the gate jumpered to
+  3V3 OUT it must read **under 0.3 V**. If not, do not use that unit: use the NPN
+  transistor or the PC817.
+- **Its box meter checks**, in place of steps 1 and 2 of "Wiring the box": box
+  plugged into the computer, nothing running, nothing in the radio.
+  - Volts, drain to source: **0 V**.
+  - Diode test, red on the drain and black on the source: **open**.
+  - Red on the source and black on the drain: **one diode drop** (about 0.4-0.8 V).
+    That is the body diode, and it is normal.
+  - A beep, or near 0 V either way round, means it is shorted: do not plug it in.
+  - Volts, gate to GND: **0 V**.
+  - With the box unplugged from USB, gate to GND reads about **4.7 kΩ**: the
+    pull-down is there.
+
+**The NPN transistor** (a 2N3904, or similar):
+
+```
+Pico 2                         2N3904 (or similar)     K1
+GP16 (pin 21) ──4.7-10 kΩ────► base   collector ────── 3.5 mm tip (the PTT line)
+GND  (pin 23) ───────────────────────► emitter ─────── 2.5 mm sleeve (ground)
+GP16 ──4.7 kΩ── GND            (the pull-down on the pin side, never on the base)
+```
+
+- GP16 to the base through 4.7-10 kΩ, collector to the 3.5 mm tip, emitter to the
+  Pico's GND and the radio's true ground (the 2.5 mm sleeve). The 0.26-0.55 mA of
+  base current is far more than it needs to sink 110 µA and sit well under 1 V.
+- **The 4.7 kΩ pull-down goes from GP16 to GND**, on the pin's side of the base
+  resistor, as with the PC817. Not from the base to GND: there, an undriven pad at
+  about 2 V through a 10 kΩ base resistor would leave about 0.64 V on the base,
+  enough to start turning it on.
+- **Its meter checks.** Take the pins from the data sheet for the number printed on
+  it: TO-92 pinouts differ between part numbers.
+  - The bare part, before soldering, on the diode test: red on the base and black on
+    each other leg reads one drop (about 0.5-0.8 V) each, and every other pair reads
+    open both ways. That confirms an NPN and finds its base.
+  - In the box, plugged into the computer, nothing running, nothing in the radio:
+    volts collector to emitter **0 V**; diode test collector to emitter **open both
+    ways** (a beep or a low reading means it is shorted or wired wrong: do not plug
+    it in); volts GP16 to GND **0 V**.
+  - With the box unplugged from USB, GP16 to GND reads **about 4.7 kΩ** (a little
+    less is fine: the base path is in parallel).
+
+**Either transistor:**
+
+- **The key line's measurement** (stage zero of "Bring-up on NR7Y CW", step 2) must
+  read **+2.5 V to +5 V** open and carry **under 1 mA** through 1 kΩ. A negative
+  reading means stop: a MOSFET's body diode would conduct and key the radio. Over
+  5 V means stop and use the PC817.
+- **It sits in the box**, at GP16, so the wire to the gate or base is a few
+  centimetres long. The long wire to the radio is the drain or collector, with a
+  clip-on ferrite on it at the radio end (the audit's C10).
+- **Once the cable is in** (no RF, `CWbkin` `OFF`): with the box idle, the 3.5 mm tip
+  must still read its stage-zero voltage, within 0.2 V. Lower means the switch leaks
+  enough to pull the line toward a key-down: unplug it and use another part. Then the
+  zero-RF stages prove the rest: leakage pulling the line low with the box idle
+  shows as a sidetone with no keying (the 30 s watch in stage none), and a switch
+  that does not turn fully on at 3.3 V shows as "not heard" (stage listen, step 4).
 - **What only the PC817 adds:** a key path isolated from the Pico's ground, and an
   output that takes a line of either polarity or a higher voltage. On this radio
   neither is needed once the key line's measurement shows a positive logic-level
   line, since the line is a 3.3 V processor pin with a pull-up (`App/board.c:73`,
   `:85-87`), and with the wired speaker feed the audio cable ties the two grounds
   anyway. The one side effect: the key wire becomes a second ground path between the
-  Pico and the radio, which can bring hum into the receive audio. That is a nuisance, not damage; if it
-  confuses the node, use the PC817.
+  Pico and the radio, which can bring hum into the receive audio. That is a
+  nuisance, not damage; if it confuses the node, use the PC817.
 - **RF on the key wire.** With the PC817, RF picked up on the long key wire stays on
   the radio's side; with a transistor it reaches the Pico's ground. What that can do
   fails safe, as far as the code shows: a Pico that resets drives nothing and the
@@ -1031,35 +1106,17 @@ GP16 ──4.7 kΩ── GND
   rest of the route after the bench; the hardware timer ("What stops a stuck key on
   NR7Y CW") is still required.
 
-Conditions for the MOSFET:
-
-- **The key line's measurement** (stage zero of "Bring-up on NR7Y CW", step 2) must
-  read **+2.5 V to +5 V** open and carry **under 1 mA** through 1 kΩ. A negative
-  reading means stop: the MOSFET's body diode would conduct and key the radio. Over
-  5 V means stop and use the PC817.
-- **Its own box meter checks**, in place of steps 1 and 2 of "Wiring the box": box
-  plugged into the computer, nothing running, nothing in the radio.
-  - Volts, drain to source: **0 V**.
-  - Diode test, red on the drain and black on the source: **open**.
-  - Red on the source and black on the drain: **one diode drop** (about 0.4-0.8 V).
-    That is the body diode, and it is normal.
-  - A beep, or near 0 V either way round, means it is shorted: do not plug it in.
-  - Volts, gate to GND: **0 V**.
-  - With the box unplugged from USB, gate to GND reads about **4.7 kΩ**: the
-    pull-down is there.
-- **The zero-RF stages prove the rest**, at break-in off with no RF: leakage
-  pulling the line low with the box idle shows as a sidetone with no keying (the
-  30 s watch in stage none), and a MOSFET that does not turn fully on at 3.3 V shows
-  as "not heard" (stage listen, step 3).
-
 ### Parts for NR7Y CW
 
 The Pico 2 with its key output, either:
 
 - **the fewest parts:** one logic-level N-channel MOSFET (a 2N7000 or similar) and
-  one 4.7 kΩ resistor ("The one-MOSFET key");
+  one 4.7 kΩ resistor ("A one-transistor key"). A standard-level MOSFET such as an
+  IRFZ44 only after that section's static test;
+- **or** one NPN transistor (a 2N3904 or similar), a 4.7-10 kΩ base resistor and a
+  4.7 kΩ resistor ("A one-transistor key");
 - **or as audited:** one PC817, a 470 Ω and a 4.7 kΩ resistor ("Wiring the box");
-- if the key line's measurement rules both out, one AQY212GH or AQY211EH photoMOS
+- if the key line's measurement rules these out, one AQY212GH or AQY211EH photoMOS
   with the same two resistors as the PC817;
 
 and:
@@ -1243,9 +1300,10 @@ As "Bring-up" above, with these differences. You do every step yourself, at the
 radio, at Power LOW 1, into a 2 m dummy load or on the radio's own antenna (never
 coax), with the plug in reach: pulling it out of the 3.5 mm jack opens the key. The
 dummy load or the antenna is on in the zero-RF stages too, in case a fault keys the
-radio. `CWbkin` stays `OFF` until the keyed steps. The time-out test of "Bring-up with a handheld" is dropped: NR7Y has no time-out in
-CW ("What stops a stuck key on NR7Y CW" below), and holding a carrier for over a
-minute would prove nothing the code doesn't already show. C is your `hfnode.toml`.
+radio. `CWbkin` stays `OFF` until the keyed steps. The time-out test of "Bring-up
+with a handheld" is dropped: NR7Y has no time-out in CW ("What stops a stuck key on
+NR7Y CW" below), and holding a carrier for over a minute would prove nothing the
+code doesn't already show. C is your `hfnode.toml`.
 
 **Stage zero** (no computer, no RF):
 
@@ -1260,11 +1318,11 @@ minute would prove nothing the code doesn't already show. C is your `hfnode.toml
    the speaker contact.
 2. **Measure the key line**, radio in CW, nothing on the 3.5 mm tip but the meter.
    Open, tip to ground must read **+2.5 V to +15 V** for the PC817, and **+2.5 V to
-   +5 V** for the MOSFET. Shorted to ground through a milliammeter (or the 1 kΩ,
+   +5 V** for a transistor. Shorted to ground through a milliammeter (or the 1 kΩ,
    measuring the volts across it), it must carry **well under 1 mA** for the PC817,
-   and **under 1 mA** for the MOSFET. A negative reading rules out the MOSFET (its
-   body diode would key the radio), and over 5 V means the PC817 instead. If the
-   PC817's limits fail too, use the photoMOS, as in "Bring-up" above.
+   and **under 1 mA** for a transistor. A negative reading rules out a transistor (a
+   MOSFET's body diode would key the radio), and over 5 V means the PC817 instead.
+   If the PC817's limits fail too, use the photoMOS, as in "Bring-up" above.
 3. **The touch test.** Radio in CW, `CWkin` at `PTT HandKey`, `CWbkin` `OFF`. Touch
    the 3.5 mm tip to ground through the 1 kΩ for a second, and touch no other
    contact. The sidetone must sound and the red transmit light stay off: that
@@ -1273,7 +1331,7 @@ minute would prove nothing the code doesn't already show. C is your `hfnode.toml
    any contact other than the 3.5 mm tip, stop and ask the safety audit before the
    cable goes in.
 4. The box's own meter checks on its key output: under "Wiring the box" above for
-   the PC817, under "The one-MOSFET key" for the MOSFET.
+   the PC817, under "A one-transistor key" for a transistor.
 
 Write the results down:
 
@@ -1288,13 +1346,15 @@ Write the results down:
 
 Build the cable only if your table gives one ground, one contact with the hiss, and
 the 3.5 mm tip sounding the sidetone with +2.5 V to +15 V on it (+5 V at most for
-the MOSFET). If it does not, stop and ask. Do not guess.
+a transistor). If it does not, stop and ask. Do not guess.
 
 **Stage none** (no RF, `CWbkin` `OFF`), with the cable in:
 
-1. `hfnode keyer --config C check`, then `hfnode listen --config C`, as in
+1. With a transistor, the idle check first: with the box idle, the 3.5 mm tip still
+   reads its stage-zero voltage, within 0.2 V ("A one-transistor key").
+2. `hfnode keyer --config C check`, then `hfnode listen --config C`, as in
    "Bring-up" above.
-2. **Watch for 30 s** with the box idle: no sidetone and no red light. A sidetone
+3. **Watch for 30 s** with the box idle: no sidetone and no red light. A sidetone
    here means the key is closed at the radio: pull the plug out.
 
 Then set `commissioned = "listen"`.
@@ -1302,16 +1362,16 @@ Then set `commissioned = "listen"`.
 **Stage listen, with no RF first** (`CWbkin` still `OFF`), the red light staying off
 throughout:
 
-3. `hfnode keyer --config C key "TEST"` must report `heard`.
-4. `hfnode keyer --config C sidetone` must pass.
+4. `hfnode keyer --config C key "TEST"` must report `heard`.
+5. `hfnode keyer --config C sidetone` must pass.
 
 Then, **with RF**, when you decide to key: `CWbkin` `ON`, Power LOW 1, the antenna
 checked (or the dummy load on), the plug in reach and the ferrites fitted. On the
 air, go through "Before every keyed step" below first.
 
-5. `hfnode keyer --config C key "TEST DE <call>"`, several times: `heard`, a clean
+6. `hfnode keyer --config C key "TEST DE <call>"`, several times: `heard`, a clean
    unkey every time, and the red light off between.
-6. `hfnode keyer --config C sidetone` passes again.
+7. `hfnode keyer --config C sidetone` passes again.
 
 On the antenna, RF reaches the key lead for real here (the audit's C10): the radio
 keying when nothing asked it to, or not unkeying, is what this stage looks for. Pull
@@ -1430,11 +1490,11 @@ Not there:
   the PTT output's only.
 
 So nothing independent of the box ends a carrier held by a shorted optocoupler or
-MOSFET, or by RF on the lead. **Running it unattended is not cleared on this route**, and it needs
-one thing more than the MCW route: an independent hardware timer that opens the key
-line (or cuts the radio's power) after a few seconds of continuous key-down. Even
-after the bench and with that timer, the safety audit grades unattended use RISK at
-best, and never on coax.
+transistor, or by RF on the lead. **Running it unattended is not cleared on this
+route**, and it needs one thing more than the MCW route: an independent hardware
+timer that opens the key line (or cuts the radio's power) after a few seconds of
+continuous key-down. Even after the bench and with that timer, the safety audit
+grades unattended use RISK at best, and never on coax.
 
 ### Stopping NR7Y CW by hand
 
