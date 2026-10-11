@@ -32,15 +32,29 @@ can run the firmware, so this reads its machine code (llvm-objdump) and checks:
    the handler of every other exception) and the panic handler make that store
    first, before any other store or any branch, as the keyer firmware's
    check_faults.py checks for its key and PTT.
+6. No coprocessor instruction but the FPU's. The GPIO coprocessor, coprocessor
+   0, sets, clears and toggles GPIO_OUT's bits with no store at all (`mcr p0, #1,
+   Rt, c0, c0` toggles them; RP2350 datasheet §3.6.1, p102), so rules 1-3 cannot
+   see it. Any mcr, mcr2, mcrr, mcrr2, mrc, mrc2, mrrc, mrrc2, cdp, cdp2, ldc or
+   stc fails unless it names coprocessor 10 or 11, the FPU (which llvm-objdump
+   shows as VFP instructions instead).
+7. No store to CPACR (0xe000ed88, and its Non-secure mirror at 0xe002ed88;
+   Table 229, p194, and the PPB_NONSEC_BASE note, p39) turns coprocessor 0 on
+   (CP0, bits 1:0). A store passes only with a value known here whose CP0 bits are
+   clear, or as rustos's enable_fpu writes it: a load from CPACR, an orr of a
+   constant whose CP0 bits are clear, and the store, in a straight line, which
+   leaves CP0 as the bootrom left it. A store into the Private Peripheral Bus
+   (0xe0000000-0xe003ffff, CPACR's 64 kB and its mirror's) at an address not
+   known fails, as rule 3 does for the SIO.
 
 How: it works out, at every instruction of every function, what each register can
 hold, following every branch, jump table and call (a fixed point). A register holds
 a value known exactly (a constant the code built with mov, movw, movt, add, orr and
 the like), or a value known only to point into the SIO or IO_BANK0's 64 kB (derived
 from such a constant and something else, or one of several such constants
-depending on the path taken), or nothing known. Rules 1 and 2 are checked at every
-store whose address is known exactly; rule 3 fails every store whose address is
-only known to be in those blocks. A store through a pointer derived from nothing in
+depending on the path taken), or nothing known. Rules 1, 2 and 7 are checked at every
+store whose address is known exactly; rules 3 and 7 fail every store whose address
+is only known to be in those blocks. A store through a pointer derived from nothing in
 those blocks (the stack, buffers, the ADC ring, the USB controller) is counted, not
 checked. What this does not follow: an address loaded from memory (no code in this
 firmware or in rustos's drivers keeps one there: their register addresses are
@@ -80,9 +94,12 @@ for _at, _pin in list(CTRL.items()):
         FORBIDDEN[_at + _off] = f"GPIO{_pin}_CTRL's atomic {_name} alias"
 FUNCSEL_OK = {0x05, 0x1F}
 OUTOVER_OK = {0x0, 0x2}
+CPACR = {0xE000_ED88: "CPACR", 0xE002_ED88: "CPACR's Non-secure mirror"}
+CP0 = 0x3
 # The 64 kB blocks (address >> 16) no store may go into at an address not known.
 WATCHED = {0x4002: "IO_BANK0's 64 kB", 0xD000: "the SIO", 0xD001: "the SIO",
-           0xD002: "the SIO", 0xD003: "the SIO"}
+           0xD002: "the SIO", 0xD003: "the SIO", 0xE000: "the Private Peripheral Bus",
+           0xE002: "the Private Peripheral Bus's Non-secure mirror"}
 
 CALLER_SAVED = ("r0", "r1", "r2", "r3", "r12", "lr")
 ARGS = ("r0", "r1", "r2", "r3")
@@ -91,6 +108,9 @@ ALIAS = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12"}
 CONDS = ("eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls",
          "ge", "lt", "gt", "le", "al")
 COND_BRANCHES = {"b" + c for c in CONDS}
+# Every coprocessor instruction (rule 6), with or without a condition.
+COPROCESSOR = re.compile(r"(mcrr?|mrrc|mrc|cdp|ldc|stc)2?l?(" + "|".join(CONDS) + r")?")
+FPU_COPROCESSORS = {"p10", "p11"}
 REGS = r"\b(r\d+|lr|sb|sl|fp|ip)\b"
 # Two-operand forms that do not read their destination.
 UNARY = {"mov", "movs", "movw", "mvn", "mvns", "uxth", "uxtb", "sxth", "sxtb", "clz",
@@ -613,14 +633,18 @@ def check_image(image: Image) -> tuple[list[str], int, list[tuple[str, str]], in
                 failures.append(f"an instruction llvm-objdump cannot decode: {where}")
             elif i.base.startswith("ldr") and re.search(r"\[pc\b", i.args):
                 failures.append(f"a load from a literal pool, which this check does not follow: {where}")
+            elif COPROCESSOR.fullmatch(i.base) and not (i.ops and i.ops[0] in FPU_COPROCESSORS):
+                failures.append(f"a coprocessor instruction, which can drive GPIO_OUT with no store "
+                                f"(coprocessor 0): {where}")
             elif i.base.startswith(("str", "stm", "vst")):
-                unknown += check_store(f, f.states.get(k, {}), i, where, failures, holds)
+                unknown += check_store(f, k, i, where, failures, holds)
     return failures, unknown, holds, seeded
 
 
-def check_store(f: Function, s: dict, i: Insn, where: str, failures: list, holds: list) -> int:
-    """Rules 1-3 at one store: 1 if it can go to an address not known, which is not
-    checked, else 0."""
+def check_store(f: Function, k: int, i: Insn, where: str, failures: list, holds: list) -> int:
+    """Rules 1-3 and 7 at the store `i`, the `k`th instruction of `f`: 1 if it can go
+    to an address not known, which is not checked, else 0."""
+    s = f.states.get(k, {})
     b, ops = i.base, i.ops
     if b.startswith(("stm", "vstm")):
         if ops[0].rstrip("!") == "sp":
@@ -631,9 +655,9 @@ def check_store(f: Function, s: dict, i: Insn, where: str, failures: list, holds
         for a in base:
             if isinstance(a, int):
                 start = a - width * len(regs) if "db" in i.op else a
-                for k, r in enumerate(regs):
+                for n, r in enumerate(regs):
                     value = s.get(reg(r), ANYTHING) if reg(r) else ANYTHING
-                    store_at(f, start + width * k, frozenset({start + width * k}), value, width,
+                    store_at(f, start + width * n, frozenset({start + width * n}), value, width,
                              where, failures, holds)
         return unchecked(base, where, failures)
     rn, at = f.address(s, i)
@@ -650,9 +674,10 @@ def check_store(f: Function, s: dict, i: Insn, where: str, failures: list, holds
         size = 4
     for a in at:
         if isinstance(a, int):
-            for k, val in enumerate(values):
+            for n, val in enumerate(values):
                 value = s.get(reg(val), ANYTHING) if reg(val) else ANYTHING
-                store_at(f, a + 4 * k, at, value, size, where, failures, holds)
+                fpu = n == 0 and b == "str" and a & ~3 in CPACR and enable_fpu(f, k, a)
+                store_at(f, a + 4 * n, at, value, size, where, failures, holds, fpu)
     return unchecked(at, where, failures)
 
 
@@ -663,11 +688,20 @@ def unchecked(at: frozenset, where: str, failures: list) -> int:
 
 
 def store_at(f: Function, at: int, every: frozenset, value: frozenset, size: int, where: str,
-             failures: list, holds: list) -> None:
-    """Rules 1 and 2 at one address the store can go to (of `every` it can)."""
+             failures: list, holds: list, fpu: bool = False) -> None:
+    """Rules 1, 2 and 7 at one address the store can go to (of `every` it can).
+    `fpu`: the store is rustos's enable_fpu, which rule 7 passes."""
     for word in range(at & ~3, at + size, 4):
         if word in FORBIDDEN:
             failures.append(f"a store to {FORBIDDEN[word]} ({word:#x}): {where}")
+        if word in CPACR and not fpu:
+            if size != 4 or at & 3 or not value or not all(isinstance(x, int) for x in value):
+                failures.append(f"a store to {CPACR[word]} of a value not known here, which "
+                                f"could turn the GPIO coprocessor on: {where}")
+            for x in sorted(x for x in value if isinstance(x, int)):
+                if x & CP0:
+                    failures.append(f"{CPACR[word]} set to {x:#x}, which turns the GPIO "
+                                    f"coprocessor (CP0) on: {where}")
     if at & ~3 in CTRL:
         pin = CTRL[at & ~3]
         if size != 4 or at & 3 or not all(isinstance(x, int) for x in value):
@@ -680,6 +714,36 @@ def store_at(f: Function, at: int, every: frozenset, value: frozenset, size: int
                 )
     if every == {GPIO_OUT_CLR} and value and all(isinstance(x, int) and x & HELD == HELD for x in value):
         holds.append((f.name, where))
+
+
+def enable_fpu(f: Function, k: int, at: int) -> bool:
+    """Whether the str at `f.insns[k]`, to CPACR at `at`, is rustos's enable_fpu:
+    `ldr rV, [rA]` from that CPACR, `orr rV, rV, #c` with c's CP0 bits clear, then
+    the store of rV, with no other instruction naming rV, no condition, no branch
+    and nothing branched to in between. Anything else is not."""
+    targets = {i.target for i in f.insns if i.is_branch()}
+    rv = reg(f.insns[k].ops[0])
+    want = [("orr", lambda i: (len(i.ops) == 3 and reg(i.ops[1]) == rv or len(i.ops) == 2)
+             and imm(i.ops[-1]) is not None and imm(i.ops[-1]) & CP0 == 0),
+            ("ldr", lambda i: f.address(f.states.get(f.index[i.addr], {}), i)[1] == {at}
+             and re.fullmatch(r"\[\w+(,\s*#0)?\]", i.args.split(",", 1)[1].strip()) is not None)]
+    j = k
+    for op, ok in want:
+        while True:
+            if f.insns[j].addr in targets:
+                return False
+            j -= 1
+            if j < 0:
+                return False
+            i = f.insns[j]
+            if (f.conditional[j] or i.is_branch() or re.fullmatch(r"it[te]{0,3}", i.op)
+                    or i.base.startswith(("bl", "bx", "tb", "pop", "ldm"))):
+                return False
+            if rv in {reg(r) for r in re.findall(REGS, i.args)}:
+                break
+        if i.base != op or reg(i.ops[0]) != rv or not ok(i):
+            return False
+    return True
 
 
 def first_store_holds(image: Image, symbol: str, depth: int = 0) -> tuple[bool, str]:
@@ -927,6 +991,37 @@ def self_test() -> None:
     # Every handler in the vector table is checked, whatever its name.
     fails(image("", extra={"SysTick": "movs r0, #0\nstr r0, [r1]\nbx lr\n"}, vectors=("SysTick",)),
           "SysTick: does not drive")
+    # The GPIO coprocessor drives GPIO_OUT with no store (rule 6); the FPU's
+    # instructions pass.
+    for insn in ("mcr p0, #0x1, r0, c0, c0", "mcr2 p0, #0x0, r0, c0, c0",
+                 "mcrr p0, #0x0, r0, r1, c0", "mrc p0, #0x0, r0, c0, c0",
+                 "cdp p4, #0x0, c0, c0, c0, #0x0", "ldc p0, c0, [r1]", "stc p0, c0, [r1]",
+                 "it ne\nmcrne p0, #0x1, r0, c0, c0"):
+        fails(image(insn + "\n"), "a coprocessor instruction")
+    passes(image("vmov s0, r1\nvadd.f32 s0, s0, s1\nmcr p10, #0x7, r0, c1, c0, #0x0\n"))
+    # CPACR (rule 7): rustos's read-modify-write and a known value without CP0 pass.
+    cpacr = "movw r0, #0xed88\nmovt r0, #0xe000\n"
+    passes(image(cpacr + "ldr r1, [r0]\norr r1, r1, #0xf00000\nstr r1, [r0]\n"))
+    passes(image(cpacr + "mov.w r1, #0xf00000\nstr r1, [r0]\n"))
+    fails(image(cpacr + "movs r1, #0x3\nstr r1, [r0]\n"), "CPACR set to 0x3")
+    fails(image("movw r0, #0xed88\nmovt r0, #0xe002\nmovs r1, #0x1\nstr r1, [r0]\n"),
+          "CPACR's Non-secure mirror set to 0x1")
+    not_known_cpacr = "a store to CPACR of a value not known"
+    for body in (
+        # The orr sets CP0.
+        "ldr r1, [r0]\norr r1, r1, #0xf00003\nstr r1, [r0]\n",
+        # The value is loaded from somewhere else.
+        "ldr r1, [r2]\norr r1, r1, #0xf00000\nstr r1, [r0]\n",
+        # Something else changes it between the orr and the store.
+        "ldr r1, [r0]\norr r1, r1, #0xf00000\nadds r1, #0x1\nstr r1, [r0]\n",
+        # A branch lands on the store with another value.
+        "ldr r1, [r0]\norr r1, r1, #0xf00000\nstr r1, [r0]\nldr r1, [r2]\nb 0x1020\n",
+        # Under a condition.
+        "ldr r1, [r0]\nit ne\norrne r1, r1, #0xf00000\nstr r1, [r0]\n",
+    ):
+        fails(image(cpacr + body), not_known_cpacr)
+    fails(image("movw r0, #0xed00\nmovt r0, #0xe000\nldr r2, [r3]\nstr r1, [r0, r2]\n"),
+          "into the Private Peripheral Bus at an address not known")
     # No hold outside the handlers fails: the panic handler's does not count.
     img = image("")
     img.funcs["main"] = []

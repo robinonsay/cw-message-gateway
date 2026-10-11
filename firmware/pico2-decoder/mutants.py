@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Show that check_pins.py fails real builds of this firmware that drive the keyer
-box's pins: build the committed firmware five times, each changed in one way that
+box's pins: build the committed firmware seven times, each changed in one way that
 could key a radio, and check that check_pins.py rejects every one.
 
 1. GP16 set high at boot (rustos's `write(true)`: a store to GPIO_OUT_SET).
@@ -9,6 +9,8 @@ could key a radio, and check that check_pins.py rejects every one.
 3. GP18 given its PWM function.
 4. The fault and panic handlers driving the LED before GP16-GP18.
 5. A pin's function set to PWM through a pin number known only at run time.
+6. GP16 toggled through the GPIO coprocessor (`mcr p0`), with no store at all.
+7. The GPIO coprocessor turned on at boot (CP0's bits set in CPACR).
 
 It builds what is committed (`git archive` of COMMIT, default HEAD, unpacked in a
 temporary directory), never the working tree, and leaves the checkout as it was.
@@ -39,6 +41,13 @@ MUTANTS = {
     "a pin number known at run time, to PWM": [
         (LOOP, LOOP + "        let pin = (control.samples() as usize) % 3 + 16;\n"
                "        unsafe { ((0x4002_8004 + 8 * pin) as *mut u32).write_volatile(4) };\n")
+    ],
+    "GP16 toggled through the GPIO coprocessor": [
+        (LOOP, LOOP + "        unsafe { core::arch::asm!(\"mcr p0, #1, {0}, c0, c0\", "
+               "in(reg) ((control.samples() as u32) & 1) << 16) };\n")
+    ],
+    "the GPIO coprocessor turned on": [
+        (KEY, KEY + "\n    unsafe { (0xe000_ed88 as *mut u32).write_volatile(0x00f0_0003) };")
     ],
 }
 
