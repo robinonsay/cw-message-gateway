@@ -26,7 +26,8 @@
 //! 2. take the lines that arrived and act on them, queueing the replies;
 //! 3. in hfnode mode, go back to text mode if hfnode has gone quiet;
 //! 4. take up to [`ADC_PER_PASS`] samples from the ADC through the frontend into
-//!    the decoder (unless `HOLD`) and the monitor, queueing what they produce;
+//!    the decoder (unless `HOLD`, or the box's own transmitter is keyed:
+//!    [`Hardware::keyed`]) and the monitor, queueing what they produce;
 //! 5. send what fits;
 //! 6. drive GP16-GP18 low again, and the LED on while the decoder hears a tone;
 //! 7. feed the watchdog, unless the ADC's DMA has halted: then the watchdog resets
@@ -52,6 +53,14 @@ pub trait Hardware {
     /// suspend (which is also how a pulled cable looks), or the host deconfiguring
     /// it.
     fn link_epoch(&self) -> u32;
+    /// Whether this box's own transmitter is keyed: on the keyer box, its key or its
+    /// PTT is down. While it is, and for [`KEYED_HOLD_MS`] after, the decoder is held
+    /// as on `HOLD`, so that the box never decodes its own sidetone even if hfnode's
+    /// `HOLD` comes late; when that hold ends, the decoder's levels are forgotten, as
+    /// on `RESUME`. The decoder box has no transmitter: never.
+    fn keyed(&self) -> bool {
+        false
+    }
     /// Bytes received, into `buf`: how many.
     fn usb_read(&mut self, buf: &mut [u8]) -> usize;
     /// Queue `bytes` for the host: how many were taken.
@@ -143,6 +152,10 @@ impl Settings {
 /// catches up at once after a slow one.
 pub const ADC_PER_PASS: usize = 128;
 
+/// How long after [`Hardware::keyed`] was last seen true the decoder stays held:
+/// the radio's sidetone and receive recovery outlast the key.
+pub const KEYED_HOLD_MS: u64 = 250;
+
 /// Bytes waiting for USB at most. A line that does not fit whole is dropped and
 /// counted (`STATUS`); in text mode a character that does not fit is dropped.
 pub const OUT_BYTES: usize = 4096;
@@ -169,6 +182,9 @@ pub struct Control {
     coeff: f32,
     /// `HOLD`: the decoder is not fed (the monitor still is).
     hold: bool,
+    /// While the decoder is held for the box's own keying ([`Hardware::keyed`]):
+    /// when the key was last seen down.
+    keyed_ms: Option<u64>,
     /// Samples at [`RATE`] taken so far.
     n: u64,
     slice: [f32; SLICE],
@@ -212,6 +228,7 @@ impl Control {
             frontend: Frontend::new(),
             coeff: level::goertzel_coeff(settings.monitor_hz as f32, RATE),
             hold: false,
+            keyed_ms: None,
             n: 0,
             slice: [0.0; SLICE],
             slice_len: 0,
@@ -268,7 +285,10 @@ impl Control {
 
         if !self.halted {
             let mut raw = [0u16; ADC_PER_PASS];
-            match hw.adc_read(&mut raw) {
+            let read = hw.adc_read(&mut raw);
+            // After the read: what it took was heard before the key was last seen.
+            self.key_hold(hw.keyed(), now);
+            match read {
                 Ok(got) => {
                     let mut x = [0.0f32; ADC_PER_PASS];
                     let mut k = 0;
@@ -299,6 +319,23 @@ impl Control {
         }
     }
 
+    /// The hold for the box's own keying: from when `keyed` is seen true until
+    /// [`KEYED_HOLD_MS`] after it was last seen true.
+    fn key_hold(&mut self, keyed: bool, now: u64) {
+        if keyed {
+            self.keyed_ms = Some(now);
+            return;
+        }
+        if let Some(at) = self.keyed_ms {
+            if now.saturating_sub(at) >= KEYED_HOLD_MS {
+                self.keyed_ms = None;
+                // As on RESUME: the box transmitted, so the levels the decoder had
+                // no longer match.
+                self.decoder.reset_levels();
+            }
+        }
+    }
+
     /// Decoded samples, at [`RATE`]: into the decoder and the monitor, `ST` at each
     /// block's end.
     fn audio(&mut self, mut x: &[f32]) {
@@ -306,7 +343,7 @@ impl Control {
             let take = x.len().min(self.block_left);
             let (now, rest) = x.split_at(take);
             x = rest;
-            if !self.hold {
+            if !self.hold && self.keyed_ms.is_none() {
                 let (events, len) = (&mut self.events, &mut self.events_len);
                 self.decoder.push_with(now, |e| keep_event(events, len, e));
             }
@@ -628,6 +665,7 @@ impl fmt::Debug for Control {
             .field("hfnode", &self.hfnode)
             .field("settings", &self.settings)
             .field("hold", &self.hold)
+            .field("keyed_ms", &self.keyed_ms)
             .field("n", &self.n)
             .field("gaps", &self.gaps)
             .field("lost", &self.out.lost)

@@ -26,6 +26,8 @@ struct Board {
     led: bool,
     led_on_passes: u32,
     feeds: u32,
+    /// What `keyed` reports: the box's own transmitter keyed.
+    keyed: bool,
 }
 
 impl Board {
@@ -43,6 +45,7 @@ impl Board {
             led: false,
             led_on_passes: 0,
             feeds: 0,
+            keyed: false,
         }
     }
 
@@ -80,6 +83,10 @@ impl Hardware for Board {
 
     fn link_epoch(&self) -> u32 {
         self.epoch
+    }
+
+    fn keyed(&self) -> bool {
+        self.keyed
     }
 
     fn usb_read(&mut self, buf: &mut [u8]) -> usize {
@@ -413,6 +420,74 @@ fn hold_stops_decoding_but_not_the_measurements() {
     let lines = b.lines();
     assert!(reply(&lines, 4).starts_with("OK RESUME "));
     assert_eq!(ch_text(&lines), "CALL_43_K8ONS_RX_");
+}
+
+#[test]
+fn the_boxs_own_keying_holds_the_decoder() {
+    let mut b = Board::new();
+    let mut c = start(&b);
+    b.send(1, "HELLO");
+    // Pass until the ADC samples are taken, with a STATUS now and then, as hfnode
+    // would, so that the box stays in hfnode mode.
+    let talk = |c: &mut Control, b: &mut Board| {
+        while !b.adc.is_empty() {
+            for _ in 0..100 {
+                c.pass(b);
+            }
+            b.send(2, "STATUS");
+        }
+        c.pass(b);
+    };
+    // Keyed: the box's own sending, as its sidetone sounds through the radio.
+    b.keyed = true;
+    b.adc
+        .extend(adc_cw("OK 42 1234 K", 20.0, 600.0, 25.0, 0.0, 7));
+    talk(&mut c, &mut b);
+    // The key up, and a last dah of sidetone 100 ms after it, inside KEYED_HOLD_MS.
+    b.keyed = false;
+    let dah: Vec<f32> = (0..ADC_RATE as usize * 120 / 1000)
+        .map(|n| 0.3 * (core::f32::consts::TAU * 600.0 * n as f32 / ADC_RATE as f32).sin())
+        .collect();
+    b.adc.extend(adc_noise(100.0, 20.0, 9));
+    b.adc.extend(to_adc(&dah));
+    b.adc.extend(adc_noise(1000.0, 20.0, 10));
+    talk(&mut c, &mut b);
+    let held = b.lines();
+    assert_eq!(ch_text(&held), "");
+    assert!(!stamps(&held, "SL ").is_empty());
+    // STATUS's hold is hfnode's HOLD only.
+    let status = held.iter().rev().find(|(id, _)| *id == 2).unwrap();
+    assert!(status.1.starts_with("OK STATUS HFNODE 0 "), "{status:?}");
+    b.tx.clear();
+    // The other station, after the hold: decoded from its first character.
+    b.adc
+        .extend(adc_cw("CALL 43 K8ONS RX", 20.0, 600.0, 20.0, 1500.0, 8));
+    talk(&mut c, &mut b);
+    assert_eq!(ch_text(&b.lines()), "CALL_43_K8ONS_RX_");
+}
+
+#[test]
+fn the_keyed_hold_ends_after_keyed_hold_ms_and_forgets_the_levels() {
+    let mut b = Board::new();
+    let mut c = start(&b);
+    b.adc.extend(adc_cw("CQ CQ", 20.0, 600.0, 20.0, 500.0, 3));
+    run(&mut c, &mut b);
+    let learnt = c.decoder().levels();
+    assert!(learnt.0 > 0.0 && learnt.2 > 0.0, "{learnt:?}");
+    // Keyed: the decoder hears nothing, and keeps its levels.
+    b.keyed = true;
+    b.adc.extend(adc_noise(500.0, 0.0, 4));
+    run(&mut c, &mut b);
+    assert_eq!(c.decoder().levels(), learnt);
+    // Up, but not yet for KEYED_HOLD_MS: still held.
+    b.keyed = false;
+    b.now += KEYED_HOLD_MS - 1;
+    c.pass(&mut b);
+    assert_eq!(c.decoder().levels(), learnt);
+    // KEYED_HOLD_MS after: the hold ends with the levels forgotten.
+    b.now += 1;
+    c.pass(&mut b);
+    assert_eq!(c.decoder().levels(), (0.0, 0.0, 0.0));
 }
 
 #[test]

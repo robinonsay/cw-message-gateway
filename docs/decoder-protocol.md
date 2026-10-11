@@ -81,6 +81,11 @@ either mode.
 - `HOLD` and `RESUME` are for while the node transmits: the radio's own sidetone
   is not decoded, and the levels it leaves behind are dropped. `SL` goes on
   through a hold: that is when the monitor needs it.
+- A box that also keys the radio (the keyer box, decoding on its second core)
+  holds its decoder by itself too, while its key or PTT is down and for 250 ms
+  after, and drops the levels when that hold ends, so a late `HOLD` cannot let
+  the sidetone through. `<hold>` in `STATUS` shows `HOLD` only. The decoder box
+  never keys, so this never happens on it.
 - A command it knows with the wrong arguments gets `ERR <word> ARGS`, or `ERR
   CONFIG ARGS`; one it does not know gets `ERR <word> UNKNOWN`.
 
