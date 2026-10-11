@@ -330,7 +330,9 @@ fn the_monitor_measurements_are_cws_on_the_decoded_audio() {
     let x: Vec<f32> = audio.iter().filter_map(|&r| f.push(r)).collect();
     let coeff = level::goertzel_coeff(700.0, RATE);
     let want: Vec<(i32, i32)> = x
-        .chunks_exact(SLICE)
+        .as_chunks::<SLICE>()
+        .0
+        .iter()
         .map(|s| level::measure(s, coeff))
         .map(|l| (tenths(db(l.tone)), tenths(db(l.total))))
         .collect();
