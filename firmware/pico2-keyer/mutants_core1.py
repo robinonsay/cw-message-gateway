@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Show that check_core1.py fails real builds of this firmware whose core 1 could
-reach a pin: build the committed firmware six times, each with core 1's code
+reach a pin: build the committed firmware eight times, each with core 1's code
 changed in one way, and check that check_core1.py rejects every one.
 
 1. `TEST CORE1 FAULT` stores to GPIO_OUT_SET instead of GPIO_OUT_CLR: the key down.
@@ -9,6 +9,8 @@ changed in one way, and check that check_core1.py rejects every one.
 4. Core 1 writes the PWM's tone slice.
 5. Core 1 leaves the GPIO coprocessor on (CPACR's CP0 bits set).
 6. Core 1 sets the key through the GPIO coprocessor, with no store.
+7. Core 1 writes core 0's memory (SRAM above core 1's own and the shared memory).
+8. Core 1 stores into the DMA at an offset from a byte the host sent.
 
 It builds what is committed (`git archive` of COMMIT, default HEAD, unpacked in a
 temporary directory), never the working tree, and leaves the checkout as it was.
@@ -46,6 +48,19 @@ MUTANTS = {
                "        unsafe { (0x400a_8020 as *mut u32).write_volatile(0x8000_8000) };\n    }")
     ],
     "the GPIO coprocessor left on": [(CPACR, CPACR.replace(";", " | 0b11;"))],
+    "core 0's memory": [
+        (HOLD, "    fn hold_outputs_low(&mut self) {\n"
+               "        unsafe { (0x2001_c100 as *mut u32).write_volatile(0) };\n    }")
+    ],
+    "the DMA at an offset the host sent": [
+        (READ, "    fn usb_read(&mut self, buf: &mut [u8]) -> usize {\n"
+               "        let n = LINK.0.to_core1.read(buf);\n"
+               "        if n > 0 {\n"
+               "            let at = 0x5000_0000usize + 4 * buf[0] as usize;\n"
+               "            unsafe { (at as *mut u32).write_volatile(0) };\n"
+               "        }\n"
+               "        n\n    }")
+    ],
     "the key through the GPIO coprocessor": [
         (HOLD, "    fn hold_outputs_low(&mut self) {\n"
                "        unsafe { core::arch::asm!(\"mcr p0, #4, {0}, c0, c0\", in(reg) 1u32 << 16) };\n    }")

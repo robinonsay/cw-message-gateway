@@ -9,8 +9,10 @@
 //!
 //! - Core 0 sets up everything shared before it starts core 1: the clocks, USB,
 //!   the watchdog, the pins, and the ADC sampling GP26 into [`RING`] through DMA
-//!   channel 0 (`main`). Core 1 then only reads the timer, reads the DMA channel's
-//!   position, clears the ADC's overflow flag and reads the ring ([`Board`]).
+//!   channel 0 (`main`), that channel made Secure Unprivileged so that core 1 may
+//!   read it ([`unprivileged_channel`]). Core 1 then only reads the timer, reads the
+//!   DMA channel's position, clears the ADC's overflow flag and reads the ring
+//!   ([`Board`]).
 //! - Before anything else, core 1 turns on its memory protection unit ([`mpu`]):
 //!   the system's default memory map off, and regions only for the flash it runs
 //!   from, its own stack, [`LINK`], [`RING`], those ADC registers and, read-only,
@@ -69,19 +71,68 @@ static mut RING: AdcRing = AdcRing::new();
 /// The DMA channel the ADC stream uses: core 1 may read its registers.
 pub const DMA_CHANNEL: usize = 0;
 
+/// `SECCFG_CH0` and on, one word per channel from DMA offset 0x480 (RP2350
+/// datasheet §12.6.6.1 and Table 1183; the DMA's base is 0x50000000, §12.6.10).
+const SECCFG: *mut u32 = (0x5000_0480 + 4 * DMA_CHANNEL) as *mut u32;
+/// `SECCFG_CHn.S`, bit 1: the channel is Secure.
+const SECCFG_S: u32 = 1 << 1;
+/// `SECCFG_CHn.LOCK`, bit 2: the register is read-only until the DMA is reset.
+const SECCFG_LOCK: u32 = 1 << 2;
+/// `SECCFG_CHn`'s three bits (31:3 are reserved).
+const SECCFG_BITS: u32 = 0b111;
+
 /// Core 0, before starting core 1: the ADC sampling GP26 into [`RING`] through DMA
 /// channel [`DMA_CHANNEL`], from here to the next reset (rustos's `pico2::adc`).
+/// `None` if the ADC does not start, or the channel's security level does not
+/// read back as [`unprivileged_channel`] set it: then there is no decoder.
 pub fn start_audio(
     adc: Rp2350Adc,
     pin: PinHandle<26>,
     channel: Rp2350DmaChannel<DMA_CHANNEL>,
-) -> Result<Rp2350AdcStream, AdcError> {
+) -> Option<Rp2350AdcStream> {
+    if !unprivileged_channel(&channel) {
+        return None;
+    }
     // SAFETY: the only reference ever made to RING, here, once: the board's ADC
     // handle exists once. The stream owns it from here. Through a raw pointer,
     // since a reference to a `static mut` cannot be taken directly.
     #[allow(clippy::deref_addrof)]
     let ring = unsafe { &mut *(&raw mut RING) };
-    adc.stream_from_handle(pin, channel, ring, ADC_RATE)
+    adc.stream_from_handle(pin, channel, ring, ADC_RATE).ok()
+}
+
+/// Make DMA channel [`DMA_CHANNEL`] Secure Unprivileged, and lock that in: whether
+/// it reads back so.
+///
+/// Core 1 reads the channel's `CTRL_TRIG` and `WRITE_ADDR` on every pass (the
+/// stream's `read`), unprivileged ([`drop_privilege`]). A channel's security level
+/// is "the minimum security level required to read or write this channel's
+/// registers: access from a lower level returns a bus fault", and at reset every
+/// channel is Secure Privileged, the highest (§12.6.6.1). Left so, core 1's first
+/// read would fault and trip the box on every boot. Secure Unprivileged, the level
+/// core 1 runs at, is the lowest that lets it read them. Core 1's MPU still lets it
+/// only read the channel's first 32 bytes, and no other DMA register
+/// ([`regions`]), so it can neither write nor trigger it.
+///
+/// The level is also that of the channel's own transfers: it reads the ADC's FIFO,
+/// which takes Secure Unprivileged access from the DMA out of reset (ACCESSCTRL
+/// `ADC`, Table 942), and writes [`RING`] in SRAM, open to every level out of
+/// reset (ACCESSCTRL `SRAM0` to `SRAM9`, Tables 918-927). The DMA's own MPU has no region set, and with none every address
+/// needs only Non-secure Unprivileged (`MPU_CTRL` S = 0, P = 0, Table 1186).
+///
+/// `SECCFG_CHn` takes writes only from Secure Privileged code (core 0, here), and
+/// only until its `LOCK` bit is set: written once without it, then with it, so that
+/// the level is in place before the lock. Starting the channel would also lock it
+/// (Table 1183); only a reset of the whole DMA block, which rustos's
+/// `Rp2350Dma::new` did just before, clears the lock.
+fn unprivileged_channel(_channel: &Rp2350DmaChannel<DMA_CHANNEL>) -> bool {
+    // SAFETY: the channel's security register; this holds the channel's token, so
+    // nothing else programs it, and it has not been started.
+    unsafe {
+        SECCFG.write_volatile(SECCFG_S);
+        SECCFG.write_volatile(SECCFG_S | SECCFG_LOCK);
+        SECCFG.read_volatile() & SECCFG_BITS == SECCFG_S | SECCFG_LOCK
+    }
 }
 
 /// What core 0 hands core 1.

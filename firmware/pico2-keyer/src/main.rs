@@ -290,9 +290,10 @@ fn main() -> ! {
     // OFF`).
     let dma = Rp2350Dma::new(board.dma);
     let audio = Rp2350Adc::new(board.adc, &clocks)
+        .ok()
         .and_then(|adc| core1::start_audio(adc, board.pins.gpio26, dma.ch0));
     let core1 = match audio {
-        Ok(audio) => {
+        Some(audio) => {
             core1::hand_over(core1::Parts {
                 timer,
                 audio,
@@ -306,7 +307,7 @@ fn main() -> ! {
                 .launch(&core1::STACK, core1::main, timer, CORE1_LAUNCH_US)
                 .is_ok()
         }
-        Err(_) => false,
+        None => false,
     };
 
     let mut hw = Board {

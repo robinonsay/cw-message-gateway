@@ -138,6 +138,16 @@ the safety audit names, not simply the latest one. Download that run's
    `OTHER`, not `POWER`, and the node will not key a box that reports `OTHER`: the
    replug makes it `POWER`. `hfnode keyer --config C check` prints what the box
    reports (C is your `hfnode.toml`).
+6. **Check it stays up, before anything keys:** `hfnode keyer --config C check`
+   twice, a few seconds apart, the box still plugged into the computer only. Both
+   must answer, with `last started by POWER` and no trip, and the second `up` must
+   be larger than the first by about the time between them. A box that does not
+   answer the second time, says `WATCHDOG` or `TRIPPED`, or whose `up` went back
+   down is restarting by itself: do not key with it, and flash the file the audit
+   cleared before. On a box with the decoder on its second core (keyer protocol 5),
+   this is the one check of the decoder's core that needs no keying: a decoder core
+   that cannot run trips the box (`CORE1`) within a fraction of a second of every
+   boot.
 
 `hfnode devices` then marks it (`<- the keyer box`). Its USB name is `PICO2-KEYER`,
 and the node opens no port that does not carry that name.

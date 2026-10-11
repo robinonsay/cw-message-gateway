@@ -21,17 +21,22 @@ check_faults.py checks that their first store opens the key and the PTT.
 
 In core 1's code:
 
-1. A store to an address known here goes to SRAM (0x20000000-0x20081fff), to core
+1. A store to an address known here goes to core 1's own memory or what the
+   cores share, found by name in the ELF's symbols: `core1::LINK`, `core1::RING`,
+   `core1::STACK`, and `core1::PARTS` and rustos's `CORE1_ENTRY` and
+   `CORE1_STACK_LIMIT`, which core 1 takes or clears as it starts; or to core
    1's own CPACR (rustos turns on its floating-point unit) or MPU registers
    (MPU_CTRL, MPU_RNR, MPU_RBAR, MPU_RLAR, MPU_MAIR0; Armv8-M ARM, D1.2.14 and
    D1.2.168-D1.2.175; each core has its own), to the ADC's FCS (0x400a0008, RP2350 datasheet Table 1119),
    or is a store to SIO GPIO_OUT_CLR (0xd0000020) of the key's and the PTT's bits
    only (`TEST CORE1 FAULT`, which the MPU must refuse). Nothing else: no SIO
    register that sets a pin (GPIO_OUT, GPIO_OUT_SET, GPIO_OUT_XOR, GPIO_OE and its
-   aliases), no IO_BANK0, PADS_BANK0, PWM, USB, watchdog, RESETS or CLOCKS register.
+   aliases), no IO_BANK0, PADS_BANK0, PWM, USB, watchdog, RESETS or CLOCKS register,
+   nothing else in SRAM (where core 0's statics and stack are).
 2. No store goes at an address not known here into the 64 kB around any of those
-   blocks, or into the Private Peripheral Bus, so that an address computed at run
-   time cannot get round rule 1.
+   blocks, the DMA's or TIMER0's (whose registers core 1 reads), or into the
+   Private Peripheral Bus, so that an address computed at run time cannot get round
+   rule 1.
 3. No coprocessor instruction but the FPU's (check_pins.py's rule 6): the GPIO
    coprocessor, coprocessor 0, drives GPIO_OUT with no store. A store to CPACR
    (allowed by rule 1) is rustos's enable_fpu, or a value known here with
@@ -57,12 +62,17 @@ import io
 import os
 import re
 import struct
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pico2-decoder"))
 import check_pins as cp  # noqa: E402
 
-SRAM = range(0x2000_0000, 0x2008_2000)
+# Core 1's own memory and what the cores share: the symbols (an ELF symbol's name
+# ends so) a store from core 1's code may go to, at an address known here.
+MEMORY = [r"11pico2_keyer5core14LINK$", r"11pico2_keyer5core14RING$",
+          r"11pico2_keyer5core15STACK$", r"11pico2_keyer5core15PARTS$",
+          r"9multicore11CORE1_ENTRY(\.0)?$", r"9multicore17CORE1_STACK_LIMIT$"]
 # Core 1's own: its floating-point unit (rustos's core1_run) and its MPU (core1.rs).
 SYSTEM = {0xE000_ED88: "CPACR", 0xE000_ED94: "MPU_CTRL", 0xE000_ED98: "MPU_RNR",
           0xE000_ED9C: "MPU_RBAR", 0xE000_EDA0: "MPU_RLAR", 0xE000_EDC0: "MPU_MAIR0"}
@@ -72,12 +82,15 @@ GPIO_OUT_CLR = 0xD000_0020
 OPEN_BITS = (1 << 16) | (1 << 17)
 # The blocks (address >> 16) no store may go into at an address not known: the SIO
 # (and its Non-secure mirror), IO_BANK0 and RESETS, CLOCKS, PADS_BANK0, the ADC and
-# PWM, the watchdog, USB, and the Private Peripheral Bus.
+# PWM, TIMER0, the watchdog, the DMA, USB, and the Private Peripheral Bus.
 WATCHED = {0xD000: "the SIO", 0xD001: "the SIO", 0xD002: "the SIO", 0xD003: "the SIO",
            0x4001: "CLOCKS' 64 kB", 0x4002: "IO_BANK0's 64 kB", 0x4003: "PADS_BANK0's 64 kB",
-           0x400A: "the ADC's and PWM's 64 kB", 0x400D: "the watchdog's 64 kB",
+           0x400A: "the ADC's and PWM's 64 kB", 0x400B: "TIMER0's 64 kB",
+           0x400D: "the watchdog's 64 kB", 0x5000: "the DMA's 64 kB",
            0x5010: "USB's 64 kB", 0x5011: "USB's 64 kB", 0xE000: "the Private Peripheral Bus",
            0xE002: "the Private Peripheral Bus's Non-secure mirror"}
+# Where MEMORY is in the image under check: (start, end) ranges.
+ALLOWED: list[tuple[int, int]] = []
 ROOTS = [r"9multicore11core1_start$", r"9multicore9core1_run$", r"11pico2_keyer5core14main$"]
 # Core 0's: the keyer's main (rustos's __rustos_main calls it) and its control loop.
 CORE0 = [r"11pico2_keyer4main$", r"__rustos_main$", r"7control.*Control4pass"]
@@ -189,7 +202,7 @@ def check_store(f: cp.Function, k: int, i: cp.Insn, where: str, failures: list) 
                     value and all(isinstance(x, int) and x & cp.CP0 == 0 for x in value)):
                 failures.append(f"a store to CPACR that could turn the GPIO coprocessor on: {where}")
                 continue
-            if a in SRAM or a & ~3 in SYSTEM or a & ~3 == ADC_FCS:
+            if any(lo <= a < hi for lo, hi in ALLOWED) or a & ~3 in SYSTEM or a & ~3 == ADC_FCS:
                 continue
             if a & ~3 == GPIO_OUT_CLR and value and all(
                     isinstance(x, int) and x & ~OPEN_BITS == 0 for x in value):
@@ -202,12 +215,25 @@ def check_store(f: cp.Function, k: int, i: cp.Insn, where: str, failures: list) 
     return unknown
 
 
+def memory(image: cp.Image) -> list[str]:
+    """Find [`MEMORY`] in the image's symbols, into `ALLOWED`: the failures."""
+    failures = []
+    ALLOWED.clear()
+    for pattern in MEMORY:
+        found = [(at, at + size) for name, at, size in image.objects if re.search(pattern, name)]
+        if len(found) != 1:
+            failures.append(f"cannot find core 1's memory {pattern!r} in the image's symbols")
+        ALLOWED.extend(found)
+    return failures
+
+
 def run(image: cp.Image) -> list[str]:
     """Every failure, printing what passed."""
     cp.WATCHED.clear()
     cp.WATCHED.update(WATCHED)
     fns = cp.solve_image(image)
     code, failures = core1_code(image, fns)
+    failures += memory(image)
     unknown = 0
     for name in sorted(code):
         f = fns[name]
@@ -231,6 +257,14 @@ def run(image: cp.Image) -> list[str]:
 def elf_image(path: str) -> cp.Image:
     image = cp.elf_image(path)
     image.data = []
+    # The data symbols, for MEMORY: (name, address, size).
+    syms = subprocess.run([cp.objdump(), "-t", path], capture_output=True, text=True,
+                          check=True).stdout
+    image.objects = []
+    for line in syms.splitlines():
+        m = re.match(r"^([0-9a-f]{8}) .* O \S+\s+([0-9a-f]+) (\S+)$", line)
+        if m:
+            image.objects.append((m.group(3), int(m.group(1), 16), int(m.group(2), 16)))
     with open(path, "rb") as f:
         data = f.read()
     (shoff,) = struct.unpack_from("<I", data, 0x20)
@@ -288,7 +322,17 @@ def self_test() -> None:
         img = cp.Image(cp.parse(text), [starts["handler"] | 1],
                        {at: [names.get(n, n)] for n, at in starts.items()}, read)
         img.data = [(0x2000_0000, 0x2000_0004)]
+        img.objects = list(objects)
         return img
+
+    # Core 1's memory, as the keyer's image lays it out; core 0's statics are above.
+    objects = [("_RNvNtCs0_11pico2_keyer5core15PARTS", 0x2000_0000, 0x1c),
+               ("_RNvNtCs0_11pico2_keyer5core14LINK", 0x2000_4000, 0xa20),
+               ("_RNvNtCs0_11pico2_keyer5core14RING", 0x2000_8000, 0x4000),
+               ("_RNvNtCs0_11pico2_keyer5core15STACK", 0x2000_c000, 0x1_0000),
+               ("_RNvNtCs0_5pico29multicore17CORE1_STACK_LIMIT", 0x2001_c000, 4),
+               ("_RNvNtCs0_11pico2_keyer5TIMER", 0x2001_c004, 1),
+               ("_RNvNtCs0_5pico29multicore11CORE1_ENTRY.0", 0x2001_c008, 4)]
 
     def failures(img: cp.Image) -> list[str]:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -347,6 +391,24 @@ def self_test() -> None:
     passes(image("b @handler@\n", extra={"handler": "movs r0, #0x18\nmovt r0, #0xd000\nstr r1, [r0]\nb 0x0\n"}))
     fails(image("bl @main@\n"), "core 0's")
     fails(image("<unknown>\n"), "cannot decode")
+    # SRAM (rule 1): core 1's memory and the shared memory pass; core 0's fails, and
+    # so does an image without one of them.
+    passes(image("movw r0, #0xc000\nmovt r0, #0x2001\nstr r1, [r0]\n"
+                 "movw r0, #0xc008\nmovt r0, #0x2001\nstr r1, [r0]\n"
+                 "movw r0, #0x8000\nmovt r0, #0x2000\nstrh r1, [r0, #0x10]\n"
+                 "movs r0, #0x0\nmovt r0, #0x2000\nstr r1, [r0, #0x18]\n"))
+    fails(image("movw r0, #0xc004\nmovt r0, #0x2001\nstrb r1, [r0]\n"), cannot)
+    fails(image("movw r0, #0xc010\nmovt r0, #0x2001\nstr r1, [r0]\n"), cannot)
+    fails(image("movw r0, #0x4a20\nmovt r0, #0x2000\nstr r1, [r0]\n"), cannot)
+    fails(image("movs r0, #0x0\nmovt r0, #0x2008\nstr r1, [r0]\n"), cannot)
+    saved = objects.pop(1)
+    fails(image("bx lr\n"), "cannot find core 1's memory")
+    objects.insert(1, saved)
+    # The DMA and TIMER0 (rule 2), at an address not known.
+    fails(image("ldr r2, [r3]\nmovs r0, #0x0\nmovt r0, #0x5000\nadd r0, r2\nstr r1, [r0]\n"),
+          "into the DMA's 64 kB at an address not known")
+    fails(image("ldr r2, [r3]\nmovs r0, #0x0\nmovt r0, #0x400b\nstr r1, [r0, r2]\n"),
+          "into TIMER0's 64 kB at an address not known")
     # The GPIO coprocessor (rule 3): any coprocessor instruction but the FPU's fails.
     for insn in ("mcr p0, #0x1, r0, c0, c0", "mcr2 p0, #0x0, r0, c0, c0",
                  "mcrr p0, #0x0, r0, r1, c0", "mrc p0, #0x0, r0, c0, c0",
