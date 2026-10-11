@@ -107,6 +107,7 @@ fn a_handheld_is_never_told_to_run_the_sidetone_check() {
         let mut notes = Vec::new();
         assert!(!check_measured(
             Duration::ZERO,
+            MIN_TEST_TONE,
             Duration::ZERO,
             output,
             &mut notes
@@ -142,6 +143,48 @@ fn hangtest_sees_the_watchdog_open_the_key() {
     drop(b.station);
     let why = std::fs::read_to_string(file).unwrap();
     assert!(why.contains("watchdog"), "{why}");
+}
+
+/// `core1test`: the decoder's core stopping, or faulting, mid-run opens the key
+/// within the box's watch on it, and the box comes back from its watchdog reset
+/// tripped `CORE1`.
+#[test]
+fn core1test_sees_the_box_open_the_key_and_trip_for_core1() {
+    for fault in [false, true] {
+        let mut b = bench(|_| {});
+        let rep = core1test(&mut b.station, "DE N0DE", fault, SCALE).unwrap();
+        assert!(rep.passed, "fault {fault}: {rep:?}");
+        assert!(rep.longest <= rep.limit, "{rep:?}");
+        assert_eq!(b.keyer_box.now().resets, 1);
+        assert_eq!(b.keyer_box.now().trip(), Trip::Core1);
+        let tests: Vec<String> = b
+            .keyer_box
+            .now()
+            .lines
+            .iter()
+            .filter(|l| l.contains("TEST CORE1"))
+            .cloned()
+            .collect();
+        let want = if fault {
+            "TEST CORE1 FAULT"
+        } else {
+            "TEST CORE1 HANG"
+        };
+        assert!(tests.len() == 1 && tests[0].contains(want), "{tests:?}");
+        // Tripped: nothing more is keyed.
+        assert!(key(&mut b.station, "DE N0DE").is_err());
+    }
+}
+
+/// A box whose watch on its decoder core does not work (or whose memory
+/// protection lets the store through) keys on: the test fails.
+#[test]
+fn a_box_that_ignores_its_decoder_core_fails_core1test() {
+    let mut b = bench(|_| {});
+    b.keyer_box.now().core1_unwatched = true;
+    let rep = core1test(&mut b.station, "DE N0DE", false, SCALE);
+    assert!(rep.map_or(true, |r| !r.passed));
+    assert_eq!(b.keyer_box.now().resets, 0);
 }
 
 #[test]

@@ -126,6 +126,10 @@ fn a_box_with_looser_limits_than_the_node_is_refused() {
         check_hello(&h).is_err()
     };
     assert!(bad(|h| h.version += 1));
+    // Protocol 4, the box without the decoder, is keyed as before; 3 and 6 are not.
+    assert!(!bad(|h| h.version = 4));
+    assert!(bad(|h| h.version = 3));
+    assert!(bad(|h| h.version = keyer_core::VERSION + 1));
     assert!(bad(|h| h.run_limit += Duration::from_millis(1)));
     assert!(bad(|h| h.run_limit = Duration::ZERO));
     assert!(bad(|h| h.key_down_limit += Duration::from_millis(1)));

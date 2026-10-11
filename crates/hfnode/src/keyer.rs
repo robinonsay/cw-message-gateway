@@ -364,6 +364,10 @@ pub fn trip_text(t: keyer_core::keyer::Trip) -> &'static str {
             "the PTT line stayed low after it let the PTT up: something else holds the \
              radio's PTT, and the radio may still be transmitting"
         }
+        Trip::Core1 => {
+            "the decoder on its second core faulted or stopped, so it opened every output \
+             and let its watchdog restart it"
+        }
     }
 }
 
@@ -373,9 +377,17 @@ pub fn is_keyer_box(usb_product: &str) -> bool {
     usb_product.trim() == keyer_core::NAME
 }
 
+/// The keyer protocol versions this node keys a box of: 4, the firmware without
+/// the decoder (build eef8c126, the one on the bench box), and 5, the same keyer
+/// with the decoder on its second core ([`keyer_core::VERSION`]). The commands
+/// the node sends, their replies and the box's limits are the same in both; 5
+/// adds the `CORE1` trip, `TEST CORE1` and the `RX` lines, which this node does
+/// not send yet.
+pub const VERSIONS: [u32; 2] = [4, keyer_core::VERSION];
+
 /// Whether the node can work with the box that sent `h`: the keyer box (its
-/// name), this protocol version, and limits of its own no looser than the box's
-/// ([`keyer_core::limits`]).
+/// name), a protocol version in [`VERSIONS`], and limits of its own no looser
+/// than the box's ([`keyer_core::limits`]).
 pub fn check_hello(h: &Hello) -> Result<()> {
     if h.name != keyer_core::NAME {
         bail!(
@@ -384,12 +396,13 @@ pub fn check_hello(h: &Hello) -> Result<()> {
             keyer_core::NAME
         );
     }
-    if h.version != keyer_core::VERSION {
+    if !VERSIONS.contains(&h.version) {
         bail!(
-            "the box speaks version {} of the keyer protocol; hfnode speaks {}: flash it \
-             with this hfnode's firmware",
+            "the box speaks version {} of the keyer protocol; hfnode speaks {} or {}: flash \
+             it with this hfnode's firmware",
             h.version,
-            keyer_core::VERSION
+            VERSIONS[0],
+            VERSIONS[1]
         );
     }
     if h.rest < MIN_REST {

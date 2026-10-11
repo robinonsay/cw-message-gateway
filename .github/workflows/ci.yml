@@ -194,6 +194,15 @@ jobs:
       - name: fault handlers open the key first
         run: python3 check_faults.py pico2-keyer.elf
 
+      # The decoder on core 1 stores to no pin, pad or PWM, nor anything of core
+      # 0's but the memory the two cores share (the design note's §7.3, rule 1),
+      # read from the machine code with the decoder box's check_pins.py analysis.
+      # The self-test first, so that the check is seen to fail.
+      - name: core 1 never reaches a pin
+        run: |
+          python3 check_core1.py --self-test
+          python3 check_core1.py pico2-keyer.elf
+
       # The same commit from a checkout somewhere else must give the same file.
       # Built in place, a checkout at this second path gives another UF2 than
       # one at the first; build.sh is what makes the two the same.

@@ -319,6 +319,16 @@ enum KeyerCmd {
     /// Key a long message and then stop talking to the box: its link timeout must
     /// open the key by itself, as it would if the node died or the cable came out.
     Linktest,
+    /// A box with the decoder on its second core (keyer protocol 5): identify, then
+    /// stop that core mid-run (or, with --fault, make it fault): the box must open
+    /// the key, trip (CORE1) and come back from its watchdog reset tripped (unplug
+    /// it and plug it in again afterwards).
+    Core1test {
+        /// Make the decoder's core fault (a store its memory protection must
+        /// refuse) instead of stop.
+        #[arg(long)]
+        fault: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1435,7 +1445,8 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
         | KeyerCmd::Sidetone
         | KeyerCmd::Hangtest
         | KeyerCmd::Stucktest
-        | KeyerCmd::Linktest => {
+        | KeyerCmd::Linktest
+        | KeyerCmd::Core1test { .. } => {
             let needs = match action {
                 KeyerCmd::Key { .. } | KeyerCmd::Sidetone => keyer::Action::Key,
                 _ => keyer::Action::Test,
@@ -1497,10 +1508,12 @@ fn keyer_cmd(cfg: &Config, action: KeyerCmd) -> Result<()> {
                 }
                 _ => {
                     println!("{}", bench::MANUAL_STOP);
-                    let rep = if matches!(action, KeyerCmd::Hangtest) {
-                        bench::hangtest(&mut st, &id, 1.0)?
-                    } else {
-                        bench::stucktest(&mut st, &id, 1.0)?
+                    let rep = match action {
+                        KeyerCmd::Hangtest => bench::hangtest(&mut st, &id, 1.0)?,
+                        KeyerCmd::Core1test { fault } => {
+                            bench::core1test(&mut st, &id, fault, 1.0)?
+                        }
+                        _ => bench::stucktest(&mut st, &id, 1.0)?,
                     };
                     println!(
                         "longest on the air {} ms, as its audio shows (limit {} ms)",
@@ -2204,6 +2217,10 @@ key_file = '{}'
             refused("keyer hangtest", keyer_cmd(&keyer, KeyerCmd::Hangtest));
             refused("keyer stucktest", keyer_cmd(&keyer, KeyerCmd::Stucktest));
             refused("keyer linktest", keyer_cmd(&keyer, KeyerCmd::Linktest));
+            refused(
+                "keyer core1test",
+                keyer_cmd(&keyer, KeyerCmd::Core1test { fault: false }),
+            );
             refused(
                 "handheld key",
                 handheld_cmd(&handheld, HandheldCmd::Key { text: text() }),

@@ -394,7 +394,11 @@ impl KeyerRig {
     pub fn test(&mut self, cmd: &Command) -> Result<()> {
         if !matches!(
             cmd,
-            Command::TestHang | Command::TestStuck | Command::TestHold
+            Command::TestHang
+                | Command::TestStuck
+                | Command::TestHold
+                | Command::TestCore1Hang
+                | Command::TestCore1Fault
         ) {
             return Err(RigError::Protocol(format!("{} is not a test", cmd.body())));
         }

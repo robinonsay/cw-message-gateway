@@ -6,11 +6,12 @@
 //!
 //! Each pass, in this order:
 //!
-//! 1. service USB, then read the clock, the processor's own count, and the PTT
-//!    line;
+//! 1. service USB, then read the clock, the processor's own count, core 1's
+//!    heartbeat and fault flag, and the PTT line;
 //! 2. if the USB link went away since the last pass, end any run: the key and the
-//!    PTT open and the tone stops on this same pass;
-//! 3. take the lines that arrived, queueing their replies;
+//!    PTT open and the tone stops on this same pass; tell core 1 the link's epoch;
+//! 3. take the lines that arrived, queueing their replies: `RX` lines go to core 1
+//!    (below), every other line to the keyer;
 //! 4. bring the keyer up to now;
 //! 5. check the pins ([`PinGuard`]): trip the box if the key or the tone has been
 //!    on for the key-down limit, or the PTT down for the PTT limit (each the box's
@@ -24,12 +25,16 @@
 //!    has stopped or slowed while the processor ran on, every time limit above has
 //!    stopped with it, so the box trips (`CLOCK`), opening every output, and stops
 //!    feeding its watchdog;
-//! 7. drive the key, the tone and the PTT, in that order, then the LED;
-//! 8. send what replies fit;
-//! 9. save the box's trip, whether it is keying the transmitter, and its duty
-//!    budget for the next boot ([`Hardware::save`], [`crate::keyer::Saved`]);
-//! 10. feed the watchdog, once, unless `TEST HANG` has stopped the loop or the
-//!     clock check has failed.
+//! 7. check core 1 ([`Core1Watch`]): if a fault handler has run, or core 1 is
+//!    running and its heartbeat has not moved for [`limits::CORE1_MS`], the box
+//!    trips (`CORE1`) the same way, and stops feeding its watchdog;
+//! 8. drive the key, the tone and the PTT, in that order, then the LED; hand core
+//!    1 a bring-up test that came due (`TEST CORE1 HANG`, `TEST CORE1 FAULT`);
+//! 9. send what replies fit, then at most one line from core 1 (below);
+//! 10. save the box's trip, whether it is keying the transmitter, and its duty
+//!     budget for the next boot ([`Hardware::save`], [`crate::keyer::Saved`]);
+//! 11. feed the watchdog, once, unless `TEST HANG` has stopped the loop or the
+//!     clock or core 1 check has failed.
 //!
 //! After `TEST HANG` takes effect, a pass only reads the clock and holds the pins
 //! as they were, servicing nothing, saving nothing and never feeding the watchdog,
@@ -37,10 +42,34 @@
 //! [`limits::HANG_OPEN_MS`] after the hang, or once the key or tone has been on for
 //! the key-down limit or the PTT down for the PTT limit, the pass opens them all
 //! itself and holds them open.
+//!
+//! # The decoder on core 1 (protocol 5)
+//!
+//! The RP2350 has two processor cores. This loop runs on core 0 and is the only
+//! thing that keys; the decoder (`decoder_core`) runs on core 1 and only listens.
+//! The two meet in two byte rings and a few flags in memory, through the
+//! `core1_*` methods of [`Hardware`], and this loop never waits on core 1:
+//!
+//! - A line `<id> RX <command>` from the host goes to core 1 as `<id> <command>`,
+//!   framed again, and never to the keyer. The decoder's reply comes back as
+//!   `<id> RX <reply>`. If core 1 is not running the box answers `ERR RX OFF` itself;
+//!   if its ring is full, `ERR RX BUSY`; `RX` alone is `ERR RX ARGS`.
+//! - The decoder's own lines (id `00`: `CH`, `ST`, `SL`, `GAP`) come to the host as
+//!   `00 RX <line>` only after the host's `RX HELLO`, and until its `RX TEXT`, the
+//!   USB link going away, or no valid line from the host for the link timeout: a
+//!   host that never says `RX HELLO` sees none of them. Replies (any other id) are
+//!   always passed on.
+//! - A pass passes on at most one line from core 1, only a line that decodes and
+//!   fits once `RX ` is added, after the keyer's own replies have gone, and only
+//!   if the USB buffer then still has room for a whole keyer reply after it, so
+//!   that a keyer reply never waits behind the decoder.
+//! - Nothing from core 1 reaches the keyer: no `RX` line, nothing core 1 sends,
+//!   and no flag but the heartbeat, the fault flag and the bytes this loop reads
+//!   and checks.
 
-use crate::frame::LineReader;
-use crate::keyer::{Keyer, Trip};
-use crate::limits;
+use crate::frame::{self, Line, LineReader};
+use crate::keyer::{Core1Test, Keyer, Trip};
+use crate::{limits, MAX_LINE};
 
 /// The board, as the control loop uses it.
 pub trait Hardware {
@@ -75,7 +104,33 @@ pub trait Hardware {
     fn ptt_line(&mut self) -> bool;
     fn set_led(&mut self, on: bool);
     fn feed_watchdog(&mut self);
+    /// Bytes [`Hardware::usb_write`] would take now.
+    fn usb_room(&self) -> usize;
+    /// Whether core 1, the decoder, was started.
+    fn core1_launched(&self) -> bool;
+    /// Core 1's heartbeat: a count its loop moves on every pass.
+    fn core1_beat(&self) -> u32;
+    /// Whether a fault or panic handler has run on core 1. (The handlers set it
+    /// on either core; on core 0 nothing runs after them to read it.)
+    fn core1_fault(&self) -> bool;
+    /// Tell core 1 the USB link's [`Hardware::link_epoch`].
+    fn core1_epoch(&mut self, epoch: u32);
+    /// Tell core 1 whether the key or the PTT is down, as last driven: the decoder
+    /// does not listen then, nor just after, so that it never decodes the radio's
+    /// own sidetone.
+    fn core1_keyed(&mut self, down: bool);
+    /// Queue `line`, its newline included, for core 1: whole or not at all;
+    /// whether it was queued.
+    fn core1_send(&mut self, line: &[u8]) -> bool;
+    /// Bytes core 1 sent, into `buf`: how many.
+    fn core1_read(&mut self, buf: &mut [u8]) -> usize;
+    /// Have core 1 run a bring-up test.
+    fn core1_test(&mut self, test: Core1Test);
 }
+
+/// The most a line takes in the USB buffer, its newline included: room kept for a
+/// keyer reply behind any line from core 1.
+pub const LINE_BYTES: usize = MAX_LINE + 1;
 
 /// The LED flashes at this half-period while the box is tripped.
 pub const TRIP_FLASH_MS: u64 = 250;
@@ -133,6 +188,48 @@ impl ClockCheck {
         self.cycles = 0;
         self.from = now;
         (clock * 2 < cpu || cpu * 4 < clock).then_some(Trip::Clock)
+    }
+}
+
+/// Core 1 as the loop watches it: its fault flag, and its heartbeat, which must
+/// move at least every [`limits::CORE1_MS`] once core 1 is running (it was
+/// started, or its heartbeat has been seen to move). A core 1 that was never
+/// started and never moves is no decoder, and keying goes on without one.
+#[derive(Debug, Clone)]
+pub struct Core1Watch {
+    running: bool,
+    /// The heartbeat when it last moved, or when the watch began.
+    beat: u32,
+    /// When it last moved, or when the watch began.
+    since: u64,
+}
+
+impl Core1Watch {
+    /// A watch from `now`, core 1 started or not, its heartbeat at `beat`.
+    pub fn new(now: u64, launched: bool, beat: u32) -> Self {
+        Self {
+            running: launched,
+            beat,
+            since: now,
+        }
+    }
+
+    /// Core 1's heartbeat reads `beat` and its fault flag `fault` at `now`:
+    /// [`Trip::Core1`] if it faulted, or if it is running and its heartbeat has
+    /// not moved for [`limits::CORE1_MS`].
+    pub fn check(&mut self, now: u64, beat: u32, fault: bool) -> Option<Trip> {
+        if beat != self.beat {
+            self.beat = beat;
+            self.since = now;
+            self.running = true;
+        }
+        let stalled = self.running && now.saturating_sub(self.since) >= u64::from(limits::CORE1_MS);
+        (fault || stalled).then_some(Trip::Core1)
+    }
+
+    /// Whether core 1 is running: started, or seen to move.
+    pub fn running(&self) -> bool {
+        self.running
     }
 }
 
@@ -245,6 +342,10 @@ impl Outbox {
         self.len = 0;
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Queue a line, adding its newline; a line that does not fit is dropped
     /// (hfnode times out and asks again, or stops).
     pub fn push(&mut self, line: &[u8]) {
@@ -315,11 +416,20 @@ pub struct Control {
     /// The outputs as last driven.
     pins: Outputs,
     clock: ClockCheck,
-    /// The clock check failed: the watchdog is not fed again, so that it resets
-    /// the chip if its own clock still runs.
+    core1: Core1Watch,
+    /// The clock or core 1 check failed: the watchdog is not fed again, so that it
+    /// resets the chip if its own clock still runs.
     starved: bool,
     /// When `TEST HANG` stopped the loop.
     hung_at: Option<u64>,
+    /// Lines from core 1, a byte at a time.
+    from_core1: LineReader,
+    /// A line from core 1, framed for the host, waiting for room.
+    forward: Option<Line>,
+    /// The host said `RX HELLO`: the decoder's own lines go to it.
+    rx_open: bool,
+    /// When the last valid line from the host arrived.
+    heard: u64,
 }
 
 impl Control {
@@ -339,8 +449,13 @@ impl Control {
             ptt_guard: PinGuard::ptt(now, l.ptt_ms.min(limits::PTT_MS)),
             pins: Outputs::OFF,
             clock: ClockCheck::new(now, hw.cpu_cycles(), H::CPU_CYCLES_PER_MS),
+            core1: Core1Watch::new(now, hw.core1_launched(), hw.core1_beat()),
             starved: false,
             hung_at: None,
+            from_core1: LineReader::new(),
+            forward: None,
+            rx_open: false,
+            heard: now,
         }
     }
 
@@ -358,10 +473,21 @@ impl Control {
         self.hung_at.is_some()
     }
 
-    /// Whether the clock check has failed, so that the loop no longer feeds the
-    /// watchdog.
+    /// Whether the clock or core 1 check has failed, so that the loop no longer
+    /// feeds the watchdog.
     pub fn starved(&self) -> bool {
         self.starved
+    }
+
+    /// Whether the decoder's own lines go to the host (`RX HELLO`).
+    pub fn rx_open(&self) -> bool {
+        self.rx_open
+    }
+
+    /// Whether core 1 is running and the box has not tripped for it: what `RX`
+    /// lines need.
+    fn decoder_up(&self) -> bool {
+        self.core1.running() && self.keyer.trip() != Trip::Core1
     }
 
     /// One pass of the loop.
@@ -373,6 +499,7 @@ impl Control {
         hw.usb_poll();
         let now = hw.now_ms();
         let clock = self.clock.check(now, hw.cpu_cycles());
+        let core1 = self.core1.check(now, hw.core1_beat(), hw.core1_fault());
         let line = hw.ptt_line();
         self.keyer.set_line(line);
 
@@ -383,16 +510,35 @@ impl Control {
             self.keyer.link_lost(now, |_, _, _| {});
             self.reader.clear();
             self.out.clear();
+            self.rx_open = false;
+            self.forward = None;
         }
+        hw.core1_epoch(epoch);
 
         let mut buf = [0u8; 64];
         let n = hw.usb_read(&mut buf).min(buf.len());
+        let mut copy = [0u8; MAX_LINE + 1];
         for &b in &buf[..n] {
-            if let Some(line) = self.reader.push(b) {
-                if let Some(reply) = self.keyer.handle_line(now, line) {
-                    self.out.push(reply.as_bytes());
+            let Some(l) = self.reader.push(b) else {
+                continue;
+            };
+            let line = &mut copy[..l.len()];
+            line.copy_from_slice(l);
+            let reply = match frame::decode(line) {
+                Ok((id, body)) if body == "RX" || body.starts_with("RX ") => {
+                    self.heard = now;
+                    self.rx_command(hw, id, &body[2..])
                 }
+                _ => self.keyer.handle_line(now, line),
+            };
+            if let Some(reply) = reply {
+                // Only a line that decoded is answered.
+                self.heard = now;
+                self.out.push(reply.as_bytes());
             }
+        }
+        if self.rx_open && now.saturating_sub(self.heard) >= u64::from(limits::LINK_TIMEOUT_MS) {
+            self.rx_open = false;
         }
 
         self.keyer.poll(now);
@@ -405,13 +551,15 @@ impl Control {
             self.keyer.trip_now(now, why, |_, _, _| {});
             pins = Outputs::of(&self.keyer);
         }
-        if let Some(why) = clock {
+        // The clock first: with it stopped, core 1's watch has stopped too.
+        if let Some(why) = clock.or(core1) {
             self.keyer.trip_now(now, why, |_, _, _| {});
             pins = Outputs::of(&self.keyer);
             self.starved = true;
         }
         pins.drive(hw);
         self.pins = pins;
+        hw.core1_keyed(pins.key || pins.ptt);
         self.guard.driven(now, pins.key || pins.tone);
         self.ptt_guard.driven(now, pins.ptt);
         let lit = match self.keyer.trip() {
@@ -419,7 +567,11 @@ impl Control {
             _ => (now / TRIP_FLASH_MS).is_multiple_of(2),
         };
         hw.set_led(lit);
+        if let Some(test) = self.keyer.core1_test() {
+            hw.core1_test(test);
+        }
         self.out.send(hw);
+        self.forward_from_core1(hw);
 
         hw.save(self.keyer.saved(now).encode());
         if self.keyer.hung() {
@@ -431,6 +583,65 @@ impl Control {
         }
         if !self.starved {
             hw.feed_watchdog();
+        }
+    }
+
+    /// `RX <command>` from the host under `id` (`args` is what follows `RX`): to
+    /// core 1, or the box's own answer.
+    fn rx_command(&mut self, hw: &mut impl Hardware, id: u8, args: &str) -> Option<Line> {
+        let Some(cmd) = args.strip_prefix(' ').filter(|c| !c.is_empty()) else {
+            return frame::encode(id, format_args!("ERR RX ARGS"));
+        };
+        if !self.decoder_up() {
+            return frame::encode(id, format_args!("ERR RX OFF"));
+        }
+        // Shorter than the line it came in, so it fits.
+        let line = frame::encode(id, format_args!("{cmd}"))?;
+        let mut buf = [0u8; MAX_LINE + 1];
+        buf[..line.len()].copy_from_slice(line.as_bytes());
+        buf[line.len()] = b'\n';
+        if !hw.core1_send(&buf[..=line.len()]) {
+            return frame::encode(id, format_args!("ERR RX BUSY"));
+        }
+        match cmd {
+            "HELLO" => self.rx_open = true,
+            "TEXT" => self.rx_open = false,
+            _ => {}
+        }
+        None
+    }
+
+    /// At most one line from core 1 to the host, framed `<id> RX <line>`: once the
+    /// keyer's replies have all gone, and if the USB buffer still has room for a
+    /// whole keyer reply after it. Reads at most a line's worth of bytes a pass.
+    fn forward_from_core1<H: Hardware>(&mut self, hw: &mut H) {
+        if !self.decoder_up() {
+            self.forward = None;
+            return;
+        }
+        let mut budget = LINE_BYTES;
+        while self.forward.is_none() && budget > 0 {
+            let mut b = [0u8; 1];
+            if hw.core1_read(&mut b) == 0 {
+                break;
+            }
+            budget -= 1;
+            if let Some(l) = self.from_core1.push(b[0]) {
+                self.forward = match frame::decode(l) {
+                    // The decoder's own lines only while the host asked for them.
+                    Ok((0, _)) if !self.rx_open => None,
+                    Ok((id, body)) => frame::encode(id, format_args!("RX {body}")),
+                    Err(_) => None,
+                };
+            }
+        }
+        let Some(l) = &self.forward else {
+            return;
+        };
+        if self.out.is_empty() && hw.usb_room() >= l.len() + 1 + LINE_BYTES {
+            self.out.push(l.as_bytes());
+            self.forward = None;
+            self.out.send(hw);
         }
     }
 

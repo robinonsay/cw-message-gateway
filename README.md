@@ -386,6 +386,7 @@ the air.
 | `hfnode keyer --config C hangtest` | **yes** | Identify, then hang the box's control loop mid-transmission: its watchdog must open the key within 0.5 s. |
 | `hfnode keyer --config C stucktest` | **yes** | Identify, then make the box hold its key down: its 1 s limit must open the key and lock the box until it is unplugged. |
 | `hfnode keyer --config C linktest` | **yes** | Key a long message, then stop talking to the box: its link timeout must open the key by itself, as if the node had died. |
+| `hfnode keyer --config C core1test [--fault]` | **yes** | Protocol 5 box: identify, then stop (or, with `--fault`, fault) the decoder's core mid-transmission: the box must open the key, trip (`CORE1`) and come back from its watchdog reset tripped. |
 | `hfnode handheld --config C check` | no | Parked route ([docs/handheld.md](docs/handheld.md)): a handheld running the custom CW firmware in `firmware/uv-k1`: its `HELLO` and transmit state, and its frequency, mode, power and break-in against the config (the node sets none of them). |
 | `hfnode handheld --config C rx` | no | Stop the handheld's keyer and confirm receive. |
 | `hfnode handheld --config C key TEXT` | **yes** | Check the handheld, then key TEXT on it, as given: include your call. |

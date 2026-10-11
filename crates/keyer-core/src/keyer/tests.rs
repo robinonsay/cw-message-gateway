@@ -209,7 +209,7 @@ fn hello_reports_the_limits_and_uptime() {
     let mut b = Bench::new();
     assert_eq!(
         b.send(5230, "HELLO").unwrap(),
-        "OK HELLO 4 60 2000 1000 1000 60 60 5230 POWER - PICO2-KEYER"
+        "OK HELLO 5 60 2000 1000 1000 60 60 5230 POWER - PICO2-KEYER"
     );
     let mut w = Keyer::new(Limits::BOX, Boot::Watchdog, 0).with_build("1a2b3c4d");
     let line = encode(9, format_args!("HELLO")).unwrap();
@@ -731,6 +731,98 @@ fn the_saved_state_round_trips_and_nothing_else_decodes() {
             }
         }
     }
+}
+
+/// The words a protocol 4 box saved read the same here, and the first eight trips
+/// are saved exactly as it saved them: a box reflashed with a watchdog boot's
+/// words still in its scratch registers keeps its trip and its spent budget.
+/// `CORE1`, the ninth, has bit 4 of the flags, which protocol 4 refused.
+#[test]
+fn the_saved_state_is_protocol_4_s_for_its_trips() {
+    // Protocol 4's encoding: the trip's index in bits 0-2, the key in bit 3.
+    let v4_flags = |trip: Trip, key: bool| {
+        Trip::ALL.iter().position(|&t| t == trip).unwrap() as u32 | (u32::from(key) << 3)
+    };
+    for trip in &Trip::ALL[..8] {
+        for key in [false, true] {
+            let s = Saved {
+                trip: *trip,
+                key,
+                budget: 12_345,
+            };
+            let w = s.encode();
+            assert_eq!((w[0] >> 8) & 0xff, v4_flags(*trip, key), "{s:?}");
+        }
+    }
+    // Words a protocol 4 box saved (its CLOCK trip, key down, 7 s of budget).
+    assert_eq!(
+        Saved::decode([0x4b59_0c00 | 0x7f, 7000]),
+        None,
+        "a wrong check byte"
+    );
+    let v4 = Saved {
+        trip: Trip::Clock,
+        key: true,
+        budget: 7000,
+    }
+    .encode();
+    assert_eq!(v4[0] & 0xffff_ff00, 0x4b59_0c00);
+    let s = Saved::decode(v4).unwrap();
+    assert_eq!((s.trip, s.key, s.budget), (Trip::Clock, true, 7000));
+    let core1 = Saved {
+        trip: Trip::Core1,
+        key: false,
+        budget: 0,
+    }
+    .encode();
+    assert_eq!((core1[0] >> 8) & 0xff, 0x10);
+    assert_eq!(Saved::decode(core1).unwrap().trip, Trip::Core1);
+    // Flags no trip has (index 9 and over) are nothing.
+    for flags in [0x11u32, 0x17, 0x20, 0x80] {
+        let head = (0x4b59 << 16) | (flags << 8);
+        let c = Saved::check(head, 0);
+        assert_eq!(Saved::decode([head | u32::from(c), 0]), None, "{flags:#x}");
+    }
+}
+
+/// `TEST CORE1 HANG` and `TEST CORE1 FAULT`: armed like the other tests, only in a
+/// run, handed to the firmware once, at the next element (or at once, with the
+/// key down), and dropped if the run ends first.
+#[test]
+fn core1_tests_come_due_at_the_next_element_once() {
+    let mut b = Bench::new();
+    assert_eq!(b.send(0, "TEST CORE1 HANG").unwrap(), "ERR TEST RUN");
+    b.send(0, "CW 20 EEEE");
+    assert_eq!(b.send(61, "TEST CORE1 HANG").unwrap(), "ERR TEST ARM");
+    b.send(61, "TEST ARM");
+    assert_eq!(b.send(61, "TEST CORE1 HANG").unwrap(), "OK TEST CORE1 HANG");
+    assert_eq!(b.k.core1_test(), None, "key up just now");
+    b.poll(239);
+    assert_eq!(b.k.core1_test(), None);
+    b.poll(240);
+    assert_eq!(b.k.core1_test(), Some(Core1Test::Hang));
+    assert_eq!(b.k.core1_test(), None, "once");
+    // The keyer itself goes on: core 1's test is the firmware's to run.
+    assert!(!b.k.hung() && b.k.key_down());
+    // With the key down, at once.
+    b.send(250, "TEST ARM");
+    assert_eq!(
+        b.send(250, "TEST CORE1 FAULT").unwrap(),
+        "OK TEST CORE1 FAULT"
+    );
+    assert_eq!(b.k.core1_test(), Some(Core1Test::Fault));
+    // Pending when the run ends: dropped.
+    let mut c = Bench::new();
+    c.send(0, "CW 20 EE");
+    c.send(100, "TEST ARM");
+    c.send(100, "TEST CORE1 FAULT");
+    c.send(150, "STOP");
+    c.poll(1150);
+    assert_eq!(c.send(1150, "CW 20 E").unwrap(), "OK CW");
+    assert_eq!(c.k.core1_test(), None);
+    // Anything else after TEST CORE1 is unknown.
+    c.send(1150, "TEST ARM");
+    assert_eq!(c.send(1150, "TEST CORE1 STOP").unwrap(), "ERR TEST UNKNOWN");
 }
 
 /// A restart that kept the saved state: the trip stays; the budget is the saved
@@ -1311,7 +1403,7 @@ fn hello_and_status_report_the_ptt() {
     let h = b.send(10, "HELLO").unwrap();
     let f: Vec<&str> = h.split(' ').collect();
     // version, run s, link ms, key-down ms, rest ms, budget s, PTT s.
-    assert_eq!(&f[2..9], ["4", "60", "2000", "1000", "1000", "60", "60"]);
+    assert_eq!(&f[2..9], ["5", "60", "2000", "1000", "1000", "60", "60"]);
     let mut c = Bench::ptt_with(Limits {
         ptt_ms: 30_000,
         ..Limits::BOX

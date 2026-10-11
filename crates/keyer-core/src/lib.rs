@@ -17,13 +17,16 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod control;
+pub mod cores;
 pub mod frame;
 pub mod keyer;
 pub mod morse;
 
 /// Protocol version, reported by `HELLO`. 3: `STATUS` reports the `CLOCK` and
-/// `WATCHDOG` trips. 4: `MCW`, the PTT output, the PTT line and `TEST HOLD`.
-pub const VERSION: u32 = 4;
+/// `WATCHDOG` trips. 4: `MCW`, the PTT output, the PTT line and `TEST HOLD`. 5: the
+/// decoder on the box's second core, through `RX` lines ([`control`]), the `CORE1`
+/// trip, and `TEST CORE1 HANG` and `TEST CORE1 FAULT`.
+pub const VERSION: u32 = 5;
 
 /// The box's name, the last field of `HELLO`.
 pub const NAME: &str = "PICO2-KEYER";
@@ -98,6 +101,13 @@ pub mod limits {
     /// loop stops, before the watchdog resets the chip or the loop opens the key
     /// itself ([`HANG_OPEN_MS`]). It is taken from the duty budget.
     pub const RESTART_CHARGE_MS: u32 = HANG_OPEN_MS;
+    /// The decoder on the processor's second core (core 1) must show it is running
+    /// at least this often, by moving its heartbeat, or the box trips (`CORE1`),
+    /// opening every output, and stops feeding its watchdog ([`crate::control`]):
+    /// the keyer's loop never waits on core 1, but nothing that stopped core 1 is
+    /// trusted to have left the rest of the chip alone. Core 1 moves it every pass
+    /// of its loop, each under a few milliseconds.
+    pub const CORE1_MS: u32 = 100;
 }
 
 /// The timing of an `MCW` run, around the Morse.
