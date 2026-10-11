@@ -9,8 +9,8 @@
 //! would transmit somewhere other than the dial frequency (split or ∂TX on). For a
 //! command that can transmit ([`Purpose::Transmit`]) it also requires the radio's
 //! own Time-Out Timer (CI-V) at 3 min, as a backstop that does not depend on this
-//! software, TX Inhibit OFF, and no front-panel or microphone key set to send a
-//! keyer memory.
+//! software, TX Inhibit OFF, no front-panel or microphone key set to send a keyer
+//! memory, and the microphone's keys not set up as a CW key.
 //!
 //! [`verify_setup`] reads back what [`crate::Rig`]'s set commands are meant to have
 //! done, since an OK (FB) only says the radio accepted a command, not that it did
@@ -398,6 +398,33 @@ pub fn preflight_for<P: Port>(r: &mut Ic7300<P>, purpose: Purpose, node_inhibite
         });
     }
 
+    // With MIC Up/Down Keyer ON, "the [UP]/[DN] keys" are "a CW key" (p. 4-21, lines
+    // 3052-3058): with the break-in the node turns on, pushing either transmits,
+    // whatever the keys are customized to. Refused and warned like a key set to a
+    // keyer memory. ICOM's default is OFF.
+    rep.required(
+        "MIC Up/Down Keyer",
+        "1A 05 01 65",
+        r.mic_up_down_keyer(),
+        |&on| {
+            if on {
+                (
+                    "ON".into(),
+                    if purpose == Purpose::Transmit {
+                        Level::Fail
+                    } else {
+                        Level::Warn
+                    },
+                    "the microphone's [UP]/[DN] keys would key CW; set MENU > KEYER > \
+                     EDIT/SET > CW-KEY SET > MIC Up/Down Keyer OFF (the default)"
+                        .into(),
+                )
+            } else {
+                ("OFF".into(), Level::Pass, String::new())
+            }
+        },
+    );
+
     // TX Inhibit ON: the radio "cannot transmit" (p. 13-6, lines 7505-7506), so a
     // command that transmits would only seem to, and whatever set it (hfnode, when
     // it inhibited transmitting, or an IC-PW2 locking this exciter out) has not been
@@ -782,7 +809,7 @@ mod tests {
 
     /// A radio at factory defaults with the guide's settings: on receive, USB lines
     /// OFF, VOX and PTT Start OFF, Time-Out Timer 3 min, TX Inhibit OFF, every
-    /// customizable key at its factory function.
+    /// customizable key at its factory function, MIC Up/Down Keyer OFF.
     fn good() -> Table {
         let mut t = Table::default();
         for (cmd, data) in [
@@ -821,6 +848,7 @@ mod tests {
             (&[0x1A, 0x05, 0x02, 0x01], &[0x01]),
             (&[0x1A, 0x05, 0x02, 0x02], &[0x03]),
             (&[0x1A, 0x05, 0x02, 0x03], &[0x04]),
+            (&[0x1A, 0x05, 0x01, 0x65], &[0x00]),
         ] {
             t.answers.insert(cmd.to_vec(), data.to_vec());
         }
@@ -873,7 +901,7 @@ mod tests {
             // nothing that sets a value, keys or tunes.
             let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
             let sent = sent_bodies(&r);
-            assert_eq!(sent.len(), 33);
+            assert_eq!(sent.len(), 34);
             for body in sent {
                 assert!(reads.contains(&body), "{body:02X?} is not a read");
             }
@@ -1067,6 +1095,38 @@ mod tests {
             }
             // Every function in the table but the four memories.
             assert_eq!(passed, functions - 4, "{name}");
+        }
+    }
+
+    /// With MIC Up/Down Keyer ON the microphone's keys key CW: refused like a key on
+    /// a keyer memory, and a failure for every command if it cannot be read.
+    #[test]
+    fn the_mic_up_down_keyer_on_fails_a_command_that_can_transmit() {
+        let cmd = [0x1A, 0x05, 0x01, 0x65];
+        let name = "MIC Up/Down Keyer";
+        let rep = with(&cmd, Some(&[0x01]), Purpose::Transmit);
+        assert!(!rep.passed(), "{rep}");
+        assert_eq!(rep.failures().count(), 1, "{rep}");
+        assert_eq!(level_of(&rep, name), Level::Fail);
+        for purpose in [Purpose::Check, Purpose::Setup] {
+            let rep = with(&cmd, Some(&[0x01]), purpose);
+            assert!(rep.passed(), "{purpose:?}\n{rep}");
+            assert_eq!(level_of(&rep, name), Level::Warn, "{purpose:?}");
+        }
+        for purpose in PURPOSES {
+            assert_eq!(
+                level_of(&with(&cmd, Some(&[0x00]), purpose), name),
+                Level::Pass
+            );
+            for data in [None, Some(&[0x02][..])] {
+                let rep = with(&cmd, data, purpose);
+                assert!(!rep.passed(), "{data:02X?} for {purpose:?}\n{rep}");
+                assert_eq!(
+                    level_of(&rep, name),
+                    Level::Fail,
+                    "{data:02X?} for {purpose:?}"
+                );
+            }
         }
     }
 

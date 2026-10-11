@@ -191,8 +191,9 @@ impl Limits {
 /// and, for `run`, the keying limit ([`check_keying`]) must allow the command,
 /// checked before `open` is called, so that a refused
 /// command opens no port and sends nothing; then the read-only preflight must pass
-/// (for a command that can transmit, with the radio's own Time-Out Timer at 3 min
-/// and its TX Inhibit OFF), or the radio is closed again with nothing written.
+/// (for a command that can transmit, with the radio's own Time-Out Timer at 3 min,
+/// its TX Inhibit OFF, no front-panel or microphone key set to a keyer memory and
+/// MIC Up/Down Keyer OFF), or the radio is closed again with nothing written.
 /// `open` opens the port, DTR and RTS lowered ([`Ic7300::open`] for the real radio).
 /// With the node's tx-inhibited file in `state_dir`, `run` starts without
 /// transmitting and the radio's TX Inhibit is only a warning
@@ -410,7 +411,7 @@ mod tests {
     #[test]
     fn nothing_is_written_after_a_failed_preflight() {
         type Change = fn(&mut MockConfig);
-        let cases: [(&str, Change); 14] = [
+        let cases: [(&str, Change); 15] = [
             ("USB SEND", |c| c.menu.usb_send = 0x01),
             ("USB Keying (CW)", |c| c.menu.usb_keying_cw = 0x02),
             ("USB Keying (RTTY)", |c| c.menu.usb_keying_rtty = 0x01),
@@ -427,6 +428,7 @@ mod tests {
                 c.menu.front_key_vox_bk_in = 0x03
             }),
             ("MIC Key [DN]", |c| c.menu.mic_key_down = 0x13),
+            ("MIC Up/Down Keyer", |c| c.menu.mic_up_down_keyer = 0x01),
         ];
         for (name, change) in cases {
             // Every command that can transmit; the stage allows each at 10 W.
@@ -515,6 +517,33 @@ mod tests {
             // `radio setup` transmits nothing: it only warns.
             let (r, _) = open(&mock(menu), Stage::Done, Action::Setup, 10);
             assert!(r.is_ok(), "setup with {key} on {memory}");
+        }
+    }
+
+    /// A setting the radio does not answer is named as not read, not as "= -", and
+    /// fails every command, `radio setup` included.
+    #[test]
+    fn an_unread_key_setting_is_named_as_not_read() {
+        use civ::mock::{Fault, ReplyFault};
+        for action in ACTIONS {
+            let radio = mock(Menu::default());
+            radio.inject(Fault::Reply {
+                cmd: vec![0x1A, 0x05, 0x02, 0x03],
+                skip: 0,
+                times: 1,
+                kind: ReplyFault::Ng,
+            });
+            let (r, opened) = open(&radio, Stage::Done, action, 10);
+            let e = r
+                .err()
+                .unwrap_or_else(|| panic!("{action:?}: preflight passed"))
+                .to_string();
+            assert!(
+                opened && e.contains("MIC Key [DN] not read"),
+                "{action:?}: {e}"
+            );
+            assert!(!e.contains("= -"), "{action:?}: {e}");
+            assert!(radio.commands().iter().all(|(_, b)| is_read(b)));
         }
     }
 

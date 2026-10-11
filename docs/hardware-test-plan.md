@@ -70,8 +70,10 @@ what the code does, not what the radio does.
   "Voice/Keyer/RTTY Memory" (Front Key Customize `1A 05 01 98`, `01 99`, `02 00`,
   `02 01`; MIC Key Customize `02 02`, `02 03`): such a key transmits the keyer
   memory when pushed in CW mode, over and over if held (p. 12-7, lines 6459-6463).
-  For `radio check` and `setup` those three only warn; a key setting that cannot be
-  read, or reads as a value its table does not list, fails every command.
+  They also require MIC Up/Down Keyer OFF (`1A 05 01 65`): ON makes the
+  microphone's [UP]/[DN] keys a CW key (p. 4-21, lines 3052-3058). For `radio
+  check` and `setup` those four only warn; a key setting that cannot be read, or
+  reads as a value its table does not list, fails every command.
   `radio check` runs the same reads and prints them. `radio rx` is the one command
   that writes without a preflight: it sends only the stop and receive commands
   (`17 FF`, `1C 00 00`), so that it can take off transmit a radio the preflight
@@ -80,6 +82,7 @@ what the code does, not what the radio does.
   `every_command_that_can_transmit_needs_the_time_out_timer_at_3_min`,
   `tx_inhibit_on_refuses_every_command_that_can_transmit_but_setup`,
   `every_command_that_can_transmit_refuses_a_key_set_to_a_keyer_memory`,
+  `an_unread_key_setting_is_named_as_not_read`,
   `the_first_write_after_the_preflight_puts_the_radio_on_receive`), and the
   selftest scenarios `preflight-tot-off`, `preflight-tot-5-min`,
   `preflight-usb-send-dtr`, `preflight-vox-on`, `preflight-ptt-start-on`,
@@ -335,7 +338,7 @@ hfnode selftest --sweep --csv ~/sweep.csv   # where decoding breaks: speed x SNR
 Each scenario opens the radio as `hfnode run` does (the read-only preflight first)
 and runs the whole node (`node::run`: decoder, parser, session, station safety
 layer and the real `Ic7300` CI-V driver) against `civ::mock`, a byte-level IC-7300
-that answers every command the node sends, the preflight's 27 reads among them,
+that answers every command the node sends, the preflight's 34 reads among them,
 as Section 19 of the manual says, and flags anything else as a protocol violation
 (a write to one of the radio's menu settings, for one). A scripted field
 operator keys CW audio (with noise and hand-keying jitter) into the node's audio
@@ -537,12 +540,13 @@ sent with no data; the reply repeats the command and adds the data.
 | 0.37 | `1A 05 00 66`, `00 67` MOD input | During DATA OFF and DATA: `00` = MIC, `01` = ACC, `02` = MIC/ACC, `03` = USB, `04` = MIC/USB; `03` or `04` is a warning | p. 19-5 (lines 8953-8959) | ☐ |
 | 0.38 | `1A 05 00 73` CI-V Output (for ANT) | `00` = OFF; `01` = ON is a warning (the radio sends `1C 00` and `1C 03` unasked) | p. 19-5 (line 8973); p. 19-7 (lines 9319-9335) | ☐ |
 | 0.39 | `1A 05 01 98`, `01 99`, `02 00`, `02 01` Front Key Customize; `02 02`, `02 03` MIC Key Customize | [VOX/BK-IN] and [AUTOTUNE]: `00` = the key's own function, `01` = PRESET, `02` to `05` = Voice/Keyer/RTTY Memory 1 to 4. [▲] and [▼]: `00` = M-CH UP, `01` = M-CH DOWN, `02` = PRESET, `03` to `06` = Memory 1 to 4. MIC [UP] and [DN]: `00` to `19` (read as BCD), `11` to `14` = Memory 1 to 4. A memory is refused by `tune`, `cw` and `run`, a warning for `check` and `setup`; a value not in the table fails | p. 19-7 (lines 9271-9282); p. 19-12 (lines 9629-9661, 9688-9705). The MIC table prints `09` BAND DOWN twice; p. 12-8 lists SPEECH there (lines 6604-6611) | ☐ |
+| 0.40 | `1A 05 01 65` MIC Up/Down Keyer | `00` = OFF, `01` = ON. ON makes the microphone's [UP]/[DN] keys a CW key; refused by `tune`, `cw` and `run`, a warning for `check` and `setup` | p. 19-6 (lines 9194-9195); p. 4-21 (lines 3052-3058) | ☐ |
 
 **Pass:** every row ticked. **Fail:** any difference. Fix the code and its citation,
 update the unit test, and repeat step 0. Do not run steps 4 onward against a command
 that has not been ticked.
 
-The `1A 05` item numbers (0.26 to 0.29, 0.35, 0.37 to 0.39) are the ones most
+The `1A 05` item numbers (0.26 to 0.29, 0.35, 0.37 to 0.40) are the ones most
 likely to differ between firmware versions; step 1 checks three of them against
 the radio's screen.
 
@@ -561,7 +565,7 @@ hfnode radio --config $C status
 
 `check` only reads: `19 00`, `1C 00`, `1A 05 00 78`, `00 79`, `00 80`, `0F`, `21 02`,
 `16 46`, `1A 05 00 35`, `1A 05 00 29`, `1A 05 01 98`, `01 99`, `02 00`, `02 01`,
-`02 02`, `02 03`, `16 66`, `1A 05 00 74`, `1A 05 00 73`, `1A 05 01 97`,
+`02 02`, `02 03`, `1A 05 01 65`, `16 66`, `1A 05 00 74`, `1A 05 00 73`, `1A 05 01 97`,
 `1A 05 00 66`, `00 67`, `1A 05 01 61`, `1A 05 00 84`, `27 11`, `03`, `1C 03`, `04`,
 `14 0A`, `16 47`, `1C 01`, `1A 05 00 71`, `1A 05 00 75`, each sent with no data,
 which reads the item. To see every frame on the wire, with the time
@@ -580,11 +584,13 @@ nothing was written to the radio`. `status` prints `frequency N Hz` and
    refuse it ON): something set it over CI-V, so find out what before going on. A
    WARN on a Front Key or MIC Key line is a stop as well: that key sends a keyer
    memory when pushed, and those commands refuse it; set it back in MENU > SET >
-   Function as the line says. Any other WARN is acceptable only if you understand
-   it.
+   Function as the line says. So is a WARN on MIC Up/Down Keyer: set it OFF in
+   MENU > KEYER > EDIT/SET > CW-KEY SET. Any other WARN is acceptable only if you
+   understand it.
 2. Every value matches the radio's own screen: frequency to the hertz, mode, RF
-   power about 0%, break-in, tuner, Time-Out Timer, the USB items, and the six key
-   functions (MENU > SET > Function > Front Key Customize and MIC Key Customize).
+   power about 0%, break-in, tuner, Time-Out Timer, the USB items, the six key
+   functions (MENU > SET > Function > Front Key Customize and MIC Key Customize)
+   and MIC Up/Down Keyer (MENU > KEYER > EDIT/SET > CW-KEY SET).
 3. **The item numbers match this firmware.** On the front panel change Time-Out
    Timer (CI-V) from 3 to 5 min, CI-V USB Echo Back from OFF to ON and Front Key
    Customize [▲] from M-CH UP to PRESET; run `check` again and see all three values

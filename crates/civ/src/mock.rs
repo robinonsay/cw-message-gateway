@@ -185,6 +185,9 @@ pub struct Menu {
     /// defaults UP (VFO: kHz) and DOWN (VFO: kHz) (lines 6434-6435).
     pub mic_key_up: u8,
     pub mic_key_down: u8,
+    /// 1A 05 01 65 MIC Up/Down Keyer, "00=OFF, 01=ON" (p. 19-6; lines 9194-9195). OFF,
+    /// the factory default (line 3052).
+    pub mic_up_down_keyer: u8,
 }
 
 impl Default for Menu {
@@ -210,6 +213,7 @@ impl Default for Menu {
             front_key_down: 0x01,
             mic_key_up: 0x03,
             mic_key_down: 0x04,
+            mic_up_down_keyer: 0x00,
         }
     }
 }
@@ -236,6 +240,7 @@ impl Menu {
             (0x02, 0x01) => self.front_key_down,
             (0x02, 0x02) => self.mic_key_up,
             (0x02, 0x03) => self.mic_key_down,
+            (0x01, 0x65) => self.mic_up_down_keyer,
             _ => return None,
         })
     }
@@ -258,7 +263,7 @@ pub fn is_read(body: &[u8]) -> bool {
                 0x00,
                 0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73 | 0x74 | 0x75 | 0x78 | 0x79 | 0x80 | 0x84
             ]
-            | [0x1A, 0x05, 0x01, 0x61 | 0x97 | 0x98 | 0x99]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x65 | 0x97 | 0x98 | 0x99]
             | [0x1A, 0x05, 0x02, 0x00..=0x03]
             | [0x1C, 0x00 | 0x01 | 0x03]
             | [0x21, 0x02]
@@ -976,7 +981,7 @@ impl State {
             [0x27, 0x11] => Ok(vec![0x27, 0x11, self.cfg.menu.scope_data_output]),
             [0x1A, 0x05, 0x00, 0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73, _, ..]
             | [0x1A, 0x05, 0x00, 0x74 | 0x78 | 0x79 | 0x80 | 0x84, _, ..]
-            | [0x1A, 0x05, 0x01, 0x61 | 0x97 | 0x98 | 0x99, _, ..]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x65 | 0x97 | 0x98 | 0x99, _, ..]
             | [0x1A, 0x05, 0x02, 0x00..=0x03, _, ..]
             | [0x27, 0x11, _, ..]
             | [0x16, 0x46, _, ..]
@@ -2079,7 +2084,7 @@ mod tests {
             // Every item answered: no warning for an item it could not read.
             assert!(rep.checks.iter().all(|c| c.level != Level::Warn), "{rep}");
             let cmds = m.commands();
-            assert_eq!(cmds.len(), 33);
+            assert_eq!(cmds.len(), 34);
             assert!(cmds.iter().all(|(_, b)| is_read(b)), "{cmds:02X?}");
             assert!(m.report().violations.is_empty());
         }
@@ -2118,7 +2123,7 @@ mod tests {
     fn menu_settings_read_as_set_and_are_never_written() {
         use crate::preflight::{preflight, Level, Purpose};
         type Change = fn(&mut MockConfig);
-        let cases: [(&str, Change, Level); 19] = [
+        let cases: [(&str, Change, Level); 20] = [
             (
                 "Time-Out Timer (CI-V)",
                 |c| c.menu.time_out_timer = 0x00,
@@ -2183,6 +2188,11 @@ mod tests {
             ),
             ("MIC Key [UP]", |c| c.menu.mic_key_up = 0x11, Level::Fail),
             ("MIC Key [DN]", |c| c.menu.mic_key_down = 0x14, Level::Fail),
+            (
+                "MIC Up/Down Keyer",
+                |c| c.menu.mic_up_down_keyer = 0x01,
+                Level::Fail,
+            ),
         ];
         for (name, change, level) in cases {
             let (m, mut r) = radio(100.0);
@@ -2208,6 +2218,7 @@ mod tests {
             c.menu.front_key_down = 0x05;
             c.menu.mic_key_up = 0x19;
             c.menu.mic_key_down = 0x12;
+            c.menu.mic_up_down_keyer = 0x01;
         });
         for read in [
             &[0x16, 0x46, 0x01][..],
@@ -2222,6 +2233,7 @@ mod tests {
             &[0x1A, 0x05, 0x02, 0x01, 0x05],
             &[0x1A, 0x05, 0x02, 0x02, 0x19],
             &[0x1A, 0x05, 0x02, 0x03, 0x12],
+            &[0x1A, 0x05, 0x01, 0x65, 0x01],
         ] {
             let cmd = &read[..read.len() - 1];
             assert!(is_read(cmd), "{cmd:02X?}");
@@ -2252,6 +2264,7 @@ mod tests {
             &[0x1A, 0x05, 0x02, 0x01, 0x01],
             &[0x1A, 0x05, 0x02, 0x02, 0x11],
             &[0x1A, 0x05, 0x02, 0x03, 0x04],
+            &[0x1A, 0x05, 0x01, 0x65, 0x00],
         ] {
             let (m, _) = radio(100.0);
             let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], write, &[0xFD]].concat();

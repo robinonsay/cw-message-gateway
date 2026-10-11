@@ -218,7 +218,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | Dot/Dash Ratio (MENU > KEYER > EDIT/SET > CW-KEY SET) | **1:1:3.0** (default) | Standard Morse timing for the field operator's ear and decoder; the node times its keying at 1:1:3.0. The node refuses to write to the radio if it is anything else. |
 | KEY jack | Nothing plugged in | With break-in on, anything on the KEY jack keys the transmitter. Unplug paddles for unattended use. |
 
-**Transmit backstop and tuner** (MENU > SET > Function, p. 12-5):
+**Transmit backstop and tuner** (MENU > SET > Function, pp. 12-5 and 12-6):
 
 | Item | Set to | Why |
 |---|---|---|
@@ -227,6 +227,7 @@ the radio it reads the transmit-related ones and refuses to go on if one is wron
 | VOX (VOX/BK-IN key) | **OFF** | With VOX ON, sound at the microphone transmits (p. 4-10). The node refuses to write to the radio unless it is off. |
 | Front Key Customize [VOX/BK-IN], [AUTOTUNE], [▲], [▼] | **VOX/BK-IN, AUTOTUNE, M-CH UP, M-CH DOWN** (defaults), never a Voice/Keyer/RTTY Memory | A key set to a memory transmits it when pushed in CW mode, and over and over if held for a second (p. 12-7). That is a transmission the node did not start. `radio tune`, `radio cw` and `hfnode run` refuse to start while any key is set to one; `radio check` and `radio setup` warn. |
 | MIC Key Customize [UP], [DN] | **UP (VFO: kHz), DOWN (VFO: kHz)** (defaults), never a Voice/Keyer/RTTY Memory | The same, for the microphone's keys (p. 12-8), checked the same way. |
+| MIC Up/Down Keyer (MENU > KEYER > EDIT/SET > CW-KEY SET) | **OFF** (default) | ON makes the microphone's [UP]/[DN] keys a CW key (p. 4-21), so a pushed key transmits. `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON; `radio check` and `radio setup` warn. |
 | TX Inhibit (CI-V `16 66`; no menu item) | **OFF** | While ON the radio "cannot transmit" (p. 13-6). An IC-PW2 amplifier sets it, and so does the node when it stops transmitting (see "If it stops transmitting"). `radio tune`, `radio cw` and `hfnode run` refuse to start while it is ON (`run` only warns while `tx-inhibited` is there); `radio check` and `radio setup` warn. |
 
 **Display** (MENU > SET > Display, p. 12-12):

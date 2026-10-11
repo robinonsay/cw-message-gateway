@@ -1644,9 +1644,9 @@ fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<()> {
         ..MockConfig::default()
     });
     // As `hfnode run` opens the radio, on a station past every bring-up stage: the
-    // read-only preflight, with the radio's Time-Out Timer at 3 min and its TX
-    // Inhibit OFF required (unless tx-inhibited is there), before anything is
-    // written.
+    // read-only preflight, with the radio's Time-Out Timer at 3 min, its TX Inhibit
+    // OFF (unless tx-inhibited is there), no front or MIC key on a keyer memory and
+    // MIC Up/Down Keyer OFF required, before anything is written.
     inhibit_at_start(s, &cfg)?;
     let limits = commissioning::Limits::of(&cfg.station);
     let opened = commissioning::open_for(Stage::Done, Action::Run, limits, &cfg.state_dir, || {

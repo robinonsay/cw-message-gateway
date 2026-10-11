@@ -218,13 +218,17 @@ mod cmd {
     /// [VOX/BK-IN] setting", "... [AUTOTUNE] setting", "... [▲] setting" and
     /// "... [▼] setting" (p. 19-7; lines 9271-9278); 1A 05 02 02, 02 03: "Send/read
     /// the MIC key customize [UP] setting" and "... [DOWN] setting" (lines
-    /// 9279-9282). Data on p. 19-12 (lines 9629-9703); see [`super::CustomKey`].
+    /// 9279-9282). Data on p. 19-12 (lines 9629-9705); see [`super::CustomKey`].
     pub const FRONT_KEY_VOX_BK_IN: &[u8] = &[0x1A, 0x05, 0x01, 0x98];
     pub const FRONT_KEY_AUTOTUNE: &[u8] = &[0x1A, 0x05, 0x01, 0x99];
     pub const FRONT_KEY_UP: &[u8] = &[0x1A, 0x05, 0x02, 0x00];
     pub const FRONT_KEY_DOWN: &[u8] = &[0x1A, 0x05, 0x02, 0x01];
     pub const MIC_KEY_UP: &[u8] = &[0x1A, 0x05, 0x02, 0x02];
     pub const MIC_KEY_DOWN: &[u8] = &[0x1A, 0x05, 0x02, 0x03];
+    /// 1A 05 01 65: "Send/read mic. up/down keyer set (00=OFF, 01=ON)" (p. 19-6;
+    /// lines 9194-9195): the KEYER menu's MIC Up/Down Keyer item, which with ON makes
+    /// the microphone's [UP]/[DN] keys "a CW key" (p. 4-21; lines 3052-3058).
+    pub const MIC_UP_DOWN_KEYER: &[u8] = &[0x1A, 0x05, 0x01, 0x65];
 }
 
 /// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
@@ -825,6 +829,11 @@ impl<P: Port> Ic7300<P> {
     /// 1A 05 00 73: whether CI-V Output (for ANT) is on.
     pub fn civ_output_ant(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_OUTPUT_ANT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 01 65: whether the microphone's [UP]/[DN] keys are a CW key.
+    pub fn mic_up_down_keyer(&mut self) -> Result<bool> {
+        Ok(self.read_byte(cmd::MIC_UP_DOWN_KEYER, 0x00..=0x01)? == 0x01)
     }
 
     /// 1A 05 01 98 to 02 03: what `key` is set to do. A byte its table does not
