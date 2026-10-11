@@ -3,8 +3,9 @@
 //
 // OpenSCAD 2021.01 or newer. Open this file, then Window > Customizer to change
 // the numbers below with sliders and menus. To export a part: set "part" to box
-// (or lid), press F6 (Render), then File > Export > STL. Both parts come out
-// already turned the way they go on the print plate. No supports needed.
+// (or lid), press F6 (fn+F6 on a Mac, or Design > Render), then
+// File > Export > Export as STL. Both parts come out already turned the way they
+// go on the print plate. No supports needed.
 //
 // Everything is measured from the perfboard: x along its 70 mm side, y along its
 // 50 mm side, origin at its front left corner, z = 0 on its underside. "Left",
@@ -13,14 +14,17 @@
 // Nothing here changes the keyer's wiring. The box only holds the board.
 
 /* [What to show] */
-// box and lid are the parts to export; print lays both out as on the plate; the rest are pictures
-part = "assembly"; // [assembly, open, exploded, section, section_corner, box, lid, print]
-// Draw the perfboard, the Pico 2, the USB plug and the key lead in the pictures
+// box and lid are the parts to export; peg_test is a quick print to try your board on the pegs; print lays both parts out as on the plate; check_* render to nothing when the parts clear each other; the rest are pictures
+part = "assembly"; // [assembly, open, exploded, section, section_corner, box, lid, print, peg_test, check_lid_box, check_board, check_pico, check_plug, check_cable, check_jacks]
+// Draw the perfboard, the Pico 2, the USB plug, the key lead and jack bodies in the pictures
 show_parts = true;
 
 /* [Perfboard (check with calipers)] */
+// Board length (left to right)
 board_l = 70;     // [40:0.1:150]
+// Board width (front to back)
 board_w = 50;     // [30:0.1:120]
+// Board thickness
 board_t = 1.6;    // [0.8:0.1:2.4]
 // Corner mounting hole diameter
 hole_d = 2.0;     // [1.0:0.1:4.0]
@@ -49,19 +53,23 @@ corner_r = 3.0;   // [0.5:0.5:8]
 fit = 0.2;        // [0.05:0.05:0.5]
 
 /* [Holding the board] */
-// pins: printed pegs through the corner holes, the lid's posts press the board down (no hardware). screws: posts with pilot holes for M2 self-tapping screws
+// pins: printed pegs through the corner holes, the lid's posts stop the board lifting off them (no hardware). screws: posts with pilot holes for M2 self-tapping screws
 mount = "pins";   // [pins, screws]
 // Peg diameter = hole diameter minus this
-pin_clear = 0.3;  // [0.1:0.05:0.8]
+pin_clear = 0.4;  // [0.1:0.05:0.8]
 // How far the pegs stick up through the board
 pin_above = 1.0;  // [0.5:0.1:3]
-// Gap between the lid's posts and the top of the board (negative = clamp)
-press_gap = 0.2;  // [-0.3:0.05:1]
+// Gap between the lid's posts and the top of the board (they stop the board lifting off its pegs)
+press_gap = 0.2;  // [0:0.05:1]
 // Diameter of the posts under and over the board's corners
 post_d = 4.6;     // [3:0.1:8]
 // Lid post diameter
 press_d = 4.4;    // [3:0.1:8]
 screw_pilot_d = 1.6; // [1:0.1:3]
+// Small ribs on the walls beside the board's edges, so that pushing in the USB plug loads the walls, not the pegs
+edge_stops = true;
+// Gap between those ribs and the board's edge
+edge_stop_gap = 0.2; // [0.05:0.05:1]
 
 /* [Lid] */
 // Snap ridges on the lid's skirt that click into grooves in the long walls
@@ -75,7 +83,9 @@ bump_len = 20;    // [5:1:50]
 bump_drop = 2.0;  // [1:0.1:3]
 // Fingernail notch in the front rim for opening the lid
 pry_notch = true;
+// Big text on the lid
 lid_label = "CW KEYER";
+// Smaller line under it (your callsign)
 lid_label2 = "K8ONS";
 lid_label_size = 6; // [3:0.5:12]
 // Window over the Pico 2's LED (lit while the key is closed, flashing after a trip)
@@ -88,20 +98,20 @@ bootsel_d = 4.5;  // [2:0.5:8]
 // Text cut into the lid and walls
 text_depth = 0.6; // [0:0.1:1.2]
 wall_labels = true;
-wall_label_size = 3.5; // [2:0.5:8]
+wall_label_size = 4.5; // [2:0.5:8]
 
 /* [Pico 2 position on the board] */
-// The wall the Pico 2's USB socket faces
+// The wall the Pico 2's USB socket faces (on a 70 x 50 board only left or right fit; the openings below do not move with it)
 pico_usb_wall = "left"; // [left, right, front, back]
 // Distance from that board edge to the Pico's USB end; -1 = pin 1 in the hole column given next
 pico_inset = -1;  // [-1:0.01:40]
-// Used when pico_inset is -1: hole column (0 = the first one from that edge) for pin 1
+// Used when pico_inset is -1: hole column for pin 1, counted from that edge (0 = the first column)
 pico_inset_holes = 0; // [0:1:20]
 // Centre line of the Pico along that wall (mm from the board's left or front edge); -1 = centre of the board
 pico_center = -1; // [-1:0.01:150]
-// Gap from the top of the perfboard to the underside of the Pico: 0 soldered flat, 2.5 on pin headers, 8.5 in sockets
+// Gap from the top of the perfboard to the underside of the Pico: 2.5 on pin headers; 8.5 in sockets (then set above to 17.5 or more); 0 soldered flat (then put its USB end at the board's edge)
 pico_height = 2.5; // [0:0.1:12]
-// LED position on the Pico: mm in from the USB end, and mm from the centre line toward pin 1
+// LED position on the Pico: mm in from the USB end, and mm from the centre line toward pin 1 (estimate)
 pico_led_p = 3.5; // [0:0.1:51]
 pico_led_q = 5.0; // [-10:0.1:10]
 // BOOTSEL button position, the same way (estimate: check yours)
@@ -109,20 +119,21 @@ pico_bootsel_p = 12.0; // [0:0.1:51]
 pico_bootsel_q = 3.5;  // [-10:0.1:10]
 
 /* [USB opening] */
-// Big enough for the plug's moulded body to go into the wall (your cable's is about 15 mm wide)
+// Big enough for the plug's moulded body to go into the wall (yours looked about 15 mm wide)
 usb_hole_w = 16.5; // [8:0.5:25]
 usb_hole_h = 10;   // [4:0.5:15]
 usb_hole_r = 2;    // [0:0.5:5]
-// Moulded body of your USB plug (for the pictures and the fit check)
+// Moulded body of your USB plug: width, thickness, length (measure yours; used for the pictures and the fit check)
 usb_plug_w = 15;   // [8:0.5:25]
 usb_plug_h = 8;    // [4:0.5:15]
 usb_plug_len = 18; // [5:1:40]
 
 /* [Opening 1: key lead] */
 o1_on = true;
+// Name cut into the wall under it
 o1_name = "KEY";
 o1_wall = "right"; // [left, right, front, back]
-// cable: slot open to the rim; the lid's tongue clamps the cable (no knot or tie needed). round: a hole (a cable or a panel jack). rect: rounded rectangle
+// cable: slot open to the rim, the lid's tongue closes over the cable. round: a hole for the cable (a panel jack on the key line needs the safety audit first). rect: rounded rectangle
 o1_shape = "cable"; // [cable, round, rect]
 // Centre along the wall, mm from the board's left (front/back walls) or front (left/right walls) edge
 o1_along = 25;    // [0:0.5:150]
@@ -132,34 +143,53 @@ o1_z = 4;         // [-10:0.5:40]
 o1_w = 4.0;       // [1:0.1:30]
 // Height (rect only)
 o1_h = 4.0;       // [1:0.1:30]
+// How much the lid's tongue squeezes the cable (cable shape only)
+cable_pinch = 0.4; // [0:0.05:1]
 
 /* [Opening 2: spare (audio in, later)] */
 o2_on = false;
+// Name cut into the wall under it
 o2_name = "AUDIO";
 o2_wall = "right"; // [left, right, front, back]
+// cable, round or rect, as for opening 1 (6.2 mm round = a 3.5 mm panel jack's M6 bush)
 o2_shape = "round"; // [cable, round, rect]
+// Centre along the wall, mm from the board's left (front/back walls) or front (left/right walls) edge
 o2_along = 10;    // [0:0.5:150]
-o2_z = 7;         // [-10:0.5:40]
+// Centre height above the top of the board
+o2_z = 6;         // [-10:0.5:40]
+// Width or diameter
 o2_w = 6.2;       // [1:0.1:30]
+// Height (rect only)
 o2_h = 6.2;       // [1:0.1:30]
+// Size of the jack's body behind the wall (width, height; 0 = nothing behind the wall); the lid's skirt is cut back to clear it
+o2_body_w = 10;   // [0:0.5:30]
+o2_body_h = 10;   // [0:0.5:30]
 
 /* [Opening 3: spare] */
 o3_on = false;
+// Name cut into the wall under it
 o3_name = "";
 o3_wall = "back"; // [left, right, front, back]
+// cable, round or rect, as for opening 1
 o3_shape = "rect"; // [cable, round, rect]
+// Centre along the wall, mm from the board's left (front/back walls) or front (left/right walls) edge
 o3_along = 35;    // [0:0.5:150]
+// Centre height above the top of the board
 o3_z = 6;         // [-10:0.5:40]
+// Width or diameter
 o3_w = 10;        // [1:0.1:30]
+// Height (rect only)
 o3_h = 6;         // [1:0.1:30]
+// Size of anything mounted behind the wall (width, height; 0 = nothing)
+o3_body_w = 0;    // [0:0.5:30]
+o3_body_h = 0;    // [0:0.5:30]
 
 /* [Hidden] */
-// More openings, if three are not enough: [name, wall, shape, along, z above board, w, h]
+// More openings, if three are not enough:
+// [name, wall, shape, along, z above board, w, h] or with a body: [..., body_w, body_h]
 extra_openings = [];
 // More holes in the lid: [x, y, diameter] in board coordinates
 lid_holes = [];
-// How much the lid's tongue squeezes a cable in a "cable" slot
-cable_pinch = 0.4;
 font = "Liberation Sans:style=Bold";
 
 $fa = 4;
@@ -216,11 +246,12 @@ pico_z0 = board_t + pico_height;
 function pico_xy(p, q) = pico_o + p * pico_p + q * pico_q;
 
 usb_z = pico_height + pico_t + usb_center_above_pcb;   // above the board's top
-usb_opening = ["USB", pico_usb_wall, "rect", pico_ctr, usb_z, usb_hole_w, usb_hole_h];
+// An opening: [name, wall, shape, along, z above the board's top, w, h, body w, body h]
+usb_opening = ["USB", pico_usb_wall, "rect", pico_ctr, usb_z, usb_hole_w, usb_hole_h, 0, 0];
 user_openings = [
-    if (o1_on) [o1_name, o1_wall, o1_shape, o1_along, o1_z, o1_w, o1_h],
-    if (o2_on) [o2_name, o2_wall, o2_shape, o2_along, o2_z, o2_w, o2_h],
-    if (o3_on) [o3_name, o3_wall, o3_shape, o3_along, o3_z, o3_w, o3_h],
+    if (o1_on) [o1_name, o1_wall, o1_shape, o1_along, o1_z, o1_w, o1_h, 0, 0],
+    if (o2_on) [o2_name, o2_wall, o2_shape, o2_along, o2_z, o2_w, o2_h, o2_body_w, o2_body_h],
+    if (o3_on) [o3_name, o3_wall, o3_shape, o3_along, o3_z, o3_w, o3_h, o3_body_w, o3_body_h],
 ];
 openings = concat([usb_opening], user_openings, extra_openings);
 
@@ -263,7 +294,16 @@ function o_along(o) = o[3];
 function o_zabs(o) = board_t + o[4];
 function o_w(o) = o[5];
 function o_h(o) = o_shape(o) == "rect" ? o[6] : o[5];
+function o_bw(o) = len(o) > 8 ? o[7] : 0;
+function o_bh(o) = len(o) > 8 ? o[8] : 0;
+function has_body(o) = o_bw(o) > 0 && o_bh(o) > 0;
 function slot_w(o) = o_w(o) + 0.2;
+function o_label(o) = len(o_name(o)) > 0 ? o_name(o) : str("unnamed ", o_shape(o));
+// Width along the wall, and lowest and highest point (above the board's top),
+// of an opening together with its body
+function o_span(o) = max(o_shape(o) == "cable" ? slot_w(o) : o_w(o), o_bw(o));
+function o_v0(o) = o[4] - max(o_h(o), o_bh(o)) / 2;
+function o_v1(o) = o_shape(o) == "cable" ? above : o[4] + max(o_h(o), o_bh(o)) / 2;
 
 // An opening's outline in its wall frame, grown by d
 module opening2d(o, d = 0) {
@@ -298,13 +338,15 @@ module box_world() {
                 }
             }
             corner_posts();
+            if (edge_stops) edge_ribs();
         }
         for (o = openings) opening_cut(o);
         if (mount == "screws")
             for (h = holes) translate([h[0], h[1], zf_top + 0.6]) cylinder(d = screw_pilot_d, h = below);
         if (snap) for (w = ["front", "back"]) snap_groove(w);
-        if (pry_notch)
-            translate([L * 0.17 - 5, -g - wall - 1, z_rim - 1.2]) cube([10, 2, 3]);
+        pd = min(1.0, wall - 1.2);   // fingernail notch depth, leaving at least 1.2 mm of wall
+        if (pry_notch && pd >= 0.4)
+            translate([L * 0.17 - 5, -g - wall - 1, z_rim - 1.2]) cube([10, 1 + pd, 3]);
         if (wall_labels) for (o = openings) wall_label(o);
     }
 }
@@ -317,26 +359,55 @@ module corner_posts() {
             if (hole_inset_x <= post_d && hole_inset_y <= post_d)
                 translate([h[0] < L / 2 ? -g - 1 : L + g, h[1] < W / 2 ? -g - 1 : W + g]) square(1);
         }
-        if (mount == "pins") {
-            translate([h[0], h[1], -eps]) {
-                cylinder(d = pin_d, h = board_t + pin_above - 0.4 + eps);
-                translate([0, 0, board_t + pin_above - 0.4])
-                    cylinder(d1 = pin_d, d2 = pin_d - 0.6, h = 0.4);
-            }
+        if (mount == "pins") translate([h[0], h[1], -eps]) peg();
+    }
+}
+
+module peg() {
+    cylinder(d = pin_d, h = board_t + pin_above - 0.4 + eps);
+    translate([0, 0, board_t + pin_above - 0.4]) cylinder(d1 = pin_d, d2 = pin_d - 0.6, h = 0.4);
+}
+
+// Ribs beside the board's edges, two per wall, skipped where an opening is
+rib_w = 4;
+rib_top = board_t + 1;
+function rib_spots(w) = let(len_w = across(w) ? W : L) [0.15 * len_w, 0.85 * len_w];
+function rib_clear(w, a) = len([for (o = openings)
+    if (o_wall(o) == w && abs(o_along(o) - a) < o_span(o) / 2 + rib_w / 2 + 1
+        && board_t + o_v0(o) < rib_top + 1) 1]) == 0;
+
+module edge_ribs() {
+    dn = g - edge_stop_gap;
+    if (dn > 0.05) for (w = ["left", "right", "front", "back"], a = rib_spots(w)) if (rib_clear(w, a))
+        at_wall(w, a, zf_top - eps) hull() {   // 45 degree top so the board drops in
+            translate([-rib_w / 2, 0, -dn]) cube([rib_w, rib_top - zf_top - dn, dn + eps]);
+            translate([-rib_w / 2, 0, -eps]) cube([rib_w, rib_top - zf_top, 2 * eps]);
+        }
+}
+
+module opening_cut(o) {
+    at_wall(o_wall(o), o_along(o), o_zabs(o)) {
+        translate([0, 0, -1.5]) linear_extrude(wall + 3) opening2d(o);
+        if (o_shape(o) == "cable") {   // lead-in at the rim for the lid's tongue
+            sw = slot_w(o);
+            vr = z_rim - o_zabs(o);
+            translate([0, 0, -1.5]) linear_extrude(wall + 3)
+                polygon([[-sw / 2, vr - 0.5], [sw / 2, vr - 0.5], [sw / 2 + 0.5, vr + eps], [-sw / 2 - 0.5, vr + eps]]);
         }
     }
 }
 
-module opening_cut(o) {
-    at_wall(o_wall(o), o_along(o), o_zabs(o))
-        translate([0, 0, -1.5]) linear_extrude(wall + 3) opening2d(o);
-}
+// The snap ridge's centre below the rim, kept on the skirt's straight part
+bd = min(bump_drop, skirt_h - bump - 0.6);
 
 module snap_groove(w) {
     gd = bump - fit + 0.15;   // groove depth into the wall
-    gt = 0.2;                 // vertical play
+    gt = 0.2;                 // the groove is this much taller than the ridge at each edge
+    // lowered so that its upper face sits 0.05 mm over the ridge's when the lid is
+    // down: the lid can lift 0.05 mm before the ridge holds it
+    drop = gd + gt - (bump - fit) - 0.05;
     gl = bump_len + 4;
-    at_wall(w, L / 2, z_rim - bump_drop) hull() {
+    at_wall(w, L / 2, z_rim - bd - drop) hull() {
         translate([-gl / 2, -(gd + gt), -0.5]) cube([gl, 2 * (gd + gt), 0.5 + eps]);
         translate([-gl / 2, -gt, gd - eps]) cube([gl, 2 * gt, eps]);
     }
@@ -353,7 +424,7 @@ module wall_label(o) {
     if (len(o_name(o)) > 0 && text_depth > 0 && (fits_below || fits_above))
         at_wall(o_wall(o), o_along(o), o_zabs(o))
             translate([0, fits_below ? v_below : v_above, wall - text_depth])
-                linear_extrude(text_depth + 1)
+                linear_extrude(text_depth + 1, convexity = 10)
                     text(o_name(o), size = s, font = font, halign = "center", valign = "center");
 }
 
@@ -402,27 +473,35 @@ module skirt() {
 }
 
 module snap_bump(w) {
-    at_wall(w, L / 2, z_rim - bump_drop) hull() {
+    at_wall(w, L / 2, z_rim - bd) hull() {
         translate([-bump_len / 2, -bump, -fit - 0.5]) cube([bump_len, 2 * bump, 0.5]);
         translate([-bump_len / 2, -eps, -fit + bump - eps]) cube([bump_len, 2 * eps, eps]);
     }
 }
 
+// The skirt is cut back round each opening, and round anything mounted behind it
 module skirt_notch(o) {
     at_wall(o_wall(o), o_along(o), o_zabs(o))
         translate([0, 0, -(fit + skirt_t + bump + 1)])
-            linear_extrude(fit + skirt_t + bump + 1 + eps) offset(r = 0.5) opening2d(o);
+            linear_extrude(fit + skirt_t + bump + 1 + eps) offset(r = 0.5) {
+                opening2d(o);
+                if (has_body(o)) rsq_c(o_bw(o), o_bh(o), 0.5);
+            }
 }
 
-// Fills a "cable" slot above the cable and presses the cable down into it
+// Fills a "cable" slot above the cable and holds the cable down in it
 module cable_tongue(o) {
-    sw = slot_w(o);
-    rs = o_w(o) / 2 - cable_pinch;           // saddle radius
-    tw = sw - 2 * fit;                       // tongue width
-    v0 = max(rs * 0.5, sqrt(max(rs * rs - (tw / 2) * (tw / 2), 0)));
-    at_wall(o_wall(o), o_along(o), o_zabs(o)) difference() {
-        translate([-tw / 2, v0, 0]) cube([tw, z_rim - o_zabs(o) - v0 + eps, wall]);
-        translate([0, 0, -1]) cylinder(r = rs, h = wall + 2);
+    tw = slot_w(o) - 2 * fit;                // tongue width
+    rs = o_w(o) / 2;                         // saddle radius: the cable's
+    cz = -cable_pinch;                       // saddle centre, below the slot's centre
+    foot = min(0.45, tw / 4);                // flat at each side of the saddle
+    v0 = cz + sqrt(max(rs * rs - pow(tw / 2 - foot, 2), 0));
+    vt = z_rim - o_zabs(o) + eps;
+    ch = min(0.3, foot * 0.6);               // lead-in on the lower corners
+    at_wall(o_wall(o), o_along(o), o_zabs(o)) linear_extrude(wall) difference() {
+        polygon([[-tw / 2, v0 + ch], [-tw / 2 + ch, v0], [tw / 2 - ch, v0], [tw / 2, v0 + ch],
+                 [tw / 2, vt], [-tw / 2, vt]]);
+        translate([0, cz]) circle(r = rs);
     }
 }
 
@@ -441,28 +520,43 @@ module lid_text() {
         cx = L / 2 + (led[0] < L / 2 ? 5 : -5);
         cy = W / 2;
         translate([cx, cy + (len(lid_label2) > 0 ? lid_label_size * 0.45 : 0), z_top - text_depth])
-            linear_extrude(text_depth + 1)
+            linear_extrude(text_depth + 1, convexity = 10)
                 text(lid_label, size = lid_label_size, font = font, halign = "center", valign = "center");
         if (len(lid_label2) > 0)
             translate([cx, cy - lid_label_size * 0.85, z_top - text_depth])
-                linear_extrude(text_depth + 1)
-                    text(lid_label2, size = lid_label_size * 0.6, font = font,
+                linear_extrude(text_depth + 1, convexity = 10)
+                    text(lid_label2, size = lid_label_size * 0.75, font = font,
                          halign = "center", valign = "center");
         if (led_window && len(led_label) > 0) {
-            t = led + (led_window_d / 2 + 3) * pico_p;
-            translate([t[0], t[1], z_top - text_depth]) linear_extrude(text_depth + 1)
-                text(led_label, size = 3, font = font, halign = "center", valign = "center");
+            // beside the window, on the pin 1 side (away from the BOOTSEL button)
+            t = led + (led_window_d / 2 + 3) * pico_q;
+            translate([t[0], t[1], z_top - text_depth]) linear_extrude(text_depth + 1, convexity = 10)
+                text(led_label, size = 4, font = font, halign = "center", valign = "center");
         }
+    }
+}
+
+// A quick print to try the board on the pegs before printing the box: a frame
+// with the box's corner posts and pegs
+module peg_test() {
+    linear_extrude(1.2) difference() {
+        translate([-1, -1]) square([L + 2, W + 2]);
+        translate([6, 6]) square([L - 12, W - 12]);
+    }
+    for (h = holes) translate([h[0], h[1], 0]) {
+        cylinder(d = post_d, h = 3);
+        translate([0, 0, 3 - eps]) peg();
     }
 }
 
 // ---------------------------------------------------------------- stand-ins for the pictures
 
-module board_ghost() {
+// grid = false leaves out the 432 small holes (the fit checks run much faster)
+module board_ghost(grid = true) {
     color("#1e8c3a") difference() {
         cube([L, W, board_t]);
         for (h = holes) translate([h[0], h[1], -1]) cylinder(d = hole_d, h = board_t + 2);
-        for (i = [0 : grid_cols - 1], j = [0 : grid_rows - 1])
+        if (grid) for (i = [0 : grid_cols - 1], j = [0 : grid_rows - 1])
             translate([gx0 + i * pitch, gy0 + j * pitch, -1]) cylinder(d = 1.0, h = board_t + 2, $fn = 8);
     }
 }
@@ -506,9 +600,17 @@ module cable_ghosts(shrink = 0) {
             color("#222") translate([0, 0, -12]) cylinder(d = o_w(o) - shrink, h = wall + 12 + 25);
 }
 
+// Whatever is mounted behind an opening (a panel jack's body), 15 mm deep
+module body_ghosts() {
+    for (o = openings) if (has_body(o))
+        at_wall(o_wall(o), o_along(o), o_zabs(o))
+            color("#555") translate([-o_bw(o) / 2, -o_bh(o) / 2, -15]) cube([o_bw(o), o_bh(o), 15 - 0.02]);
+}
+
 module inside_ghosts() {
     board_ghost();
     pico_ghost();
+    body_ghosts();
 }
 
 // ---------------------------------------------------------------- parts and views
@@ -551,8 +653,10 @@ if (part == "box") {
 } else if (part == "lid") {
     lid_part();
 } else if (part == "print") {
-    box_part();
-    translate([0, -(g + wall) - 10, 0]) lid_part();
+    color(box_color) box_part();
+    color(lid_color) translate([0, -(g + wall) - 10, 0]) lid_part();
+} else if (part == "peg_test") {
+    peg_test();
 } else if (part == "assembly") {
     color(box_color) box_world();
     color(lid_color) lid_world();
@@ -574,14 +678,16 @@ if (part == "box") {
 else if (part == "check_lid_box") {
     intersection() { box_world(); translate([0, 0, 0.01]) lid_world(); }
 } else if (part == "check_board") {
-    intersection() { union() { box_world(); lid_world(); } translate([0, 0, 0.01]) board_ghost(); }
+    intersection() { union() { box_world(); lid_world(); } translate([0, 0, 0.01]) board_ghost(false); }
 } else if (part == "check_pico") {
     intersection() { union() { box_world(); lid_world(); } pico_ghost(); }
 } else if (part == "check_plug") {
-    intersection() { union() { box_world(); lid_world(); } usb_plug_ghost(); }
+    intersection() { union() { box_world(); lid_world(); board_ghost(false); } usb_plug_ghost(); }
 } else if (part == "check_cable") {
     // a cable just under the squeezed size passes untouched
     intersection() { union() { box_world(); lid_world(); } cable_ghosts(2 * cable_pinch + 0.05); }
+} else if (part == "check_jacks") {
+    intersection() { union() { box_world(); lid_world(); board_ghost(false); pico_ghost(); } body_ghosts(); }
 }
 
 // ---------------------------------------------------------------- report
@@ -592,16 +698,44 @@ pin1_col = (pin1[0] - gx0) / pitch + 1;
 pin1_row = (pin1[1] - gy0) / pitch + 1;
 pico_top = pico_height + pico_t + usb_rec_h;
 usb_face = pico_ins - usb_overhang;  // socket face, mm in from the board edge
+plug_bot = pico_height + pico_t + usb_center_above_pcb - usb_plug_h / 2;  // above the board's top
+pico_span = across(pico_usb_wall) ? L : W;
 
 echo(str("Box outside: ", outer_l, " x ", outer_w, " x ", z_top - zf_bot, " mm (lid included)"));
 echo(str("Room: ", below, " mm under the board, ", above, " mm over it, ",
          above - pico_top, " mm over the Pico's USB socket"));
 echo(str("Pico pin 1 in hole column ", pin1_col, " from the left, row ", pin1_row, " from the front",
+         pico_inset < 0 ? str(" (pico_inset_holes = ", pico_inset_holes, ", counted from the ", pico_usb_wall, " edge)") : "",
          frac_ok(pin1_col) && frac_ok(pin1_row) ? "" : "  WARNING: Pico pins are off the hole grid"));
 echo(str("USB socket face is ", usb_face + g + wall, " mm inside the outside of the ",
          pico_usb_wall, " wall"));
 if (usb_face < -g + 0.1) echo("WARNING: the USB socket reaches the wall: move the Pico in");
+if (pico_ins + pico_len > pico_span + g - 0.2)
+    echo(str("WARNING: the Pico runs ", pico_ins + pico_len - pico_span,
+             " mm past the far edge of the board: on a 70 x 50 board its USB can face only the left or right wall"));
 if (above - pico_top < 1) echo("WARNING: less than 1 mm over the Pico: raise 'above'");
+if (plug_bot < 0.2 && usb_face - plug_gap > 0)
+    echo(str("WARNING: the USB plug's body hits the board's edge: raise pico_height to at least ",
+             usb_plug_h / 2 - pico_t - usb_center_above_pcb + 0.2,
+             " or put the Pico's USB end at the board's edge (pico_inset <= ", usb_overhang + plug_gap, ")"));
+for (o = openings) if (o_shape(o) != "cable" && o_v1(o) > above - 1.5)
+    echo(str("WARNING: the ", o_label(o), " opening reaches the rim: raise 'above' to at least ", o_v1(o) + 1.5,
+             " or lower the opening"));
+for (i = [0 : len(openings) - 1], j = [0 : len(openings) - 1]) {
+    a = openings[i];
+    b = openings[j];
+    if (i < j && o_wall(a) == o_wall(b) && abs(o_along(a) - o_along(b)) < (o_span(a) + o_span(b)) / 2 + 2
+        && o_v0(a) < o_v1(b) + 1 && o_v0(b) < o_v1(a) + 1)
+        echo(str("WARNING: openings ", o_label(a), " and ", o_label(b), " overlap on the ", o_wall(a),
+                 " wall: move one (the openings do not move with the Pico)"));
+}
+if (snap) for (o = openings)
+    if ((o_wall(o) == "front" || o_wall(o) == "back")
+        && abs(o_along(o) - L / 2) < o_span(o) / 2 + bump_len / 2 + 2.5
+        && board_t + o_v1(o) > z_rim - bd - 1.2)
+        echo(str("WARNING: the ", o_label(o), " opening cuts the snap ridge on the ", o_wall(o),
+                 " wall: move it away from the middle of the wall"));
+if (snap && bd < bump_drop) echo(str("Note: snap ridge raised to ", bd, " mm below the rim to stay on the skirt"));
 for (h = holes) {
     c = pico_xy(pico_len / 2, 0);
     d = max(abs(h[0] - c[0]) - (across(pico_usb_wall) ? pico_len : pico_wid) / 2,
