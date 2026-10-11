@@ -19,19 +19,19 @@ part = "assembly"; // [assembly, open, exploded, section, section_corner, box, l
 // Draw the perfboard, the Pico 2, the USB plug, the key lead and jack bodies in the pictures
 show_parts = true;
 
-/* [Perfboard (check with calipers)] */
-// Board length (left to right)
-board_l = 70;     // [40:0.1:150]
-// Board width (front to back)
-board_w = 50;     // [30:0.1:120]
-// Board thickness
+/* [Perfboard (measured from a photo, scaled by its 2.54 mm grid)] */
+// Board length (left to right). Measured 70.3 over its cut edges (70.0 across the top face), plus 0.1 a side so the edge ribs never pinch it
+board_l = 70.5;   // [40:0.1:150]
+// Board width (front to back). Measured 50.2 over its cut edges (50.0 across the top face), plus 0.1 a side
+board_w = 50.4;   // [30:0.1:120]
+// Board thickness (not measurable from the photo; standard for these boards)
 board_t = 1.6;    // [0.8:0.1:2.4]
-// Corner mounting hole diameter
+// Corner mounting hole diameter. Measured 2.18 at the top edge; the plated bore inside may be 1.95 to 2.2, so 2 mm (M2) is used
 hole_d = 2.0;     // [1.0:0.1:4.0]
-// Corner hole centre, distance from the left and right edges
-hole_inset_x = 2.0; // [1.0:0.1:10]
-// Corner hole centre, distance from the front and back edges
-hole_inset_y = 2.0; // [1.0:0.1:10]
+// Corner hole centre, distance from the left and right edges (sets the peg spacing: board_l - 2 x this = 66.0, measured 65.95)
+hole_inset_x = 2.25; // [1.0:0.05:10]
+// Corner hole centre, distance from the front and back edges (board_w - 2 x this = 46.1, measured 46.09)
+hole_inset_y = 2.15; // [1.0:0.05:10]
 // Hole grid (24 x 18 on the 7 x 5 cm board, centred on it)
 grid_cols = 24;   // [1:1:60]
 grid_rows = 18;   // [1:1:60]
@@ -55,8 +55,8 @@ fit = 0.2;        // [0.05:0.05:0.5]
 /* [Holding the board] */
 // pins: printed pegs through the corner holes, the lid's posts stop the board lifting off them (no hardware). screws: posts with pilot holes for M2 self-tapping screws
 mount = "pins";   // [pins, screws]
-// Peg diameter = hole diameter minus this
-pin_clear = 0.4;  // [0.1:0.05:0.8]
+// Peg diameter = hole diameter minus this (0.5 allows for PETG shrinking and small pegs printing a little fat)
+pin_clear = 0.5;  // [0.1:0.05:0.8]
 // How far the pegs stick up through the board
 pin_above = 1.0;  // [0.5:0.1:3]
 // Gap between the lid's posts and the top of the board (they stop the board lifting off its pegs)
@@ -119,12 +119,12 @@ pico_bootsel_p = 12.0; // [0:0.1:51]
 pico_bootsel_q = 3.5;  // [-10:0.1:10]
 
 /* [USB opening] */
-// Big enough for the plug's moulded body to go into the wall (yours looked about 15 mm wide)
-usb_hole_w = 16.5; // [8:0.5:25]
+// Big enough for the plug's moulded body to go into the wall (yours measured 10.5 wide in the photo; the USB spec allows up to 10.6)
+usb_hole_w = 13;   // [8:0.5:25]
 usb_hole_h = 10;   // [4:0.5:15]
 usb_hole_r = 2;    // [0:0.5:5]
-// Moulded body of your USB plug: width, thickness, length (measure yours; used for the pictures and the fit check)
-usb_plug_w = 15;   // [8:0.5:25]
+// Moulded body of your USB plug: width, thickness, length (used for the pictures and the fit check; width 10.5 +-0.6 from the photo)
+usb_plug_w = 11;   // [8:0.5:25]
 usb_plug_h = 8;    // [4:0.5:15]
 usb_plug_len = 18; // [5:1:40]
 
@@ -702,6 +702,9 @@ plug_bot = pico_height + pico_t + usb_center_above_pcb - usb_plug_h / 2;  // abo
 pico_span = across(pico_usb_wall) ? L : W;
 
 echo(str("Box outside: ", outer_l, " x ", outer_w, " x ", z_top - zf_bot, " mm (lid included)"));
+if (mount == "pins")
+    echo(str("Pegs: ", pin_d, " mm across in ", hole_d, " mm holes, ", L - 2 * hole_inset_x, " x ",
+             W - 2 * hole_inset_y, " mm apart (centre to centre)"));
 echo(str("Room: ", below, " mm under the board, ", above, " mm over it, ",
          above - pico_top, " mm over the Pico's USB socket"));
 echo(str("Pico pin 1 in hole column ", pin1_col, " from the left, row ", pin1_row, " from the front",

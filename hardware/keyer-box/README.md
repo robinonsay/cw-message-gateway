@@ -7,7 +7,7 @@ inserts or glue.
 
 ![Assembled box](images/assembly.png)
 
-Outside size with the defaults: 75.2 × 55.2 × 24.6 mm.
+Outside size with the defaults: 75.7 × 55.6 × 24.6 mm.
 
 ## Files
 
@@ -20,30 +20,34 @@ To make the STL files: set **part** to `box`, press **F6** (fn+F6 on a Mac, or
 **Design > Render**), then **File > Export > Export as STL**. Do the same with
 `lid`. Both come out already turned the way they print.
 
-## Before you print: measure
+## Before you print
 
-The defaults come from the standard 7 × 5 cm double-sided prototype board (24 × 18
-holes on a 2.54 mm grid) and a photo, not from calipers. Check these on yours and
-change them in the Customizer's **Perfboard** tab if they differ:
+The board's numbers come from a photo of the board, with its 2.54 mm hole grid as
+the ruler (measured four independent ways and cross-checked, to about ±0.1 mm):
 
-- `board_l`, `board_w`, `board_t`: the board's size (70 × 50 mm, 1.6 mm thick).
-- `hole_d`: the corner holes' diameter (2.0 mm). Drill-bit shanks make a good gauge.
-  The pegs are 0.4 mm smaller (`pin_clear`).
-- `hole_inset_x`, `hole_inset_y`: from each corner hole's centre to the nearest
-  edges (2.0 mm each way). Easiest measured as hole edge to board edge, plus half
-  the hole's diameter.
+- Size: 70.0 × 50.0 mm across the top face, about 70.3 × 50.2 mm over the cut edges.
+  The box is built around 70.5 × 50.4 (`board_l`, `board_w`), so the edge ribs never
+  pinch it.
+- Corner holes: 2.18 mm across at the top edge. The plated bore inside may be a
+  little narrower (1.95 to 2.2), so the model uses 2 mm (`hole_d`, the M2 size these
+  boards are sold with) and makes the pegs 1.5 mm (`pin_clear` 0.5). That allows for
+  PETG shrinking slightly and small pegs printing a little fat.
+- Hole spacing: 65.95 × 46.09 mm centre to centre. The pegs are 66.0 × 46.1 apart
+  (`hole_inset_x` 2.25, `hole_inset_y` 2.15 from the model's outline).
+- The hole grid sits within 0.2 mm of the board's centre, as the model assumes.
+- Thickness can't be seen from above: `board_t` is the standard 1.6 mm.
 
-Then print `part = "peg_test"` first (a thin frame with the four pegs, about ten
-minutes) and try your board on it. If it drops on and lifts off easily, the box
-will hold it the same way.
+Print `part = "peg_test"` first (a thin frame with the four pegs, about ten minutes)
+and try the board on it. It should drop on and lift off easily. If it is tight,
+raise `pin_clear` to 0.6; if it rattles a lot, lower it to 0.4.
 
-And the cables:
+The cables:
 
-- USB: the plug's moulded body goes into the wall. Yours looked about 15 mm wide in
-  the photo. The 16.5 × 10 mm opening (`usb_hole_w`, `usb_hole_h`) takes a body up
-  to 15 mm wide and 9 mm thick; set `usb_plug_w` and `usb_plug_h` to yours and
-  the fit check tells you if it clears.
-- Key lead: its diameter goes in `o1_w` (4.0 mm).
+- USB: the plug's moulded body goes into the wall. Yours measured 10.5 mm wide in
+  the photo (the USB spec allows up to 10.6). The opening is 13 × 10 mm
+  (`usb_hole_w`, `usb_hole_h`). For a different cable, set `usb_plug_w` and
+  `usb_plug_h` to its body and the fit check tells you if it clears.
+- Key lead: its diameter goes in `o1_w` (4.0 mm). It wasn't in the photo.
 
 ## Printing (PETG, Bambu Lab H2C)
 
