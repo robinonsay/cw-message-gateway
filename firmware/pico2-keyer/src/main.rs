@@ -39,18 +39,33 @@
 //! - A panic, a HardFault or any unexpected exception opens the key and the PTT
 //!   first, then turns off every PWM output and holds the tone pin low, then
 //!   stops, so the watchdog resets the box ([`safe_state`]).
+//! - Core 0's stack is bounded: its `MSPLIM` is the end of the memory the statics
+//!   take, so an overflow faults instead of writing over them ([`limit_stack`]).
+//!
+//! The decoder runs on the processor's second core, core 1 ([`core1`]), which
+//! core 0 starts last, and which can reach none of the above: its memory
+//! protection unit lets it reach only its own memory, the memory the two cores
+//! share and the audio. Core 0 trips the box if core 1 faults or stops
+//! (`keyer_core::control::Core1Watch`), and a fault on core 1 opens the key and the
+//! PTT first, as on core 0.
 
 #![no_std]
 #![no_main]
+
+mod core1;
 
 use api::common::{Read, Write};
 use api::gpio::{Gpio, Pull};
 use core::sync::atomic::{AtomicBool, Ordering};
 use keyer_core::control::{CPU_CYCLES_MASK, Control, Hardware};
-use keyer_core::keyer::{Boot, Keyer, Limits, Saved};
+use keyer_core::cores;
+use keyer_core::keyer::{Boot, Core1Test, Keyer, Limits, Saved};
+use pico2::adc::Rp2350Adc;
 use pico2::clocks::Rp2350Clocks;
 use pico2::common::board::Rp2350;
+use pico2::dma::Rp2350Dma;
 use pico2::gpio::gpio::{Rp2350Gpio, Rp2350GpioIn, Rp2350GpioOut};
+use pico2::multicore::Rp2350Core1;
 use pico2::pwm::{Rp2350Pwm, Rp2350PwmSquare};
 use pico2::systick::{self, Rp2350SysTick};
 use pico2::timer::Rp2350Timer;
@@ -80,6 +95,13 @@ const TONE_HZ: u32 = 700;
 /// and the tone is there to stop.
 static TONE_UP: AtomicBool = AtomicBool::new(false);
 
+/// The longest core 0 waits for core 1 to answer its launch, in microseconds,
+/// beside the 500 ms watchdog. The handshake takes about 200 µs.
+const CORE1_LAUNCH_US: u64 = 10_000;
+
+/// The timer, which core 1 reads too.
+static mut TIMER: Option<Rp2350Timer> = None;
+
 /// The USB identity. hfnode recognises the box by its product name. The VID and
 /// PID are the Pico SDK's own for a USB serial port (Raspberry Pi's usb-pid list:
 /// 0x0009, "Raspberry Pi Pico SDK CDC UART").
@@ -102,7 +124,7 @@ const BUILD: &str = match option_env!("KEYER_BUILD_ID") {
 
 /// The board: the one place that touches the chip.
 struct Board {
-    timer: Rp2350Timer,
+    timer: &'static Rp2350Timer,
     systick: Rp2350SysTick,
     usb: Rp2350Usb,
     watchdog: Rp2350Watchdog,
@@ -111,6 +133,8 @@ struct Board {
     tone: Rp2350PwmSquare<TONE_GPIO>,
     line: Rp2350GpioIn<LINE_GPIO>,
     led: Rp2350GpioOut<LED_GPIO>,
+    /// Whether core 1 answered its launch.
+    core1: bool,
 }
 
 impl Hardware for Board {
@@ -169,6 +193,46 @@ impl Hardware for Board {
     fn feed_watchdog(&mut self) {
         self.watchdog.feed();
     }
+
+    fn usb_room(&self) -> usize {
+        self.usb.room()
+    }
+
+    fn core1_launched(&self) -> bool {
+        self.core1
+    }
+
+    fn core1_beat(&self) -> u32 {
+        core1::LINK.0.beat.load(Ordering::Acquire)
+    }
+
+    fn core1_fault(&self) -> bool {
+        core1::LINK.0.fault.load(Ordering::Acquire)
+    }
+
+    fn core1_epoch(&mut self, epoch: u32) {
+        core1::LINK.0.epoch.store(epoch, Ordering::Release);
+    }
+
+    fn core1_keyed(&mut self, down: bool) {
+        core1::LINK.0.keyed.store(down, Ordering::Release);
+    }
+
+    fn core1_send(&mut self, line: &[u8]) -> bool {
+        core1::LINK.0.to_core1.write_all(line)
+    }
+
+    fn core1_read(&mut self, buf: &mut [u8]) -> usize {
+        core1::LINK.0.from_core1.read(buf)
+    }
+
+    fn core1_test(&mut self, test: Core1Test) {
+        let t = match test {
+            Core1Test::Hang => cores::TEST_HANG,
+            Core1Test::Fault => cores::TEST_FAULT,
+        };
+        core1::LINK.0.test.store(t, Ordering::Release);
+    }
 }
 
 fn main() -> ! {
@@ -180,6 +244,7 @@ fn main() -> ! {
     let _ = key.write(false);
     let mut ptt = gpio.output_from_handle(board.pins.gpio17).unwrap();
     let _ = ptt.write(false);
+    limit_stack();
     let led = gpio.output_from_handle(board.pins.led).unwrap();
     // The PTT line, through a BAT85 to the PTT contact: the pad's pull-up holds it
     // high unless the contact is held low (docs/keyer.md, "The PTT sense").
@@ -191,7 +256,11 @@ fn main() -> ! {
     let mut tone = pwm.square_from_handle(board.pins.gpio18, TONE_HZ).unwrap();
     let _ = tone.write(false);
     TONE_UP.store(true, Ordering::Relaxed);
-    let timer = Rp2350Timer::new(board.timer, &clocks);
+    // SAFETY: the only reference ever made to TIMER, here, once: the board's timer
+    // handle exists once. Shared with core 1, which only reads the counter.
+    let slot = &raw mut TIMER;
+    let timer: &'static Rp2350Timer =
+        unsafe { (*slot).insert(Rp2350Timer::new(board.timer, &clocks)) };
     let systick = Rp2350SysTick::new(board.systick, &clocks);
     let mut watchdog = Rp2350Watchdog::new(board.watchdog, &clocks);
     // What the box saved before it restarted: nothing after a power-up.
@@ -201,7 +270,7 @@ fn main() -> ! {
     ]);
     // Holds the USB pull-up off for about 10 ms so that the host sees a fresh
     // attach: before the watchdog starts.
-    let usb = Rp2350Usb::new(board.usb, &clocks, &timer, USB);
+    let usb = Rp2350Usb::new(board.usb, &clocks, timer, USB);
     let boot = match watchdog.reset_reason() {
         ResetReason::WatchdogTimeout => Boot::Watchdog,
         ResetReason::ChipReset(
@@ -215,6 +284,31 @@ fn main() -> ! {
     };
     watchdog.start(keyer_core::limits::WATCHDOG_MS * 1000);
 
+    // Last, the decoder on core 1, with everything it shares set up before it
+    // starts. Neither can stop the keyer: if the ADC does not come up or core 1
+    // does not answer, the box runs without a decoder (`RX` lines get `ERR RX
+    // OFF`).
+    let dma = Rp2350Dma::new(board.dma);
+    let audio = Rp2350Adc::new(board.adc, &clocks)
+        .and_then(|adc| core1::start_audio(adc, board.pins.gpio26, dma.ch0));
+    let core1 = match audio {
+        Ok(audio) => {
+            core1::hand_over(core1::Parts {
+                timer,
+                audio,
+                boot: match boot {
+                    Boot::Power => decoder_core::control::Boot::Power,
+                    Boot::Watchdog => decoder_core::control::Boot::Watchdog,
+                    Boot::Other => decoder_core::control::Boot::Other,
+                },
+            });
+            Rp2350Core1::new(board.core1)
+                .launch(&core1::STACK, core1::main, timer, CORE1_LAUNCH_US)
+                .is_ok()
+        }
+        Err(_) => false,
+    };
+
     let mut hw = Board {
         timer,
         systick,
@@ -225,6 +319,7 @@ fn main() -> ! {
         tone,
         line,
         led,
+        core1,
     };
     let keyer = Keyer::restore(Limits::BOX, boot, hw.now_ms(), saved).with_build(BUILD);
     let mut control = Control::new(keyer, &hw);
@@ -243,12 +338,35 @@ fn main() -> ! {
 /// in reset, and otherwise only stores `CC` = 0, which turns outputs off.
 /// `check_faults.py` checks the order in the built image: the first store each
 /// handler makes is the one that opens the key and the PTT.
+///
+/// Both cores run these handlers (one vector table). On core 1 they run with its
+/// MPU off (`core1`), and last they set the fault flag core 0 reads every pass:
+/// core 0 then trips the box (`CORE1`), keeps every output open and stops
+/// feeding the watchdog. On core 0 the flag is set too, and nothing reads it.
 fn safe_state() {
     outputs_open();
-    // SAFETY: called only from the panic and fault handlers, after which no
-    // owner of a PWM output runs again.
+    // SAFETY: called only from the panic and fault handlers. On core 0 no owner
+    // of a PWM output runs again; on core 1, core 0 trips the box on its next
+    // pass and drives the tone off from then on.
     unsafe { Rp2350Pwm::silence_all() };
     tone_low();
+    core1::LINK.0.fault.store(true, Ordering::Release);
+}
+
+/// Bound core 0's stack: `MSPLIM`, below which a push faults (UsageFault `STKOF`,
+/// raised to HardFault) rather than writes (Armv8-M ARM, B3.21 and C2.4.126 MSR), at
+/// the end of the memory the statics take. rustos's link.ld puts core 0's stack at
+/// the top of RAM, growing down towards `__ebss`, the end of `.bss` (core 1's stack
+/// is a static, below it). `MSPLIM` keeps bits 31:3, so the end is rounded up to 8
+/// bytes.
+fn limit_stack() {
+    unsafe extern "C" {
+        static __ebss: u32;
+    }
+    let bottom = ((&raw const __ebss) as usize).next_multiple_of(8);
+    unsafe {
+        core::arch::asm!("msr MSPLIM, {}", in(reg) bottom, options(nomem, nostack, preserves_flags))
+    };
 }
 
 /// Open the key and the PTT: one register write, no driver, no lock, nothing

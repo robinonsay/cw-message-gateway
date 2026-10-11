@@ -18,17 +18,17 @@ bench = false
 [dependencies]
 # The box's rules, shared with hfnode's mock box.
 keyer-core = { path = "../../crates/keyer-core" }
-# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at
-# master's merge of rustos #4. Its api and pico2 sources are those of c9852112,
-# the commit audited before (the timer no debugger pauses, SysTick, the
-# application's watchdog scratch registers and the fault handlers' safe state,
-# on the PWM driver and its reset-safe silence_all: rustos #2 and #3). #4 renames
-# a template's Cargo.toml, which cargo read in every build and printed an error
-# for. Moving this pin can change the UF2 with no source change, since cargo
-# mixes the commit into the crate hashes that order the code. This one does
-# not: built with the same build id, the UF2 is byte for byte the audited one.
-api = { git = "https://github.com/robinonsay/rustos", rev = "8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c" }
-pico2 = { git = "https://github.com/robinonsay/rustos", rev = "8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c" }
+# The decoder that runs on the box's second core: the decoder box's loop, tested
+# on a computer against a board in memory.
+decoder-core = { path = "../../crates/decoder-core" }
+# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers, at the
+# head of rustos #6 (starting core 1, and the USB queue's room), on master's merge
+# of rustos #5 (the ADC and DMA drivers). Moved from master's merge of rustos #4, which the audit checked
+# with the keyer image eef8c126; moving this pin can change the UF2 with no source
+# change, since cargo mixes the commit into the crate hashes that order the code.
+# To be moved to master's merge of rustos #6 once it is merged.
+api = { git = "https://github.com/robinonsay/rustos", rev = "410dffa091e247e6e7546c7f2ff465f0af499d5a" }
+pico2 = { git = "https://github.com/robinonsay/rustos", rev = "410dffa091e247e6e7546c7f2ff465f0af499d5a" }
 
 # The runtime has no unwinder.
 [profile.dev]

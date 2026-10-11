@@ -5,14 +5,18 @@ handheld's PTT and microphone, for hfnode (`station.rig = "keyer"`). How to wire
 flash and bring it up is in [docs/keyer.md](../../docs/keyer.md); the lines it
 takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
 
-- `src/main.rs`: the box. Its rules and limits are not here but in
-  [crates/keyer-core](../../crates/keyer-core), which hfnode's tests and
-  `hfnode selftest` run as a mock box; this file moves USB bytes, the key, PTT and
-  tone pins, and the PTT line.
+- `src/main.rs`: the box, on the processor's core 0. Its rules and limits are not
+  here but in [crates/keyer-core](../../crates/keyer-core), which hfnode's tests
+  and `hfnode selftest` run as a mock box; this file moves USB bytes, the key, PTT
+  and tone pins, and the PTT line.
+- `src/core1.rs`: the decoder on core 1 ([crates/decoder-core](../../crates/decoder-core),
+  the decoder box's loop), its memory protection, and what the two cores share
+  ([docs/keyer-protocol.md](../../docs/keyer-protocol.md), "The decoder").
 - It runs on [rustos](https://github.com/robinonsay/rustos), a bare-metal Rust
   runtime for the Pico 2 with no outside crates: its clocks, timer, SysTick,
-  watchdog, GPIO, PWM and USB serial drivers, and the fault handlers, which call
-  this firmware's `safe_state` (the key and the PTT open first) before they stop.
+  watchdog, GPIO, PWM, ADC, DMA and USB serial drivers, core 1's start, and the
+  fault handlers, which call this firmware's `safe_state` (the key and the PTT open
+  first) before they stop.
   It is pinned in `Cargo.toml` at a commit on a rustos branch until its PRs
   merge, then at their merge commits.
 - `build.sh`: builds a commit's UF2 the way CI does (below, "Building it yourself").
@@ -25,6 +29,19 @@ takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
 
   ```sh
   python3 check_faults.py pico2-keyer.elf
+  ```
+
+- `check_core1.py`: reads the code core 1 runs in the built ELF and checks that
+  none of it stores to a pin, a pad, the PWM, USB, the watchdog or anything of core
+  0's but the memory the two cores share, with the analysis of the decoder box's
+  `check_pins.py` (`firmware/pico2-decoder`). `--self-test` shows it failing
+  made-up images; `mutants_core1.py` shows it failing four real builds changed to
+  reach a pin (a few minutes; CI does not run it):
+
+  ```sh
+  python3 check_core1.py --self-test
+  python3 check_core1.py pico2-keyer.elf
+  python3 mutants_core1.py
   ```
 
 ## Getting it
