@@ -1052,15 +1052,20 @@ GP16 ──4.7 kΩ── GND            (the pull-down on the pin side, never on
   resistor, as with the PC817. Not from the base to GND: there, an undriven pad at
   about 2 V through a 10 kΩ base resistor would leave about 0.64 V on the base,
   enough to start turning it on.
+- **With a 4.7 kΩ and a 10 kΩ on hand, the 4.7 kΩ is the pull-down, never the
+  10 kΩ:** the RP2350-E9 fix needs 8.2 kΩ or less ("The box" above). The base
+  resistor is the other one, 10 kΩ or a second 4.7 kΩ.
 - **Its meter checks.** Take the pins from the data sheet for the number printed on
   it: TO-92 pinouts differ between part numbers.
   - The bare part, before soldering, on the diode test: red on the base and black on
     each other leg reads one drop (about 0.5-0.8 V) each, and every other pair reads
     open both ways. That confirms an NPN and finds its base.
   - In the box, plugged into the computer, nothing running, nothing in the radio:
-    volts collector to emitter **0 V**; diode test collector to emitter **open both
-    ways** (a beep or a low reading means it is shorted or wired wrong: do not plug
-    it in); volts GP16 to GND **0 V**.
+    volts collector to emitter **0 V**. Diode test collector to emitter, both ways:
+    **open, or above about 1.5 V** (one way can read high: the meter's current goes
+    through the base resistor and the base-collector junction). **A beep or under
+    about 1 V either way means a shorted part or the base on the tip wire: do not
+    plug it in.** Volts GP16 to GND **0 V**.
   - With the box unplugged from USB, GP16 to GND reads **about 4.7 kΩ** (a little
     less is fine: the base path is in parallel).
 
