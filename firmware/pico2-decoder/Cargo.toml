@@ -1,0 +1,34 @@
+[package]
+name = "pico2-decoder"
+version = "0.1.0"
+description = "Firmware for the decoder box: a Raspberry Pi Pico 2 that decodes a radio's CW audio and sends letters over USB"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Its own workspace: it builds only for the RP2350 (thumbv8m.main-none-eabihf,
+# set in .cargo/config.toml), so it is not a member of the hfnode workspace.
+[workspace]
+
+[[bin]]
+name = "pico2-decoder"
+test = false
+bench = false
+
+[dependencies]
+# The box's loop, tested on a computer against a board in memory.
+decoder-core = { path = "../../crates/decoder-core" }
+# rustos (github.com/robinonsay/rustos): the Pico 2 runtime and drivers. Pinned at
+# master's merge of rustos #5 (the ADC and DMA drivers). Moving this pin can change
+# the UF2 with no source change.
+api = { git = "https://github.com/robinonsay/rustos", rev = "80bf5998a60a41b3741041062ff7e9c59caf95b2" }
+pico2 = { git = "https://github.com/robinonsay/rustos", rev = "80bf5998a60a41b3741041062ff7e9c59caf95b2" }
+
+# The runtime has no unwinder.
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+debug = true
+lto = true
+codegen-units = 1

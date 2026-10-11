@@ -10,6 +10,14 @@ mod imp {
         x.sin_cos()
     }
 
+    pub fn cos(x: f32) -> f32 {
+        x.cos()
+    }
+
+    pub fn log10(x: f32) -> f32 {
+        x.log10()
+    }
+
     pub fn exp(x: f32) -> f32 {
         x.exp()
     }
@@ -35,6 +43,14 @@ mod imp {
 mod imp {
     pub fn sin_cos(x: f32) -> (f32, f32) {
         libm::sincosf(x)
+    }
+
+    pub fn cos(x: f32) -> f32 {
+        libm::cosf(x)
+    }
+
+    pub fn log10(x: f32) -> f32 {
+        libm::log10f(x)
     }
 
     pub fn exp(x: f32) -> f32 {

@@ -42,6 +42,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Read-backs, `SENT`, chunk letters for `AGN` | `crates/protocol/src/reply.rs` |
 | Stop-and-wait ARQ, silence as NACK, idempotent retries (a repeated `OK` recovers a lost result, also after the window has ended) | `crates/hfnode/src/session.rs`; listening on past a window's end in `crates/hfnode/src/node.rs` |
 | CW decoder | `crates/cw` (decoder plus a synthesizer used for tests; the decoder builds without the standard library or a heap, `default-features = false`, so it can run on a Pico 2) |
+| Morse to letters on a Pico 2 (the decoder box: a radio's audio in, text out over USB) | `crates/decoder-core` (its loop and protocol), `firmware/pico2-decoder` (the box); see [docs/decoder.md](docs/decoder.md). hfnode does not use it yet. |
 | Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API, or a local model through Ollama) |
 | Email, text and iMessage connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in), `google_voice.rs` (texts from a Google Voice number, through the same mailbox), `imessage.rs` (Messages on a Mac), `route.rs` (which one TX uses); see [docs/texting.md](docs/texting.md) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
@@ -68,6 +69,8 @@ crates/
   civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig,
               mock: a byte-level IC-7300 that answers as the manual's Section 19 says
   keyer-core/ the keyer box's lines, Morse timing and limits (no_std, also in its firmware)
+  decoder-core/
+              the decoder box's loop: audio in, letters and the monitor's levels out
   hfnode/     config, inbox, session state machine, station safety layer,
               gateways (SMTP/IMAP, NWS, reply filter), node loop, CLI (src/main.rs)
               selftest: scripted field operator + scenarios against the mock radio
@@ -78,6 +81,7 @@ hfnode.example.toml   annotated example configuration
 deploy/               start-up: hfnode.service (systemd, Linux), hfnode-supervise.sh
                       and macos/ (Terminal or launchd), windows/ (Task Scheduler)
 firmware/pico2-keyer/ the keyer box's firmware (Raspberry Pi Pico 2)
+firmware/pico2-decoder/ the decoder box's firmware (Raspberry Pi Pico 2)
 docs/                 setup, testing and operating guides
 ```
 
@@ -422,6 +426,7 @@ files listed in [docs/texting.md](docs/texting.md#files-in-state_dir).
 - [docs/windows-setup.md](docs/windows-setup.md): running the node on Windows.
 - [docs/hardware-test-plan.md](docs/hardware-test-plan.md): staged bench plan, from checking CI-V bytes to the first on-air exchange.
 - [docs/keyer.md](docs/keyer.md): any radio through the keyer box: parts, wiring, flashing, radio settings, bring-up, including a Quansheng UV-K1 through its headset jack (stock firmware by MCW, or NR7Y's firmware on a paddle-reworked radio by CW). Its protocol: [docs/keyer-protocol.md](docs/keyer-protocol.md).
+- [docs/decoder.md](docs/decoder.md): the decoder box, a Pico 2 that types the Morse it hears from a radio's headphone jack; its protocol: [docs/decoder-protocol.md](docs/decoder-protocol.md).
 - [docs/operating.md](docs/operating.md): the field operator's guide, with exchange formats.
 - [docs/texting.md](docs/texting.md): reaching contacts by text (Google Voice) and iMessage, and checking it.
 - [docs/reply-filter.md](docs/reply-filter.md): the reply filter: Claude or a local Ollama model, choosing and testing a model.

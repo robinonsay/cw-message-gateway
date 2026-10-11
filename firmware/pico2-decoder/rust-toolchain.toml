@@ -1,0 +1,9 @@
+# Pinned to one compiler, the keyer box firmware's, so that the UF2 the safety
+# audit checks and the UF2 a later build produces are the same file. Change this
+# only on purpose, and say so in the pull request: a different compiler is a
+# different firmware.
+[toolchain]
+channel = "1.97.0"
+targets = ["thumbv8m.main-none-eabihf"]
+# llvm-tools: llvm-objdump, for check_pins.py.
+components = ["rustfmt", "clippy", "llvm-tools"]
