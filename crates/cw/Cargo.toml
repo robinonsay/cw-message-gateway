@@ -5,4 +5,24 @@ description = "Morse code: audio decoder for received CW and a test-signal synth
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+# The standard library: the `Vec`/`String` interface hfnode uses, the Morse timing
+# helpers and the synthesizer. Without it the decoder and the Morse table build with
+# `no_std` and no heap, for a microcontroller (the Pico 2 decoder box).
+std = []
+
 [dependencies]
+# Floating-point functions without the standard library; used only without `std`,
+# or with `--cfg cw_force_libm` (src/math.rs).
+libm = "0.2"
+
+[lints.rust]
+# `RUSTFLAGS="--cfg cw_force_libm"`: `libm`'s arithmetic even with `std`, so the
+# tests run through the arithmetic a `no_std` build uses (CI does). A cfg rather
+# than a feature, so that `--all-features` can never switch hfnode to it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cw_force_libm)"] }
+
+[[example]]
+name = "sweep"
+required-features = ["std"]

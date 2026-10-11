@@ -25,10 +25,22 @@
 //! to tell (about 100 ms): what was heard since the last real gap is dropped and the
 //! levels are learned afresh. The same happens if the key has not been up for a real
 //! gap in longer than any character can last (a steady carrier).
+//!
+//! The decoder needs neither the standard library nor a heap, so the same code runs
+//! on a microcontroller (the Pico 2 decoder box) and in hfnode, and
+//! [`Decoder::push_with`] hands each [`Event`] to a callback as it is decoded. With
+//! the `std` feature, `Decoder::push` and `Decoder::flush` collect them into a
+//! `Vec<DecodeEvent>` as before, and a word may be any length. Without it the
+//! buffers have fixed sizes, sized past anything real CW fills: a word longer than
+//! [`WORD_RUNS`] key-down and key-up runs (about 75 characters of plain text, 50 of
+//! digits) is decoded where it stands, as if a word gap had been heard. That is the
+//! only difference between the two. Without `std` a [`Decoder`] takes about 4.7 kB,
+//! most of it the word, and finishing a word needs a few kB of stack.
 
+use crate::math;
 use crate::morse::decode_pattern;
-use std::collections::VecDeque;
-use std::f32::consts::PI;
+use core::f32::consts::PI;
+use core::fmt;
 
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
@@ -67,42 +79,88 @@ impl DecoderConfig {
     /// parameters do not fail loudly: they leave the decoder deaf (zero bandwidth),
     /// unstable (negative bandwidth) or tuned to an alias of the tone (pitch above
     /// Nyquist).
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn check(&self) -> Result<(), ConfigError> {
         let sr = self.sample_rate as f32;
         if !(8000..=192_000).contains(&self.sample_rate) {
-            return Err(format!(
-                "sample_rate {} must be 8000-192000",
-                self.sample_rate
-            ));
+            return Err(ConfigError::SampleRate(self.sample_rate));
         }
         if !(100.0..sr / 2.0).contains(&self.pitch_hz) {
-            return Err(format!(
-                "pitch_hz {} must be at least 100 and below half the sample rate",
-                self.pitch_hz
-            ));
+            return Err(ConfigError::Pitch(self.pitch_hz));
         }
         if !(10.0..sr / 2.0).contains(&self.bandwidth_hz) {
-            return Err(format!(
-                "bandwidth_hz {} must be at least 10 and below half the sample rate",
-                self.bandwidth_hz
-            ));
+            return Err(ConfigError::Bandwidth(self.bandwidth_hz));
         }
         if !(self.min_wpm > 0.0
             && self.min_wpm <= self.initial_wpm
             && self.initial_wpm <= self.max_wpm)
         {
-            return Err("speeds must satisfy 0 < min_wpm <= initial_wpm <= max_wpm".into());
+            return Err(ConfigError::Speeds);
         }
         Ok(())
     }
+
+    /// [`DecoderConfig::check`], with the reason as text.
+    #[cfg(feature = "std")]
+    pub fn validate(&self) -> Result<(), String> {
+        self.check().map_err(|e| e.to_string())
+    }
 }
 
+/// Why [`DecoderConfig::check`] refused the settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConfigError {
+    SampleRate(u32),
+    Pitch(f32),
+    Bandwidth(f32),
+    Speeds,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SampleRate(sr) => write!(f, "sample_rate {sr} must be 8000-192000"),
+            Self::Pitch(hz) => write!(
+                f,
+                "pitch_hz {hz} must be at least 100 and below half the sample rate"
+            ),
+            Self::Bandwidth(hz) => write!(
+                f,
+                "bandwidth_hz {hz} must be at least 10 and below half the sample rate"
+            ),
+            Self::Speeds => {
+                f.write_str("speeds must satisfy 0 < min_wpm <= initial_wpm <= max_wpm")
+            }
+        }
+    }
+}
+
+/// What the decoder heard, handed over as it is decoded ([`Decoder::push_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event<'a> {
+    Char(char),
+    /// A dot/dash pattern that is not in the Morse table.
+    Unknown(&'a str),
+    WordGap,
+}
+
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeEvent {
     Char(char),
     /// A dot/dash pattern that is not in the Morse table.
     Unknown(String),
     WordGap,
+}
+
+#[cfg(feature = "std")]
+impl From<Event<'_>> for DecodeEvent {
+    fn from(e: Event<'_>) -> Self {
+        match e {
+            Event::Char(c) => Self::Char(c),
+            Event::Unknown(p) => Self::Unknown(p.to_string()),
+            Event::WordGap => Self::WordGap,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -130,10 +188,11 @@ pub struct Decoder {
     // Timing.
     dit_ms: f32,
     char_gap_ms: f32,
-    marks: VecDeque<f32>,
+    /// The last [`MARK_HISTORY`] mark lengths, oldest first.
+    marks: Buf<f32, MARK_HISTORY>,
     /// Debounced (is_mark, ms) runs of the word being received, decoded when it ends
     /// so that the speed estimate has seen every mark of the word first.
-    word: Vec<(bool, f32)>,
+    word: List<(bool, f32), WORD_RUNS>,
     /// Cached (marks in word, dit estimate including them).
     working: (usize, f32),
     idle_ms: u64,
@@ -145,18 +204,29 @@ pub struct Decoder {
     /// of squares), and the latest samples, held back until they are clear of the
     /// mark's end.
     texture: (u32, f64, f64),
-    texture_tail: VecDeque<f32>,
+    texture_tail: Ring<TEXTURE_TAIL>,
     /// Set while settling again after [`Decoder::relearn_levels`]: the mean envelope
     /// so far, whose lower half alone teaches the floor.
     relearn_mean: Option<f32>,
 }
 
 const MARK_HISTORY: usize = 24;
+/// Without `std`, the most key-down and key-up runs one word can hold before it is
+/// decoded where it stands. A word starts with a key-down run and the two
+/// alternate, so it holds at most `WORD_RUNS / 2` marks; the longest character,
+/// `0`, takes 10 runs. With `std` a word has no limit.
+pub const WORD_RUNS: usize = 512;
+/// Most marks in a word, and so the longest dot/dash pattern.
+const WORD_MARKS: usize = WORD_RUNS / 2;
 /// Ticks of audio before the floor estimate is trusted.
 const SETTLE_TICKS: u32 = 100;
 /// Ticks left out at each end of a mark when judging its texture: the filter's rise
 /// and fall, plus the debounce at the end.
 const TEXTURE_EDGE_TICKS: usize = 20;
+/// Room for the held-back texture samples: at most the longest debounce (40 ticks)
+/// plus [`TEXTURE_EDGE_TICKS`], plus the one added before the excess is taken off.
+const TEXTURE_TAIL: usize = 64;
+const _: () = assert!(40 + TEXTURE_EDGE_TICKS < TEXTURE_TAIL);
 /// Inside ticks needed before a mark's texture is judged.
 const TEXTURE_MIN_TICKS: u32 = 60;
 /// Coefficient of variation of the magnitude above which a mark is noise. Band
@@ -173,7 +243,7 @@ impl Decoder {
         Self {
             phase: 0.0,
             phase_step: 2.0 * PI * cfg.pitch_hz / sr,
-            alpha: 1.0 - (-2.0 * PI * fc / sr).exp(),
+            alpha: 1.0 - math::exp(-2.0 * PI * fc / sr),
             i_lp: [0.0; 3],
             q_lp: [0.0; 3],
             samples_per_tick: (cfg.sample_rate / 1000).max(1),
@@ -189,14 +259,14 @@ impl Decoder {
             candidate_ticks: 0,
             dit_ms,
             char_gap_ms: 3.0 * dit_ms,
-            marks: VecDeque::with_capacity(MARK_HISTORY),
-            word: Vec::new(),
+            marks: Buf::new(0.0),
+            word: List::new((false, 0.0)),
             working: (0, dit_ms),
             idle_ms: 0,
             busy_ticks: 0,
             busy_word_len: 0,
             texture: (0, 0.0, 0.0),
-            texture_tail: VecDeque::new(),
+            texture_tail: Ring::new(),
             relearn_mean: None,
             cfg,
         }
@@ -208,15 +278,29 @@ impl Decoder {
     /// muted or its levels changed, e.g. after transmitting, so the next word is not
     /// decoded at the initial speed.
     pub fn reset_levels(&mut self) {
-        let fresh = Decoder::new(self.cfg.clone());
-        *self = Decoder {
-            dit_ms: self.dit_ms,
-            char_gap_ms: self.char_gap_ms,
-            marks: std::mem::take(&mut self.marks),
-            working: (0, self.dit_ms),
-            phase: self.phase,
-            ..fresh
-        };
+        // Everything `new` sets, in place (a second decoder on the stack would double
+        // the memory it needs), except the configuration and what follows from it,
+        // the mixer's phase and the speed.
+        self.i_lp = [0.0; 3];
+        self.q_lp = [0.0; 3];
+        self.sample_in_tick = 0;
+        self.env = 0.0;
+        self.floor = 0.0;
+        self.dev = 0.0;
+        self.peak = 0.0;
+        self.ticks_seen = 0;
+        self.raw_on = false;
+        self.on = false;
+        self.run_ticks = 0;
+        self.candidate_ticks = 0;
+        self.word.clear();
+        self.working = (0, self.dit_ms);
+        self.idle_ms = 0;
+        self.busy_ticks = 0;
+        self.busy_word_len = 0;
+        self.texture = (0, 0.0, 0.0);
+        self.texture_tail.clear();
+        self.relearn_mean = None;
     }
 
     /// Go back to the initial speed estimate (dit length, mark history and
@@ -233,7 +317,8 @@ impl Decoder {
     }
 
     /// Whether something is being received that has not been returned yet: the key
-    /// is down, or a word is buffered awaiting its word gap (see [`Decoder::flush`]).
+    /// is down, or a word is buffered awaiting its word gap (see
+    /// [`Decoder::flush_with`]).
     pub fn has_partial(&self) -> bool {
         self.on || !self.word.is_empty()
     }
@@ -259,8 +344,15 @@ impl Decoder {
     }
 
     /// Feed audio; returns whatever was decoded.
+    #[cfg(feature = "std")]
     pub fn push(&mut self, samples: &[f32]) -> Vec<DecodeEvent> {
         let mut events = Vec::new();
+        self.push_with(samples, |e| events.push(e.into()));
+        events
+    }
+
+    /// Feed audio; `on_event` gets whatever is decoded, in order, as it is decoded.
+    pub fn push_with(&mut self, samples: &[f32], mut on_event: impl FnMut(Event<'_>)) {
         for &x in samples {
             // One NaN, or a sample so large that its square overflows, would poison
             // every filter and level for good; zero or clamp it (full scale is 1.0),
@@ -270,8 +362,8 @@ impl Decoder {
             } else {
                 0.0
             };
-            self.phase = (self.phase + self.phase_step).rem_euclid(2.0 * PI);
-            let (s, c) = self.phase.sin_cos();
+            self.phase = math::rem_euclid(self.phase + self.phase_step, 2.0 * PI);
+            let (s, c) = math::sin_cos(self.phase);
             let mut i = x * c;
             let mut q = -x * s;
             for k in 0..3 {
@@ -283,21 +375,27 @@ impl Decoder {
             self.sample_in_tick += 1;
             if self.sample_in_tick >= self.samples_per_tick {
                 self.sample_in_tick = 0;
-                let mag = 2.0 * (i * i + q * q).sqrt();
-                self.tick(mag, &mut events);
+                let mag = 2.0 * math::sqrt(i * i + q * q);
+                self.tick(mag, &mut on_event);
             }
         }
-        events
     }
 
     /// Decode whatever is buffered, as if a word gap had just been heard.
+    #[cfg(feature = "std")]
     pub fn flush(&mut self) -> Vec<DecodeEvent> {
         let mut events = Vec::new();
-        self.finish_word(&mut events);
+        self.flush_with(|e| events.push(e.into()));
         events
     }
 
-    fn tick(&mut self, mag: f32, events: &mut Vec<DecodeEvent>) {
+    /// Decode whatever is buffered, as if a word gap had just been heard, handing
+    /// what is decoded to `on_event`.
+    pub fn flush_with(&mut self, mut on_event: impl FnMut(Event<'_>)) {
+        self.finish_word(&mut on_event);
+    }
+
+    fn tick(&mut self, mag: f32, out: &mut dyn FnMut(Event<'_>)) {
         // Post-detection smoothing over a fraction of a dit tames the noise
         // fluctuation of the envelope without blurring the keying.
         let tau = (0.12 * self.dit_ms).clamp(2.0, 12.0);
@@ -374,12 +472,12 @@ impl Decoder {
                 self.run_ticks = self.candidate_ticks;
                 self.candidate_ticks = 0;
                 if was_on {
-                    self.word.push((true, len));
+                    self.push_run((true, len), out);
                 } else if !self.word.is_empty() {
                     if len >= 2.0 * self.dit_ms {
                         self.char_gap_ms += 0.2 * (len - self.char_gap_ms);
                     }
-                    self.word.push((false, len));
+                    self.push_run((false, len), out);
                 }
             }
         }
@@ -396,7 +494,7 @@ impl Decoder {
                 self.texture.2 += m * m;
             }
             if self.texture.0 >= TEXTURE_MIN_TICKS && self.mark_is_noise() {
-                self.relearn_levels(events);
+                self.relearn_levels(out);
                 return;
             }
         } else if self.texture.0 > 0 || !self.texture_tail.is_empty() {
@@ -411,7 +509,7 @@ impl Decoder {
         } else {
             self.busy_ticks += 1;
             if self.busy_ticks as f32 > self.stale_ms() {
-                self.relearn_levels(events);
+                self.relearn_levels(out);
                 return;
             }
         }
@@ -421,10 +519,27 @@ impl Decoder {
         } else {
             self.idle_ms = self.run_ticks as u64;
             if !self.word.is_empty() && self.run_ticks as f32 >= self.word_gap_threshold() {
-                self.finish_word(events);
-                events.push(DecodeEvent::WordGap);
+                self.finish_word(out);
+                out(Event::WordGap);
             }
         }
+    }
+
+    /// Add a debounced run to the word. A word with no room left is decoded first,
+    /// as at a word gap, and the run starts the next one (a key-up run, which no
+    /// word starts with, is then left out, as after any word).
+    fn push_run(&mut self, run: (bool, f32), out: &mut dyn FnMut(Event<'_>)) {
+        if self.word.is_full() {
+            self.finish_word(out);
+            out(Event::WordGap);
+            // The runs since the last real gap have just been decoded: none are left
+            // for `relearn_levels` to drop.
+            self.busy_word_len = 0;
+            if !run.0 {
+                return;
+            }
+        }
+        self.word.push(run);
     }
 
     /// Whether the inside of the current mark fluctuates like noise.
@@ -432,7 +547,7 @@ impl Decoder {
         let (n, sum, sq) = self.texture;
         let mean = sum / f64::from(n);
         let var = (sq / f64::from(n) - mean * mean).max(0.0);
-        mean > 0.0 && var.sqrt() > NOISE_CV * mean
+        mean > 0.0 && math::sqrt_f64(var) > NOISE_CV * mean
     }
 
     /// Longest real CW can go without the key up for `2 * min_dit`: a dah at the
@@ -448,11 +563,11 @@ impl Decoder {
     /// the runs heard since the last real gap so they neither decode nor train the
     /// speed, finish the word before them, and learn the levels again from here (a
     /// station may already be keying, so see `relearn_mean`).
-    fn relearn_levels(&mut self, events: &mut Vec<DecodeEvent>) {
+    fn relearn_levels(&mut self, out: &mut dyn FnMut(Event<'_>)) {
         self.word.truncate(self.busy_word_len);
         if !self.word.is_empty() {
-            self.finish_word(events);
-            events.push(DecodeEvent::WordGap);
+            self.finish_word(out);
+            out(Event::WordGap);
         }
         self.on = false;
         self.raw_on = false;
@@ -474,57 +589,69 @@ impl Decoder {
         (1.6 * self.char_gap_ms).clamp(5.0 * dit, 6.5 * dit)
     }
 
-    /// Learn speed from a finished word. Words of one or two marks are left out:
-    /// isolated noise bursts decode as E or T, and letting them in would drag the
-    /// speed estimate towards whatever length the noise happens to have.
-    fn learn_speed(&mut self, runs: &[(bool, f32)]) {
-        let marks: Vec<f32> = runs.iter().filter(|r| r.0).map(|r| r.1).collect();
+    /// Learn speed from the first `n` runs of the word just taken. Words of one or
+    /// two marks are left out: isolated noise bursts decode as E or T, and letting
+    /// them in would drag the speed estimate towards whatever length the noise
+    /// happens to have.
+    fn learn_speed(&mut self) {
+        let mut marks = List::<f32, WORD_MARKS>::new(0.0);
+        for &(is_mark, ms) in self.word.as_slice() {
+            if is_mark {
+                marks.push(ms);
+            }
+        }
         if marks.len() < 3 {
             return;
         }
         // A burst of noise blips is shorter than any real dit.
-        let mut sorted = marks.clone();
-        sorted.sort_by(f32::total_cmp);
-        if sorted[sorted.len() / 2] < 0.6 * 1200.0 / self.cfg.max_wpm {
+        if upper_median(marks.as_slice()) < 0.6 * 1200.0 / self.cfg.max_wpm {
             return;
         }
-        for ms in marks {
-            if self.marks.len() == MARK_HISTORY {
+        for &ms in marks.as_slice() {
+            if self.marks.is_full() {
                 self.marks.pop_front();
             }
-            self.marks.push_back(ms);
+            self.marks.push(ms);
             self.update_speed();
         }
     }
 
     fn update_speed(&mut self) {
-        let marks: Vec<f32> = self.marks.iter().copied().collect();
-        self.dit_ms = self.estimate_dit(&marks, self.dit_ms);
+        self.dit_ms = self.estimate_dit(self.marks.as_slice(), &[], self.dit_ms);
     }
 
-    /// Estimate the dit length from mark lengths with 1-D 2-means on log length.
-    fn estimate_dit(&self, marks: &[f32], current: f32) -> f32 {
-        let logs: Vec<f32> = marks.iter().map(|m| m.max(1.0).ln()).collect();
+    /// Estimate the dit length from mark lengths, `history` then `more`, with 1-D
+    /// 2-means on log length.
+    fn estimate_dit(&self, history: &[f32], more: &[f32], current: f32) -> f32 {
+        let mut logs = List::<f32, { MARK_HISTORY + WORD_MARKS }>::new(0.0);
+        for &m in history.iter().chain(more) {
+            logs.push(math::ln(m.max(1.0)));
+        }
+        let logs = logs.as_slice();
         let (lo, hi) = logs
             .iter()
             .fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         let min_dit = 1200.0 / self.cfg.max_wpm;
         let max_dit = 1200.0 / self.cfg.min_wpm;
-        if logs.len() >= 3 && hi - lo > 1.8f32.ln() {
+        if logs.len() >= 3 && hi - lo > math::ln(1.8) {
             // Two populations (dits and dahs) present.
             let mut split = (lo + hi) / 2.0;
             let (mut short, mut long) = (lo, hi);
             for _ in 0..8 {
-                let (s, l): (Vec<f32>, Vec<f32>) = logs.iter().partition(|&&x| x < split);
-                if s.is_empty() || l.is_empty() {
+                // Each side summed in the marks' order, as a partition into two lists
+                // would.
+                let below = |x: &&f32| **x < split;
+                let n_short = logs.iter().filter(below).count();
+                let n_long = logs.len() - n_short;
+                if n_short == 0 || n_long == 0 {
                     break;
                 }
-                short = s.iter().sum::<f32>() / s.len() as f32;
-                long = l.iter().sum::<f32>() / l.len() as f32;
+                short = logs.iter().filter(below).sum::<f32>() / n_short as f32;
+                long = logs.iter().filter(|x| !below(x)).sum::<f32>() / n_long as f32;
                 split = (short + long) / 2.0;
             }
-            ((short.exp() + long.exp() / 3.0) / 2.0).clamp(min_dit, max_dit)
-        } else if let Some(&last) = marks.last() {
+            ((math::exp(short) + math::exp(long) / 3.0) / 2.0).clamp(min_dit, max_dit)
+        } else if let Some(&last) = more.last().or(history.last()) {
             // One population so far: decide whether it is dits or dahs relative to
             // the current estimate and nudge towards it.
             let est = if last < 2.0 * current {
@@ -542,46 +669,53 @@ impl Decoder {
     /// marks, they count alongside the history, so a sender much slower or faster
     /// than the last one does not have their first word cut into pieces.
     fn working_dit(&mut self) -> f32 {
-        let n = self.word.iter().filter(|r| r.0).count();
+        let n = self.word.as_slice().iter().filter(|r| r.0).count();
         if n < 3 {
             return self.dit_ms;
         }
         if self.working.0 != n {
-            let mut marks: Vec<f32> = self.marks.iter().copied().collect();
-            marks.extend(self.word.iter().filter(|r| r.0).map(|r| r.1));
-            self.working = (n, self.estimate_dit(&marks, self.dit_ms));
+            let mut marks = List::<f32, WORD_MARKS>::new(0.0);
+            for &(is_mark, ms) in self.word.as_slice() {
+                if is_mark {
+                    marks.push(ms);
+                }
+            }
+            let dit = self.estimate_dit(self.marks.as_slice(), marks.as_slice(), self.dit_ms);
+            self.working = (n, dit);
         }
         self.working.1
     }
 
-    fn finish_word(&mut self, events: &mut Vec<DecodeEvent>) {
-        let runs = std::mem::take(&mut self.word);
+    fn finish_word(&mut self, out: &mut dyn FnMut(Event<'_>)) {
         self.working = (0, self.dit_ms);
-        self.learn_speed(&runs);
-        let mut pattern = String::new();
-        for (is_mark, ms) in runs {
+        self.learn_speed();
+        let mut pattern = Pattern::new();
+        for &(is_mark, ms) in self.word.as_slice() {
             if is_mark {
-                pattern.push(if ms < 2.0 * self.dit_ms { '.' } else { '-' });
+                pattern.push(if ms < 2.0 * self.dit_ms { b'.' } else { b'-' });
             } else if ms >= 2.0 * self.dit_ms {
-                Self::emit(&mut pattern, events);
+                Self::emit(&mut pattern, out);
             }
         }
-        Self::emit(&mut pattern, events);
+        Self::emit(&mut pattern, out);
+        self.word.clear();
     }
 
-    fn emit(pattern: &mut String, events: &mut Vec<DecodeEvent>) {
+    fn emit(pattern: &mut Pattern, out: &mut dyn FnMut(Event<'_>)) {
         if pattern.is_empty() {
             return;
         }
-        let p = std::mem::take(pattern);
-        events.push(match decode_pattern(&p) {
-            Some(c) => DecodeEvent::Char(c),
-            None => DecodeEvent::Unknown(p),
+        let p = pattern.as_str();
+        out(match decode_pattern(p) {
+            Some(c) => Event::Char(c),
+            None => Event::Unknown(p),
         });
+        pattern.clear();
     }
 }
 
 /// Render decode events as text: characters, `*` for unknown patterns, spaces for gaps.
+#[cfg(feature = "std")]
 pub fn events_to_text(events: &[DecodeEvent]) -> String {
     let mut s = String::new();
     for e in events {
@@ -598,7 +732,230 @@ pub fn events_to_text(events: &[DecodeEvent]) -> String {
     s.trim_end().to_string()
 }
 
-#[cfg(test)]
+/// The median of `values` as sorting them by [`f32::total_cmp`] and taking the
+/// middle one would give it (the upper of the two middle ones for an even count),
+/// without a sorted copy: the value with as many below it as the middle position.
+/// Values `total_cmp` puts equal have the same bits, so which one is found does not
+/// matter. Quadratic, but it runs once per word on the word's marks.
+fn upper_median(values: &[f32]) -> f32 {
+    let k = values.len() / 2;
+    for &v in values {
+        let below = values.iter().filter(|x| x.total_cmp(&v).is_lt()).count();
+        let equal = values.iter().filter(|x| x.total_cmp(&v).is_eq()).count();
+        if below <= k && k < below + equal {
+            return v;
+        }
+    }
+    // Unreachable for a non-empty list: some value holds the middle position.
+    f32::NAN
+}
+
+/// A list of values in the order pushed. With `std` it grows as needed, so a word
+/// may be any length, as it always could in hfnode; without, it is a [`Buf`] of at
+/// most `N`.
+#[cfg(feature = "std")]
+#[derive(Clone)]
+struct List<T: Copy, const N: usize>(Vec<T>);
+
+#[cfg(not(feature = "std"))]
+type List<T, const N: usize> = Buf<T, N>;
+
+#[cfg(feature = "std")]
+impl<T: Copy, const N: usize> List<T, N> {
+    fn new(_fill: T) -> Self {
+        Self(Vec::new())
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Never: it grows.
+    fn is_full(&self) -> bool {
+        false
+    }
+
+    fn push(&mut self, v: T) {
+        self.0.push(v);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+#[cfg(feature = "std")]
+impl<T: Copy + fmt::Debug, const N: usize> fmt::Debug for List<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+/// A list of at most `N` values in a fixed array, in the order pushed.
+#[derive(Clone, Copy)]
+struct Buf<T: Copy, const N: usize> {
+    items: [T; N],
+    len: usize,
+}
+
+impl<T: Copy, const N: usize> Buf<T, N> {
+    const fn new(fill: T) -> Self {
+        Self {
+            items: [fill; N],
+            len: 0,
+        }
+    }
+
+    // `len`, `is_empty` and `truncate` are used through `List`, without `std`.
+    #[cfg_attr(feature = "std", allow(dead_code))]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[cfg_attr(feature = "std", allow(dead_code))]
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.len == N
+    }
+
+    /// Append `v`. Every caller makes room first: a full list keeps its contents.
+    fn push(&mut self, v: T) {
+        if let Some(slot) = self.items.get_mut(self.len) {
+            *slot = v;
+            self.len += 1;
+        }
+    }
+
+    /// Drop the oldest value, moving the rest down.
+    fn pop_front(&mut self) {
+        if self.len > 0 {
+            self.items.copy_within(1..self.len, 0);
+            self.len -= 1;
+        }
+    }
+
+    #[cfg_attr(feature = "std", allow(dead_code))]
+    fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn as_slice(&self) -> &[T] {
+        &self.items[..self.len]
+    }
+}
+
+/// The values held, not the stale ones past them.
+impl<T: Copy + fmt::Debug, const N: usize> fmt::Debug for Buf<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+/// A first-in first-out queue of at most `N` magnitudes.
+#[derive(Clone, Copy)]
+struct Ring<const N: usize> {
+    items: [f32; N],
+    head: usize,
+    len: usize,
+}
+
+impl<const N: usize> Ring<N> {
+    const fn new() -> Self {
+        Self {
+            items: [0.0; N],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Queue `v`; it never fills, see [`TEXTURE_TAIL`].
+    fn push_back(&mut self, v: f32) {
+        if self.len < N {
+            self.items[(self.head + self.len) % N] = v;
+            self.len += 1;
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<f32> {
+        if self.len == 0 {
+            return None;
+        }
+        let v = self.items[self.head];
+        self.head = (self.head + 1) % N;
+        self.len -= 1;
+        Some(v)
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+}
+
+/// The values queued, oldest first.
+impl<const N: usize> fmt::Debug for Ring<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries((0..self.len).map(|i| self.items[(self.head + i) % N]))
+            .finish()
+    }
+}
+
+/// The dot/dash pattern of the character being decoded: one symbol per mark, so it
+/// fits wherever the word's marks fit.
+struct Pattern(List<u8, WORD_MARKS>);
+
+impl Pattern {
+    fn new() -> Self {
+        Self(List::new(0))
+    }
+
+    fn push(&mut self, symbol: u8) {
+        self.0.push(symbol);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn as_str(&self) -> &str {
+        // Only '.' and '-' are ever pushed.
+        core::str::from_utf8(self.0.as_slice()).unwrap_or("")
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::synth::{Keyer, Noise};
@@ -946,9 +1303,125 @@ mod tests {
     }
 
     #[test]
+    fn push_with_hands_over_what_push_returns() {
+        let k = Keyer::new(SR, 600.0, 18.0);
+        let mut audio = k.render("CQ 5NN ..--. K", 300.0);
+        Noise::new(4).add(
+            &mut audio,
+            Noise::sigma_for_snr(k.amplitude, 0.0, SR, 2500.0),
+        );
+        let (mut a, mut b) = (
+            Decoder::new(DecoderConfig::new(SR, 600.0)),
+            Decoder::new(DecoderConfig::new(SR, 600.0)),
+        );
+        let mut by_push = Vec::new();
+        let mut by_callback = Vec::new();
+        for chunk in audio.chunks(317) {
+            by_push.extend(a.push(chunk));
+            b.push_with(chunk, |e| by_callback.push(DecodeEvent::from(e)));
+        }
+        by_push.extend(a.flush());
+        b.flush_with(|e| by_callback.push(DecodeEvent::from(e)));
+        assert!(!by_push.is_empty());
+        assert_eq!(by_push, by_callback);
+    }
+
+    #[test]
+    fn word_of_any_length_stays_one_word() {
+        // 300 E's with character gaps only: 600 runs, more than a word holds without
+        // `std`. With it, as hfnode always had, they are one word.
+        let text = "E".repeat(300);
+        let k = Keyer::new(SR, 600.0, 20.0);
+        let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+        let mut events = d.push(&k.render(&text, 300.0));
+        events.extend(d.push(&vec![0.0; SR as usize * 2]));
+        assert!(!d.has_partial());
+        assert_eq!(events_to_text(&events), text);
+    }
+
+    #[test]
+    fn reset_levels_leaves_a_new_decoder_that_kept_its_speed() {
+        // Whatever was being received, the reset decoder is a new one with the
+        // speed, the mark history and the mixer's phase carried over.
+        let k = Keyer::new(SR, 600.0, 13.0);
+        let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+        let audio = k.render("TEST DE W5XXX K", 300.0);
+        d.push(&audio[..audio.len() * 2 / 3]);
+        assert!(d.has_partial() || d.idle_ms() > 0);
+        let mut fresh = Decoder::new(d.cfg.clone());
+        fresh.dit_ms = d.dit_ms;
+        fresh.char_gap_ms = d.char_gap_ms;
+        fresh.marks = d.marks;
+        fresh.working = (0, d.dit_ms);
+        fresh.phase = d.phase;
+        d.reset_levels();
+        assert_eq!(format!("{d:?}"), format!("{fresh:?}"));
+    }
+
+    #[test]
+    fn upper_median_is_the_middle_of_the_sorted_list() {
+        // Rounded noise, so there are ties, and both zeros, which `total_cmp` orders.
+        let mut noise = Noise::new(7);
+        for len in 1..40 {
+            let mut v = vec![0.0f32; len];
+            noise.add(&mut v, 4.0);
+            let mut v: Vec<f32> = v.iter().map(|x| x.round()).collect();
+            v.push(-0.0);
+            v.push(0.0);
+            let m = upper_median(&v);
+            v.sort_by(f32::total_cmp);
+            assert_eq!(m.to_bits(), v[v.len() / 2].to_bits(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn validate_explains_itself() {
+        let mut c = DecoderConfig::new(0, 600.0);
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "sample_rate 0 must be 8000-192000"
+        );
+        c.sample_rate = 8000;
+        c.min_wpm = 20.0;
+        assert_eq!(
+            c.validate().unwrap_err(),
+            "speeds must satisfy 0 < min_wpm <= initial_wpm <= max_wpm"
+        );
+        assert_eq!(c.check(), Err(ConfigError::Speeds));
+    }
+
+    #[test]
     fn ignores_off_frequency_station() {
         let k = Keyer::new(SR, 1500.0, 18.0);
         let (text, _) = decode(&k.render(MSG, 300.0), DecoderConfig::new(SR, 600.0));
         assert!(text.is_empty(), "{text:?}");
+    }
+}
+
+/// Without `std`: the word cap, the only behaviour that differs from the `std`
+/// build (whose tests above run through this build's arithmetic with
+/// `--cfg cw_force_libm`).
+#[cfg(all(test, not(feature = "std")))]
+mod no_std_tests {
+    use super::*;
+    use crate::synth::Keyer;
+
+    #[test]
+    fn word_longer_than_its_buffer_is_decoded_where_it_stands() {
+        // 300 E's with character gaps only: 600 runs, more than a word holds. The
+        // first 256 come out as a word of their own, the rest after a word gap.
+        const SR: u32 = 8000;
+        let k = Keyer::new(SR, 600.0, 20.0);
+        let mut d = Decoder::new(DecoderConfig::new(SR, 600.0));
+        let mut words = vec![0usize];
+        let mut on_event = |e: Event<'_>| match e {
+            Event::Char('E') => *words.last_mut().unwrap() += 1,
+            Event::WordGap => words.push(0),
+            other => panic!("{other:?}"),
+        };
+        d.push_with(&k.render(&"E".repeat(300), 300.0), &mut on_event);
+        d.push_with(&vec![0.0; SR as usize * 2], &mut on_event);
+        assert!(!d.has_partial());
+        assert_eq!(words, [WORD_RUNS / 2, 300 - WORD_RUNS / 2, 0]);
     }
 }
