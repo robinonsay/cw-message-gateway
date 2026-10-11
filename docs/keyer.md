@@ -1053,7 +1053,7 @@ GP16 ──4.7 kΩ── GND            (the pull-down on the pin side, never on
   about 2 V through a 10 kΩ base resistor would leave about 0.64 V on the base,
   enough to start turning it on.
 - **With a 4.7 kΩ and a 10 kΩ on hand, the 4.7 kΩ is the pull-down, never the
-  10 kΩ:** the RP2350-E9 fix needs 8.2 kΩ or less ("The box" above). The base
+  10 kΩ:** the RP2350-E9 fix needs 8.2 kΩ or less ("Wiring the box" above). The base
   resistor is the other one, 10 kΩ or a second 4.7 kΩ.
 - **Its meter checks.** Take the pins from the data sheet for the number printed on
   it: TO-92 pinouts differ between part numbers.
