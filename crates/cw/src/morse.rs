@@ -97,6 +97,7 @@ mod tests {
 
 /// Length of `text` in Morse units (dit = 1), as keyed: dah 3, element gap 1,
 /// character gap 3, word gap 7. Unsendable characters are skipped.
+#[cfg(feature = "std")]
 pub fn units(text: &str) -> u32 {
     let mut total = 0;
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -117,6 +118,7 @@ pub fn units(text: &str) -> u32 {
 }
 
 /// The part of [`units`] with the key down: dit 1, dah 3, no gaps.
+#[cfg(feature = "std")]
 pub fn mark_units(text: &str) -> u32 {
     text.chars()
         .filter_map(encode_char)
@@ -126,11 +128,12 @@ pub fn mark_units(text: &str) -> u32 {
 }
 
 /// How long `text` takes to key at `wpm` (PARIS timing), in milliseconds.
+#[cfg(feature = "std")]
 pub fn duration_ms(text: &str, wpm: u32) -> u64 {
     units(text) as u64 * 1200 / wpm.max(1) as u64
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod timing_tests {
     use super::*;
 

@@ -41,7 +41,7 @@ project files as `design/spec.md`, not in this repository). Where each part live
 | Grammar `CALL seq code TX/RX/WX`, `OK seq code`, `NO seq code`, `AGN seq code [letter]`, over `K` or `KN` | `crates/protocol` (`parse`). Callsigns, `TX`/`RX`/`WX` and contact names are snapped to the nearest legal token. `OK`, `NO` and `AGN`, sequence numbers and codes must decode exactly. |
 | Read-backs, `SENT`, chunk letters for `AGN` | `crates/protocol/src/reply.rs` |
 | Stop-and-wait ARQ, silence as NACK, idempotent retries (a repeated `OK` recovers a lost result, also after the window has ended) | `crates/hfnode/src/session.rs`; listening on past a window's end in `crates/hfnode/src/node.rs` |
-| CW decoder | `crates/cw` (decoder plus a synthesizer used for tests) |
+| CW decoder | `crates/cw` (decoder plus a synthesizer used for tests; the decoder builds without the standard library or a heap, `default-features = false`, so it can run on a Pico 2) |
 | Inbound compliance filter (redact or drop, never paraphrase) | `crates/hfnode/src/gateway/filter.rs` (Claude API, or a local model through Ollama) |
 | Email, text and iMessage connectors | `crates/hfnode/src/gateway/email.rs` (SMTP out, IMAP in), `google_voice.rs` (texts from a Google Voice number, through the same mailbox), `imessage.rs` (Messages on a Mac), `route.rs` (which one TX uses); see [docs/texting.md](docs/texting.md) |
 | Weather (`WX`) | `crates/hfnode/src/gateway/weather.rs` (api.weather.gov) |
@@ -62,7 +62,8 @@ for what it has to do.
 ```
 crates/
   auth/       codes, verifier, last_seq store
-  cw/         Morse table, decoder, synthesizer (examples/ has decoder experiments)
+  cw/         Morse table, decoder, synthesizer (examples/ has decoder experiments);
+              the decoder and table are no_std with no heap, for a microcontroller too
   protocol/   grammar, fuzzy snapping, replies, chunking, text sanitizing
   civ/        Rig trait, CI-V framing, IC-7300 driver, SimRig,
               mock: a byte-level IC-7300 that answers as the manual's Section 19 says
