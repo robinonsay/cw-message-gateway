@@ -38,8 +38,11 @@ could ([firmware/pico2-decoder/check_pins.py](../firmware/pico2-decoder/check_pi
   wireless chip, and this firmware drives both.
 - A 1 µF capacitor (film or ceramic; an electrolytic with its + side towards the
   Pico), and three 10 kΩ resistors.
-- A lead from the radio's PHONES (or EXT SP) jack: a 3.5 mm stereo plug for most
-  radios. Check your radio's manual.
+- A lead from the radio's PHONES jack, never EXT SP: a speaker output gives watts,
+  not a headphone level, and its sleeve may not be ground. On the IC-7300 and most
+  radios it is a 3.5 mm stereo plug: tip and sleeve only, ring unconnected and
+  insulated. Never a mono plug or a mono adapter, which shorts the right channel
+  to ground. Check your radio's manual.
 - A USB cable.
 
 ## Wiring
