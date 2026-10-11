@@ -18,6 +18,8 @@
 //!   core 1: the SIO (whose `GPIO_OUT_SET` would close the key), IO_BANK0,
 //!   PADS_BANK0, PWM, USB, the watchdog, RESETS, CLOCKS and the rest of SRAM,
 //!   where core 0's memory is.
+//! - Its only coprocessor is the FPU ([`fpu_only`]): the RP2350's GPIO coprocessor,
+//!   which drives pins with no store the MPU could stop, is off on core 1.
 //! - Then it drops to unprivileged mode ([`drop_privilege`]), so that no stray
 //!   write can reach the MPU's own registers, nor any in the Private Peripheral
 //!   Bus, which the MPU does not cover.
@@ -111,6 +113,7 @@ pub fn main(_fifo: Fifo) -> ! {
     };
     // SAFETY: core 1 is privileged until `drop_privilege`, and runs nothing else.
     unsafe {
+        fpu_only();
         mpu::protect(&regions());
         drop_privilege();
     }
@@ -149,6 +152,11 @@ impl Hardware for Board {
 
     fn link_epoch(&self) -> u32 {
         LINK.0.epoch.load(Ordering::Acquire)
+    }
+
+    /// The key or the PTT down, as core 0 last drove them.
+    fn keyed(&self) -> bool {
+        LINK.0.keyed.load(Ordering::Acquire)
     }
 
     fn usb_read(&mut self, buf: &mut [u8]) -> usize {
@@ -225,6 +233,27 @@ fn regions() -> [mpu::Region; 7] {
         Region::new(DMA, Access::Read, Memory::Device),
         Region::new(TIMER, Access::Read, Memory::Device),
     ]
+}
+
+/// Core 1's coprocessors: the FPU only. `CPACR` (Armv8-M ARM, D1.2.14; each core
+/// has its own) to `CP10` and `CP11` full access, as rustos's `core1_run` set them,
+/// and every other coprocessor off, whatever the bootrom left: coprocessor 0, the
+/// RP2350's GPIO coprocessor, sets and clears GPIO_OUT's bits with no store at all
+/// (RP2350 datasheet §3.6.1), so the MPU would not stop it. Any coprocessor
+/// instruction for it then faults ("Before accessing a coprocessor from Secure code,
+/// that coprocessor must first be enabled by setting the corresponding bit in the
+/// CPACR", §3.6).
+///
+/// # Safety
+///
+/// Core 1, privileged.
+unsafe fn fpu_only() {
+    const CPACR: *mut u32 = 0xe000_ed88 as *mut u32;
+    const CP10_CP11_FULL: u32 = (0b11 << 20) | (0b11 << 22);
+    unsafe {
+        CPACR.write_volatile(CP10_CP11_FULL);
+        core::arch::asm!("dsb", "isb", options(nostack, preserves_flags));
+    }
 }
 
 /// Thread mode unprivileged from here on: `CONTROL.nPRIV` = 1 (Armv8-M ARM, D1.2.13

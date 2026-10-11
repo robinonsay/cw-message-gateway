@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Show that check_core1.py fails real builds of this firmware whose core 1 could
-reach a pin: build the committed firmware four times, each with core 1's code
+reach a pin: build the committed firmware six times, each with core 1's code
 changed in one way, and check that check_core1.py rejects every one.
 
 1. `TEST CORE1 FAULT` stores to GPIO_OUT_SET instead of GPIO_OUT_CLR: the key down.
 2. Core 1's board writes GP16's pad on every pass.
 3. Core 1 stores to the SIO at an offset from a byte the host sent.
 4. Core 1 writes the PWM's tone slice.
+5. Core 1 leaves the GPIO coprocessor on (CPACR's CP0 bits set).
+6. Core 1 sets the key through the GPIO coprocessor, with no store.
 
 It builds what is committed (`git archive` of COMMIT, default HEAD, unpacked in a
 temporary directory), never the working tree, and leaves the checkout as it was.
@@ -22,6 +24,7 @@ import tempfile
 
 FAULT = "const SIO_GPIO_OUT_CLR: *mut u32 = 0xd000_0020 as *mut u32;"
 HOLD = "    fn hold_outputs_low(&mut self) {}"
+CPACR = "    const CP10_CP11_FULL: u32 = (0b11 << 20) | (0b11 << 22);"
 READ = "    fn usb_read(&mut self, buf: &mut [u8]) -> usize {\n        LINK.0.to_core1.read(buf)\n    }"
 MUTANTS = {
     "TEST CORE1 FAULT sets the key": [(FAULT, FAULT.replace("0xd000_0020", "0xd000_0018"))],
@@ -41,6 +44,11 @@ MUTANTS = {
     "the PWM's tone slice": [
         (HOLD, "    fn hold_outputs_low(&mut self) {\n"
                "        unsafe { (0x400a_8020 as *mut u32).write_volatile(0x8000_8000) };\n    }")
+    ],
+    "the GPIO coprocessor left on": [(CPACR, CPACR.replace(";", " | 0b11;"))],
+    "the key through the GPIO coprocessor": [
+        (HOLD, "    fn hold_outputs_low(&mut self) {\n"
+               "        unsafe { core::arch::asm!(\"mcr p0, #4, {0}, c0, c0\", in(reg) 1u32 << 16) };\n    }")
     ],
 }
 

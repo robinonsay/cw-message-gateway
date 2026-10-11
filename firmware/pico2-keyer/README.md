@@ -33,10 +33,11 @@ takes over USB are in [docs/keyer-protocol.md](../../docs/keyer-protocol.md).
 
 - `check_core1.py`: reads the code core 1 runs in the built ELF and checks that
   none of it stores to a pin, a pad, the PWM, USB, the watchdog or anything of core
-  0's but the memory the two cores share, with the analysis of the decoder box's
-  `check_pins.py` (`firmware/pico2-decoder`). `--self-test` shows it failing
-  made-up images; `mutants_core1.py` shows it failing four real builds changed to
-  reach a pin (a few minutes; CI does not run it):
+  0's but the memory the two cores share, and that it uses no coprocessor but the
+  FPU (the RP2350's GPIO coprocessor drives pins with no store), with the analysis
+  of the decoder box's `check_pins.py` (`firmware/pico2-decoder`). `--self-test`
+  shows it failing made-up images; `mutants_core1.py` shows it failing six real
+  builds changed to reach a pin (a few minutes; CI does not run it):
 
   ```sh
   python3 check_core1.py --self-test

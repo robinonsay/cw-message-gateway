@@ -32,7 +32,11 @@ In core 1's code:
 2. No store goes at an address not known here into the 64 kB around any of those
    blocks, or into the Private Peripheral Bus, so that an address computed at run
    time cannot get round rule 1.
-3. Core 1's code does not include core 0's: the keyer's `main` and its control loop
+3. No coprocessor instruction but the FPU's (check_pins.py's rule 6): the GPIO
+   coprocessor, coprocessor 0, drives GPIO_OUT with no store. A store to CPACR
+   (allowed by rule 1) is rustos's enable_fpu, or a value known here with
+   coprocessor 0's bits clear (check_pins.py's rule 7).
+4. Core 1's code does not include core 0's: the keyer's `main` and its control loop
    are not reachable from it. If they were, the reachability above would have
    failed to tell the two apart, and the check fails rather than pass.
 
@@ -63,6 +67,7 @@ SRAM = range(0x2000_0000, 0x2008_2000)
 SYSTEM = {0xE000_ED88: "CPACR", 0xE000_ED94: "MPU_CTRL", 0xE000_ED98: "MPU_RNR",
           0xE000_ED9C: "MPU_RBAR", 0xE000_EDA0: "MPU_RLAR", 0xE000_EDC0: "MPU_MAIR0"}
 ADC_FCS = 0x400A_0008
+CPACR = 0xE000_ED88
 GPIO_OUT_CLR = 0xD000_0020
 OPEN_BITS = (1 << 16) | (1 << 17)
 # The blocks (address >> 16) no store may go into at an address not known: the SIO
@@ -71,7 +76,8 @@ OPEN_BITS = (1 << 16) | (1 << 17)
 WATCHED = {0xD000: "the SIO", 0xD001: "the SIO", 0xD002: "the SIO", 0xD003: "the SIO",
            0x4001: "CLOCKS' 64 kB", 0x4002: "IO_BANK0's 64 kB", 0x4003: "PADS_BANK0's 64 kB",
            0x400A: "the ADC's and PWM's 64 kB", 0x400D: "the watchdog's 64 kB",
-           0x5010: "USB's 64 kB", 0x5011: "USB's 64 kB", 0xE000: "the Private Peripheral Bus"}
+           0x5010: "USB's 64 kB", 0x5011: "USB's 64 kB", 0xE000: "the Private Peripheral Bus",
+           0xE002: "the Private Peripheral Bus's Non-secure mirror"}
 ROOTS = [r"9multicore11core1_start$", r"9multicore9core1_run$", r"11pico2_keyer5core14main$"]
 # Core 0's: the keyer's main (rustos's __rustos_main calls it) and its control loop.
 CORE0 = [r"11pico2_keyer4main$", r"__rustos_main$", r"7control.*Control4pass"]
@@ -148,8 +154,10 @@ def core1_code(image: cp.Image, fns: dict) -> tuple[set[str], list[str]]:
     return seen, failures
 
 
-def check_store(f: cp.Function, s: dict, i: cp.Insn, where: str, failures: list) -> int:
-    """Rules 1 and 2 at one store: 1 if it can go to an address not known, else 0."""
+def check_store(f: cp.Function, k: int, i: cp.Insn, where: str, failures: list) -> int:
+    """Rules 1-3 at the store `i`, the `k`th instruction of `f`: 1 if it can go to an
+    address not known, else 0."""
+    s = f.states.get(k, {})
     b, ops = i.base, i.ops
     if b.startswith(("stm", "vstm")):
         if ops[0].rstrip("!") == "sp":
@@ -177,6 +185,10 @@ def check_store(f: cp.Function, s: dict, i: cp.Insn, where: str, failures: list)
     unknown = 0
     for a, value in zip(sorted(every, key=str), values):
         if isinstance(a, int):
+            if a & ~3 == CPACR and not (b == "str" and cp.enable_fpu(f, k, a)) and not (
+                    value and all(isinstance(x, int) and x & cp.CP0 == 0 for x in value)):
+                failures.append(f"a store to CPACR that could turn the GPIO coprocessor on: {where}")
+                continue
             if a in SRAM or a & ~3 in SYSTEM or a & ~3 == ADC_FCS:
                 continue
             if a & ~3 == GPIO_OUT_CLR and value and all(
@@ -205,8 +217,11 @@ def run(image: cp.Image) -> list[str]:
                 failures.append(f"an instruction llvm-objdump cannot decode: {where}")
             elif i.base.startswith("ldr") and re.search(r"\[pc\b", i.args):
                 failures.append(f"a load from a literal pool, which this check does not follow: {where}")
+            elif cp.COPROCESSOR.fullmatch(i.base) and not (i.ops and i.ops[0] in cp.FPU_COPROCESSORS):
+                failures.append(f"a coprocessor instruction, which can drive GPIO_OUT with no store "
+                                f"(coprocessor 0): {where}")
             elif i.base.startswith(("str", "stm", "vst")):
-                unknown += check_store(f, f.states.get(k, {}), i, where, failures)
+                unknown += check_store(f, k, i, where, failures)
     print(f"core 1's code: {len(code)} functions")
     print(f"{unknown} stores in it through pointers derived from no watched address "
           "(the stack, buffers, the rings), not checked")
@@ -332,6 +347,25 @@ def self_test() -> None:
     passes(image("b @handler@\n", extra={"handler": "movs r0, #0x18\nmovt r0, #0xd000\nstr r1, [r0]\nb 0x0\n"}))
     fails(image("bl @main@\n"), "core 0's")
     fails(image("<unknown>\n"), "cannot decode")
+    # The GPIO coprocessor (rule 3): any coprocessor instruction but the FPU's fails.
+    for insn in ("mcr p0, #0x1, r0, c0, c0", "mcr2 p0, #0x0, r0, c0, c0",
+                 "mcrr p0, #0x0, r0, r1, c0", "mrc p0, #0x0, r0, c0, c0",
+                 "it ne\nmcrne p0, #0x1, r0, c0, c0"):
+        fails(image(insn + "\n"), "a coprocessor instruction")
+    passes(image("vmov s0, r1\nvadd.f32 s0, s0, s1\nmcr p10, #0x7, r0, c1, c0, #0x0\n"))
+    # CPACR (rule 3): rustos's read-modify-write and core1.rs's known value pass;
+    # a value with coprocessor 0's bits, or one not known, fails, and so does its
+    # Non-secure mirror.
+    cpacr = "movw r0, #0xed88\nmovt r0, #0xe000\n"
+    passes(image(cpacr + "ldr r1, [r0]\norr r1, r1, #0xf00000\nstr r1, [r0]\n"))
+    passes(image(cpacr + "mov.w r1, #0xf00000\nstr r1, [r0]\n"))
+    cpacr_fail = "a store to CPACR that could turn the GPIO coprocessor on"
+    fails(image(cpacr + "movs r1, #0x3\nstr r1, [r0]\n"), cpacr_fail)
+    fails(image(cpacr + "ldr r1, [r2]\nstr r1, [r0]\n"), cpacr_fail)
+    fails(image(cpacr + "ldr r1, [r0]\norr r1, r1, #0xf00003\nstr r1, [r0]\n"), cpacr_fail)
+    fails(image(cpacr + "ldr r1, [r0]\norr r1, r1, #0xf00000\nadds r1, #0x1\nstr r1, [r0]\n"),
+          cpacr_fail)
+    fails(image("movw r0, #0xed88\nmovt r0, #0xe002\nmov.w r1, #0xf00000\nstr r1, [r0]\n"), cannot)
     print("self-test passed")
 
 
