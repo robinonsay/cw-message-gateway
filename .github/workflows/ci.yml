@@ -32,6 +32,20 @@ jobs:
       - name: cargo test
         run: cargo test --all
 
+      # The decoder also runs on the Pico 2 decoder box: without the standard library
+      # or a heap, and with libm's arithmetic in place of the system's. Build it that
+      # way for the RP2350, and run the decoder's tests through libm's arithmetic.
+      - name: cw decoder without std (RP2350)
+        run: |
+          rustup target add thumbv8m.main-none-eabihf
+          cargo clippy -p cw --no-default-features --target thumbv8m.main-none-eabihf -- -D warnings
+          cargo build -p cw --no-default-features --target thumbv8m.main-none-eabihf
+
+      - name: cw decoder tests with libm's arithmetic, and without std
+        run: |
+          RUSTFLAGS="--cfg cw_force_libm" cargo test -p cw
+          cargo test -p cw --no-default-features
+
   # The node also runs on macOS (Core Audio) and Windows (WASAPI); see
   # docs/macos-setup.md and docs/windows-setup.md. No radio or sound card here: the
   # tests and the self-test drive the mock IC-7300, and `hfnode devices` checks the
