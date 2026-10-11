@@ -22,18 +22,21 @@
 //! | Command | Reply |
 //! |---|---|
 //! | `HELLO` | `OK HELLO <version> <run limit s> <link timeout ms> <key-down limit ms> <rest ms> <duty budget s> <ptt limit s> <uptime ms> <boot> <build> <name>` |
-//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms> <ptt> <line>`; `<trip>` is `NONE`, `DOWN`, `PIN`, `SLOW`, `CLOCK`, `WATCHDOG`, `PTT` or `LINE` |
+//! | `STATUS` | `OK STATUS <key> <run> <ended> <trip> <rest left ms> <budget ms> <ptt> <line>`; `<trip>` is `NONE`, `DOWN`, `PIN`, `SLOW`, `CLOCK`, `WATCHDOG`, `PTT`, `LINE` or `CORE1` |
 //! | `CW <wpm> <text>` | `OK CW`, keying from that moment |
 //! | `MCW <wpm> <text>` | `OK MCW`, the PTT closed from that moment |
 //! | `STOP` | `OK STOP` |
-//! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG`, `TEST STUCK` or `TEST HOLD` within 2 s is taken |
+//! | `TEST ARM` | `OK TEST ARM` (bring-up only): the next `TEST HANG`, `TEST STUCK`, `TEST HOLD`, `TEST CORE1 HANG` or `TEST CORE1 FAULT` within 2 s is taken |
 //! | `TEST HANG` | `OK TEST HANG` (bring-up only) |
 //! | `TEST STUCK` | `OK TEST STUCK` (bring-up only) |
 //! | `TEST HOLD` | `OK TEST HOLD` (host tests only; an `MCW` run) |
+//! | `TEST CORE1 HANG` | `OK TEST CORE1 HANG` (bring-up only): at the next element, the decoder's core stops ([`Keyer::core1_test`]) |
+//! | `TEST CORE1 FAULT` | `OK TEST CORE1 FAULT` (bring-up only): at the next element, the decoder's core makes a store its memory protection must refuse |
 //!
 //! Errors are `ERR <command> <code>`: `CW` and `MCW` with `TRIP`, `RUN`, `WPM`,
 //! `LEN`, `CHAR`, `LIMIT`, `LINE`, `REST` or `DUTY`; `TEST` with `RUN`, `ARM` or
-//! `UNKNOWN`; anything else `ERR <word> UNKNOWN`.
+//! `UNKNOWN`; anything else `ERR <word> UNKNOWN`. `RX` lines, for the decoder on
+//! the box's second core, never reach the keyer ([`crate::control`]).
 
 use crate::frame::{self, Line};
 use crate::morse::{self, Segments, TextError};
@@ -81,7 +84,8 @@ pub enum Boot {
     Power,
     /// Its hardware watchdog reset it: the control loop stalled, `TEST HANG`
     /// stopped it, or it stopped feeding the watchdog on purpose after a `CLOCK`
-    /// trip. The box comes up tripped (`WATCHDOG`, or the trip it saved).
+    /// or `CORE1` trip. The box comes up tripped (`WATCHDOG`, or the trip it
+    /// saved).
     Watchdog,
     Other,
 }
@@ -187,10 +191,16 @@ pub enum Trip {
     /// The PTT line still read low [`mcw::LINE_MS`] after the box opened the PTT:
     /// something else is holding it, and the radio may still be transmitting.
     Line,
+    /// The decoder on the processor's second core faulted, panicked, or stopped
+    /// moving its heartbeat for [`limits::CORE1_MS`] ([`crate::control`]). The box
+    /// stops feeding its watchdog, which resets the chip.
+    Core1,
 }
 
 impl Trip {
-    const ALL: [Self; 8] = [
+    /// In the order [`Saved`] numbers them: a new trip goes on the end, so that an
+    /// older trip's number never changes.
+    const ALL: [Self; 9] = [
         Self::None,
         Self::Down,
         Self::Pin,
@@ -199,6 +209,7 @@ impl Trip {
         Self::Watchdog,
         Self::Ptt,
         Self::Line,
+        Self::Core1,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -211,6 +222,7 @@ impl Trip {
             Self::Watchdog => "WATCHDOG",
             Self::Ptt => "PTT",
             Self::Line => "LINE",
+            Self::Core1 => "CORE1",
         }
     }
 
@@ -242,11 +254,14 @@ impl Saved {
     /// The top half of the first word: what marks the words as the box's.
     const MAGIC: u32 = 0x4b59;
 
-    /// The two words: `MAGIC`, the flags (the trip's index, the key in bit 3)
-    /// and a check byte in the first; the budget in the second.
+    /// The two words: `MAGIC`, the flags and a check byte in the first; the
+    /// budget in the second. The flags: the trip's index in bits 0-2 and its
+    /// fourth bit in bit 4, the key in bit 3. So the first eight trips are saved
+    /// exactly as protocol 4's firmware saved them, and its words read the same
+    /// here.
     pub fn encode(&self) -> [u32; 2] {
         let trip = Trip::ALL.iter().position(|&t| t == self.trip).unwrap_or(0) as u32;
-        let flags = trip | (u32::from(self.key) << 3);
+        let flags = (trip & 0x7) | (u32::from(self.key) << 3) | ((trip >> 3) << 4);
         let budget = self.budget as u32;
         let head = (Self::MAGIC << 16) | (flags << 8);
         [head | u32::from(Self::check(head, budget)), budget]
@@ -261,11 +276,12 @@ impl Saved {
             return None;
         }
         let flags = (head >> 8) & 0xff;
-        if flags & !0xf != 0 {
+        if flags & !0x1f != 0 {
             return None;
         }
+        let trip = (flags & 0x7) | ((flags >> 4) << 3);
         Some(Self {
-            trip: *Trip::ALL.get((flags & 0x7) as usize)?,
+            trip: *Trip::ALL.get(trip as usize)?,
             key: flags & 0x8 != 0,
             budget: budget as i32,
         })
@@ -314,6 +330,28 @@ struct Run {
     stuck: bool,
     /// `TEST HOLD`: the PTT stays down after the text.
     hold: bool,
+}
+
+/// A bring-up test of the decoder on the processor's second core (`TEST CORE1
+/// HANG`, `TEST CORE1 FAULT`): what the firmware has core 1 do, once the keyer
+/// hands it over ([`Keyer::core1_test`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Core1Test {
+    /// Core 1 stops its loop, and so its heartbeat, for good.
+    Hang,
+    /// Core 1 makes one store that its memory protection must refuse, so that its
+    /// fault handler runs. The store is one that, if it went through, would only
+    /// open the key.
+    Fault,
+}
+
+impl Core1Test {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hang => "HANG",
+            Self::Fault => "FAULT",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +409,10 @@ pub struct Keyer {
     ended: Ended,
     trip: Trip,
     hang: Hang,
+    /// `TEST CORE1 HANG` or `TEST CORE1 FAULT` taken, for the next element.
+    core1_pending: Option<Core1Test>,
+    /// Due: for the firmware to take ([`Keyer::core1_test`]).
+    core1_due: Option<Core1Test>,
     now: u64,
 }
 
@@ -408,6 +450,8 @@ impl Keyer {
                 _ => Trip::None,
             },
             hang: Hang::No,
+            core1_pending: None,
+            core1_due: None,
             now,
         }
     }
@@ -496,6 +540,12 @@ impl Keyer {
     /// so stop feeding the watchdog) with its outputs as they are.
     pub fn hung(&self) -> bool {
         self.hang == Hang::Now
+    }
+
+    /// `TEST CORE1 HANG` or `TEST CORE1 FAULT` has come due, with an element on:
+    /// the firmware has core 1 do it now. Each test is handed over once.
+    pub fn core1_test(&mut self) -> Option<Core1Test> {
+        self.core1_due.take()
     }
 
     /// The PTT line reads `high` now. Call it before each poll with the level read
@@ -666,6 +716,9 @@ impl Keyer {
         if active && self.hang == Hang::Pending {
             self.hang = Hang::Now;
         }
+        if active && self.core1_pending.is_some() {
+            self.core1_due = self.core1_pending.take();
+        }
     }
 
     fn set_ptt(&mut self, at: u64, down: bool, on: &mut impl FnMut(u64, Pin, bool)) {
@@ -724,6 +777,7 @@ impl Keyer {
         if self.hang == Hang::Pending {
             self.hang = Hang::No;
         }
+        self.core1_pending = None;
         // The element first, then the PTT, as a run ends.
         self.set_elem(at, false, on);
         self.run = None;
@@ -829,7 +883,9 @@ impl Keyer {
                 self.armed_until = Some(now + u64::from(limits::ARM_MS));
                 frame::encode(id, format_args!("OK TEST ARM"))
             }
-            (_, "TEST HANG" | "TEST STUCK") if self.run.is_none() => {
+            (_, "TEST HANG" | "TEST STUCK" | "TEST CORE1 HANG" | "TEST CORE1 FAULT")
+                if self.run.is_none() =>
+            {
                 frame::encode(id, format_args!("ERR TEST RUN"))
             }
             (_, "TEST HOLD") if !self.run.as_ref().is_some_and(|r| r.mcw) => {
@@ -837,9 +893,10 @@ impl Keyer {
             }
             // A test is taken only just after `TEST ARM`, and once: a stray line
             // (a terminal on the port, a script) cannot start one.
-            (_, "TEST HANG" | "TEST STUCK" | "TEST HOLD")
-                if self.armed_until.take().is_none_or(|until| now > until) =>
-            {
+            (
+                _,
+                "TEST HANG" | "TEST STUCK" | "TEST HOLD" | "TEST CORE1 HANG" | "TEST CORE1 FAULT",
+            ) if self.armed_until.take().is_none_or(|until| now > until) => {
                 frame::encode(id, format_args!("ERR TEST ARM"))
             }
             (_, "TEST HANG") => {
@@ -860,6 +917,19 @@ impl Keyer {
                     r.hold = true;
                 }
                 frame::encode(id, format_args!("OK TEST HOLD"))
+            }
+            (_, "TEST CORE1 HANG" | "TEST CORE1 FAULT") => {
+                let test = if body.ends_with("HANG") {
+                    Core1Test::Hang
+                } else {
+                    Core1Test::Fault
+                };
+                if self.key || self.tone {
+                    self.core1_due = Some(test);
+                } else {
+                    self.core1_pending = Some(test);
+                }
+                frame::encode(id, format_args!("OK {body}"))
             }
             ("TEST", _) => frame::encode(id, format_args!("ERR TEST UNKNOWN")),
             _ => {

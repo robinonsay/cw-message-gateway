@@ -567,19 +567,79 @@ pub fn linktest(st: &mut Station<KeyerRig>, id: &str, state_dir: &Path) -> Resul
 /// held down, and the rig lock is free between each look at the box: the operator's
 /// Ctrl-C must get through while the key is down (the safety audit's KB-3).
 pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<TestReport> {
-    let (_, mut notes) = identify_first(st, id)?;
-    let rig = st.rig();
+    let (_, notes) = identify_first(st, id)?;
     let watchdog = Duration::from_millis(keyer_core::limits::WATCHDOG_MS.into());
-    let limit = watchdog + Duration::from_millis(250) + test_allowance(&lock(&rig));
+    let hang = Command::TestHang;
+    reset_test(
+        st,
+        notes,
+        &hang,
+        watchdog,
+        Trip::Watchdog,
+        MIN_TEST_TONE,
+        scale,
+    )
+}
+
+/// `hfnode keyer core1test`, for a box of protocol 5 (the decoder on its second
+/// core): mid-run with its key down, the decoder's core stops (`TEST CORE1 HANG`)
+/// or makes a store its memory protection must refuse (`TEST CORE1 FAULT`). The
+/// box's watch on that core must open the key within
+/// [`keyer_core::limits::CORE1_MS`] (at once for the fault, whose handler opens it
+/// itself), trip (`CORE1`) and stop feeding its watchdog, so that it comes back
+/// from a watchdog reset still tripped `CORE1`, keying nothing until it is plugged
+/// in again. Identifies first, as `hangtest` does.
+pub fn core1test(
+    st: &mut Station<KeyerRig>,
+    id: &str,
+    fault: bool,
+    scale: f32,
+) -> Result<TestReport> {
+    let version = lock(&st.rig()).hello().version;
+    if version < 5 {
+        bail!(
+            "the box speaks keyer protocol {version}: it has no decoder core to test (flash it \
+             with the one-Pico firmware first)"
+        );
+    }
+    let (_, notes) = identify_first(st, id)?;
+    let cmd = if fault {
+        Command::TestCore1Fault
+    } else {
+        Command::TestCore1Hang
+    };
+    let watch = Duration::from_millis(keyer_core::limits::CORE1_MS.into());
+    // The key is down for at most the watch's 0.1 s (for the fault, a pass of the
+    // loop): too short for the sidetone to show it as the other tests do. The
+    // identification just heard shows the audio works.
+    reset_test(st, notes, &cmd, watch, Trip::Core1, Duration::ZERO, scale)
+}
+
+/// A test that must end with the box resetting by its watchdog: `cmd` sent
+/// mid-run, the key open within `opens` (plus the audio's margin and, for a
+/// handheld, its lead), and the box back as a watchdog restart tripped `trip`;
+/// the audio must have shown the radio on the air for at least `min_tone`.
+fn reset_test(
+    st: &mut Station<KeyerRig>,
+    mut notes: Vec<String>,
+    cmd: &Command,
+    opens: Duration,
+    trip: Trip,
+    min_tone: Duration,
+    scale: f32,
+) -> Result<TestReport> {
+    let rig = st.rig();
+    let limit = opens + Duration::from_millis(250) + test_allowance(&lock(&rig));
     let m = lock(&rig).monitor();
     rest(st, Duration::from_secs(2))?;
     let t0 = Instant::now();
     lock(&rig).send_cw(TEST_TEXT)?;
     thread::sleep(Duration::from_millis(100).div_f32(scale));
     // A box that hangs before its reply gets out has still taken the command.
-    if let Err(e) = lock(&rig).test(&Command::TestHang) {
+    if let Err(e) = lock(&rig).test(cmd) {
         notes.push(format!(
-            "no reply to TEST HANG ({e}): it may still have taken it"
+            "no reply to {} ({e}): it may still have taken it",
+            cmd.body()
         ));
     }
     // The node finds out: the run ended early, the box came back from its reset.
@@ -603,8 +663,9 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
         if Instant::now() >= end {
             notes.push(STOP_NOW.into());
             bail!(
-                "the radio still reads transmitting {:.0} s after the hang. {STOP_NOW}",
-                TEST_SPAN.as_secs_f32()
+                "the radio still reads transmitting {:.0} s after {}. {STOP_NOW}",
+                TEST_SPAN.as_secs_f32(),
+                cmd.body()
             );
         }
         thread::sleep(Duration::from_millis(50).div_f32(scale));
@@ -629,26 +690,27 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
     if !restarted {
         notes.push("the box did not report a watchdog restart".into());
     }
-    let trip = if hello.is_some() {
+    let got = if hello.is_some() {
         lock(&rig).status().ok().map(|st| st.trip)
     } else {
         None
     };
-    let tripped = trip == Some(Trip::Watchdog);
+    let tripped = got == Some(trip);
     if tripped {
-        notes.push(
-            "the box came back from its watchdog reset tripped (WATCHDOG), as it must: unplug it \
-             and plug it in again before keying"
-                .into(),
-        );
+        notes.push(format!(
+            "the box came back from its watchdog reset tripped ({}), as it must: unplug it \
+             and plug it in again before keying",
+            trip.as_str()
+        ));
     } else {
         notes.push(format!(
-            "the box came back from its reset {}, not tripped WATCHDOG: after its watchdog fires \
+            "the box came back from its reset {}, not tripped {}: after its watchdog fires \
              it must key nothing until it is plugged in again",
-            trip.map_or("unread", |t| t.as_str())
+            got.map_or("unread", |t| t.as_str()),
+            trip.as_str()
         ));
     }
-    let measured = check_measured(longest, span, lock(&rig).output(), &mut notes);
+    let measured = check_measured(longest, min_tone, span, lock(&rig).output(), &mut notes);
     Ok(TestReport {
         longest,
         limit,
@@ -660,17 +722,18 @@ pub fn hangtest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Test
 /// Whether the test measured the key down at all, and within its span.
 fn check_measured(
     longest: Duration,
+    min: Duration,
     span: Duration,
     output: Output,
     notes: &mut Vec<String>,
 ) -> bool {
-    if longest < MIN_TEST_TONE {
+    if longest < min {
         notes.push(format!(
             "nothing measured: the longest the audio showed the radio on the air (its sidetone, or \
              a handheld's receive noise gone) was {} ms, under the {} ms a key held down must \
              give; check the audio ({}) and run the test again",
             longest.as_millis(),
-            MIN_TEST_TONE.as_millis(),
+            min.as_millis(),
             audio_check(output)
         ));
         return false;
@@ -738,7 +801,13 @@ pub fn stucktest(st: &mut Station<KeyerRig>, id: &str, scale: f32) -> Result<Tes
     } else {
         notes.push("the box did not trip".into());
     }
-    let measured = check_measured(longest, span, lock(&rig).output(), &mut notes);
+    let measured = check_measured(
+        longest,
+        MIN_TEST_TONE,
+        span,
+        lock(&rig).output(),
+        &mut notes,
+    );
     Ok(TestReport {
         longest,
         limit,

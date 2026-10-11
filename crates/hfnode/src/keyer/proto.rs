@@ -33,6 +33,13 @@ pub enum Command {
     /// Tests only: hold the PTT after an `MCW` run's text, so that the box's PTT
     /// limit must open it (and trip the box).
     TestHold,
+    /// Bring-up only (protocol 5): stop the decoder's core at the next element, so
+    /// that the box's watch on it must open the key, trip it (`CORE1`) and let its
+    /// watchdog reset it.
+    TestCore1Hang,
+    /// Bring-up only (protocol 5): have the decoder's core make a store its memory
+    /// protection must refuse, so that its fault handler runs, with the same end.
+    TestCore1Fault,
 }
 
 impl Command {
@@ -48,6 +55,8 @@ impl Command {
             Self::TestHang => "TEST HANG".into(),
             Self::TestStuck => "TEST STUCK".into(),
             Self::TestHold => "TEST HOLD".into(),
+            Self::TestCore1Hang => "TEST CORE1 HANG".into(),
+            Self::TestCore1Fault => "TEST CORE1 FAULT".into(),
         }
     }
 
@@ -59,7 +68,12 @@ impl Command {
             Self::Stop => "STOP",
             Self::Cw { .. } => "CW",
             Self::Mcw { .. } => "MCW",
-            Self::TestArm | Self::TestHang | Self::TestStuck | Self::TestHold => "TEST",
+            Self::TestArm
+            | Self::TestHang
+            | Self::TestStuck
+            | Self::TestHold
+            | Self::TestCore1Hang
+            | Self::TestCore1Fault => "TEST",
         }
     }
 
@@ -95,6 +109,8 @@ pub fn answers(cmd: &Command, body: &str) -> bool {
         ("OK", Command::TestHang) => body == "OK TEST HANG",
         ("OK", Command::TestStuck) => body == "OK TEST STUCK",
         ("OK", Command::TestHold) => body == "OK TEST HOLD",
+        ("OK", Command::TestCore1Hang) => body == "OK TEST CORE1 HANG",
+        ("OK", Command::TestCore1Fault) => body == "OK TEST CORE1 FAULT",
         ("OK" | "ERR", _) => name == cmd.name(),
         _ => false,
     }
@@ -139,6 +155,9 @@ pub fn explain(cmd: &Command, code: &str) -> Option<&'static str> {
         }
         ("TEST", "RUN") => "only during a run",
         ("TEST", "ARM") => "a test is taken only just after TEST ARM",
+        ("TEST", "UNKNOWN") => {
+            "the box does not know this test: a box of protocol 4 has no decoder core to test"
+        }
         (_, "UNKNOWN") => "the box does not know this command (older firmware?)",
         _ => return None,
     })

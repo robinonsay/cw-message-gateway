@@ -1,6 +1,7 @@
 use super::*;
 use crate::frame::{decode, encode};
 use crate::keyer::{Boot, Ended, Limits, Saved};
+use std::cell::Cell;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,14 @@ enum Call {
     Led(bool),
     Save,
     Feed,
+    Room,
+    Beat,
+    Fault,
+    Core1Epoch,
+    Core1Keyed,
+    Core1Send,
+    Core1Read,
+    Core1Test,
 }
 
 /// The test board's processor count: a thousand a millisecond.
@@ -46,6 +55,32 @@ struct Board {
     held: bool,
     /// The box's PTT does not reach the radio: the line stays high.
     open: bool,
+    /// A USB transmit buffer of this many bytes, which the host empties only when
+    /// told to ([`Board::host_reads`]); `None`, every byte reaches the host at once.
+    cap: Option<usize>,
+    /// Bytes in that buffer, not read by the host yet.
+    queued: VecDeque<u8>,
+    /// `usb_room` says this much more than there is.
+    room_lies: usize,
+    /// Core 1 was started.
+    launched: bool,
+    /// Core 1's heartbeat, moved on every read while `beating`.
+    beat: Cell<u32>,
+    beating: bool,
+    /// Core 1's fault flag.
+    fault: bool,
+    /// The epoch core 1 was last told.
+    core1_epoch: u32,
+    /// Whether core 1 was last told the key or the PTT is down.
+    core1_keyed: bool,
+    /// Lines queued for core 1, each with its newline.
+    to_core1: Vec<Vec<u8>>,
+    /// Core 1's ring from core 0 is full.
+    core1_full: bool,
+    /// Bytes core 1 has sent, not read yet.
+    from_core1: VecDeque<u8>,
+    /// Bring-up tests handed to core 1.
+    core1_tests: Vec<Core1Test>,
     calls: std::cell::RefCell<Vec<Call>>,
 }
 
@@ -65,8 +100,47 @@ impl Board {
             led: false,
             held: false,
             open: false,
+            cap: None,
+            queued: VecDeque::new(),
+            room_lies: 0,
+            launched: true,
+            beat: Cell::new(0),
+            beating: true,
+            fault: false,
+            core1_epoch: 0,
+            core1_keyed: false,
+            to_core1: Vec::new(),
+            core1_full: false,
+            from_core1: VecDeque::new(),
+            core1_tests: Vec::new(),
             calls: Default::default(),
         }
+    }
+
+    /// The host reads up to `n` bytes of the USB transmit buffer.
+    fn host_reads(&mut self, n: usize) {
+        for _ in 0..n.min(self.queued.len()) {
+            let b = self.queued.pop_front().unwrap();
+            self.tx.push(b);
+        }
+    }
+
+    /// Core 1 sends `body` under `id`, framed, with its newline.
+    fn core1_says(&mut self, id: u8, body: &str) {
+        let line = encode(id, format_args!("{body}")).unwrap();
+        self.from_core1.extend(line.as_bytes());
+        self.from_core1.push_back(b'\n');
+    }
+
+    /// The lines core 1 has been sent, as text without their newlines, taken.
+    fn core1_got(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.to_core1)
+            .into_iter()
+            .map(|l| {
+                assert_eq!(l.last(), Some(&b'\n'));
+                String::from_utf8(l[..l.len() - 1].to_vec()).unwrap()
+            })
+            .collect()
     }
 
     fn call(&self, c: Call) {
@@ -126,8 +200,14 @@ impl Hardware for Board {
     }
     fn usb_write(&mut self, bytes: &[u8]) -> usize {
         self.call(Call::Write);
-        let n = bytes.len().min(self.room);
-        self.tx.extend_from_slice(&bytes[..n]);
+        let mut n = bytes.len().min(self.room);
+        match self.cap {
+            None => self.tx.extend_from_slice(&bytes[..n]),
+            Some(cap) => {
+                n = n.min(cap - self.queued.len());
+                self.queued.extend(&bytes[..n]);
+            }
+        }
         n
     }
     fn set_key(&mut self, down: bool) {
@@ -152,6 +232,57 @@ impl Hardware for Board {
     }
     fn feed_watchdog(&mut self) {
         self.call(Call::Feed);
+    }
+    fn usb_room(&self) -> usize {
+        self.call(Call::Room);
+        let room = match self.cap {
+            None => self.room,
+            Some(cap) => self.room.min(cap - self.queued.len()),
+        };
+        room.saturating_add(self.room_lies)
+    }
+    fn core1_launched(&self) -> bool {
+        self.launched
+    }
+    fn core1_beat(&self) -> u32 {
+        self.call(Call::Beat);
+        let b = self.beat.get();
+        if self.beating {
+            self.beat.set(b.wrapping_add(1));
+        }
+        b
+    }
+    fn core1_fault(&self) -> bool {
+        self.call(Call::Fault);
+        self.fault
+    }
+    fn core1_epoch(&mut self, epoch: u32) {
+        self.call(Call::Core1Epoch);
+        self.core1_epoch = epoch;
+    }
+    fn core1_keyed(&mut self, down: bool) {
+        self.call(Call::Core1Keyed);
+        self.core1_keyed = down;
+    }
+    fn core1_send(&mut self, line: &[u8]) -> bool {
+        self.call(Call::Core1Send);
+        if self.core1_full {
+            return false;
+        }
+        self.to_core1.push(line.to_vec());
+        true
+    }
+    fn core1_read(&mut self, buf: &mut [u8]) -> usize {
+        self.call(Call::Core1Read);
+        let n = buf.len().min(self.from_core1.len());
+        for b in buf.iter_mut().take(n) {
+            *b = self.from_core1.pop_front().unwrap();
+        }
+        n
+    }
+    fn core1_test(&mut self, test: Core1Test) {
+        self.call(Call::Core1Test);
+        self.core1_tests.push(test);
     }
 }
 
@@ -444,7 +575,7 @@ fn replies_wait_for_room_in_the_usb_buffer() {
     }
     let r = b.replies();
     assert_eq!(r.len(), 1);
-    assert!(r[0].starts_with("OK HELLO 4 "), "{r:?}");
+    assert!(r[0].starts_with("OK HELLO 5 "), "{r:?}");
 }
 
 /// A tripped box flashes its LED; one keying shows the key.
@@ -532,6 +663,27 @@ fn mcw_holds_the_ptt_pin_and_keys_the_tone_pin() {
     assert_eq!(led_on, ptt.total, "the LED shows the PTT");
     assert_eq!(c.keyer().ended(), Ended::Done);
     assert!(b.replies().contains(&"OK MCW".to_string()));
+}
+
+/// Core 1 is told on every pass whether the key or the PTT is down, as driven:
+/// through a `CW` run and an `MCW` run, the PTT's lead and tail included.
+#[test]
+fn core1_hears_whether_the_key_or_the_ptt_is_down_every_pass() {
+    let (mut c, mut b) = ptt_rig();
+    let mut keyed = 0;
+    for (start, body) in [(1u64, "CW 20 E"), (3000, "MCW 20 E")] {
+        b.send(1, body);
+        for t in start..start + 2000 {
+            b.t = t;
+            b.calls.borrow_mut().clear();
+            c.pass(&mut b);
+            assert_eq!(b.core1_keyed, b.key || b.ptt, "{body} at {t}");
+            assert!(b.calls.borrow().contains(&Call::Core1Keyed), "every pass");
+            keyed += u64::from(b.core1_keyed);
+        }
+    }
+    // One dot of 60 ms keyed, then 760 ms under the PTT.
+    assert_eq!(keyed, 60 + 760);
 }
 
 /// The pin guard on the key, as `Control::new` builds it: the keyer's timeline is
@@ -984,4 +1136,446 @@ fn restarts_do_not_refill_the_duty_budget() {
     let (high, taken) = restart_loop(Boot::Other);
     assert!(taken > 10, "{taken} runs taken");
     assert!(high * 100 / 600_000 <= 55, "pin high {high} ms of 600 s");
+}
+
+// Core 1: the decoder on the processor's second core (protocol 5).
+
+/// Passes 1 ms apart over `from..=to`, keeping the link alive with `STATUS` every
+/// 250 ms, the replies dropped; the key's longest stretch down, ms.
+fn keyed_to(c: &mut Control, b: &mut Board, from: u64, to: u64) -> u64 {
+    let mut pin = PinRecord::default();
+    for t in from..=to {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(9, "STATUS");
+        }
+        c.pass(b);
+        pin.pass(b.key);
+    }
+    b.replies();
+    pin.longest
+}
+
+/// Core 1 stops mid-run (its heartbeat stays where it is): within
+/// `CORE1_MS` the box opens the key, trips (`CORE1`, saved for the next boot) and
+/// stops feeding the watchdog, as for a stopped clock.
+#[test]
+fn a_stalled_core1_opens_the_key_and_starves_the_watchdog() {
+    let (mut c, mut b) = rig();
+    b.send(1, "CW 5 TTTT");
+    keyed_to(&mut c, &mut b, 0, 300);
+    assert!(b.key);
+    b.beating = false;
+    b.take_calls();
+    let mut opened = None;
+    for t in 301..=2000u64 {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(2, "STATUS");
+        }
+        c.pass(&mut b);
+        if !b.key && opened.is_none() {
+            opened = Some(t);
+        }
+    }
+    let opened = opened.expect("the key opened");
+    // The heartbeat was last seen to move on the pass at 301 (this board's core 1
+    // moved it just after the read at 300).
+    assert_eq!(
+        opened,
+        301 + u64::from(limits::CORE1_MS),
+        "opened at {opened}"
+    );
+    assert_eq!(c.keyer().trip(), Trip::Core1);
+    assert!(c.starved());
+    let calls = b.take_calls();
+    let fed = calls.iter().filter(|&&c| c == Call::Feed).count();
+    assert_eq!(fed as u32, limits::CORE1_MS, "fed only until the trip");
+    assert!(b
+        .replies()
+        .iter()
+        .any(|r| r.starts_with("OK STATUS 0 0 DOWN CORE1")));
+    assert_eq!(Saved::decode(b.saved).map(|s| s.trip), Some(Trip::Core1));
+    // Core 1 coming back changes nothing: still tripped, still starved.
+    b.beating = true;
+    for t in 2001..3000 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    assert!(!b.take_calls().contains(&Call::Feed));
+    assert_eq!(c.keyer().trip(), Trip::Core1);
+}
+
+/// A fault or panic handler ran (the fault flag): the key opens on that same pass,
+/// the box trips (`CORE1`) and stops feeding the watchdog, even though core 1's
+/// heartbeat moved just before.
+#[test]
+fn a_core1_fault_opens_the_key_on_the_same_pass() {
+    let (mut c, mut b) = rig();
+    b.send(1, "CW 5 TTTT");
+    keyed_to(&mut c, &mut b, 0, 300);
+    assert!(b.key);
+    b.fault = true;
+    b.t = 301;
+    b.take_calls();
+    c.pass(&mut b);
+    assert!(!b.key);
+    assert_eq!(c.keyer().trip(), Trip::Core1);
+    let calls = b.take_calls();
+    assert!(!calls.contains(&Call::Feed), "{calls:?}");
+    // Read before the pins are driven.
+    let fault = calls.iter().position(|&c| c == Call::Fault).unwrap();
+    let key = calls
+        .iter()
+        .position(|c| matches!(c, Call::Key(_)))
+        .unwrap();
+    assert!(fault < key, "{calls:?}");
+}
+
+/// Core 1 started but never seen to run: tripped `CORE1_MS` after the loop
+/// began, before anything can be keyed long.
+#[test]
+fn a_core1_started_that_never_beats_trips() {
+    let mut b = Board::new();
+    b.beating = false;
+    let mut c = Control::new(Keyer::new(Limits::BOX, Boot::Power, 0), &b);
+    b.send(1, "CW 20 TTTT");
+    let longest = keyed_to(&mut c, &mut b, 0, 1000);
+    assert_eq!(c.keyer().trip(), Trip::Core1);
+    assert!(longest <= u64::from(limits::CORE1_MS), "{longest}");
+    assert!(c.starved());
+}
+
+/// A core 1 that was never started (its launch failed) is no decoder: the keyer
+/// keys as it always has, and `RX` is answered `ERR RX OFF`. Should its
+/// heartbeat move after all, it is running, and watched from then on.
+#[test]
+fn without_core1_the_keyer_keys_and_rx_is_off() {
+    let mut b = Board::new();
+    b.launched = false;
+    b.beating = false;
+    let mut c = Control::new(Keyer::new(Limits::BOX, Boot::Power, 0), &b);
+    b.send(1, "CW 20 PARIS");
+    keyed_to(&mut c, &mut b, 0, 3000);
+    assert_eq!(c.keyer().trip(), Trip::None);
+    assert_eq!(c.keyer().ended(), Ended::Done);
+    assert!(!c.starved());
+    b.send(2, "RX HELLO");
+    b.t = 3001;
+    c.pass(&mut b);
+    assert_eq!(b.replies(), vec!["ERR RX OFF"]);
+    assert!(b.to_core1.is_empty() && !c.rx_open());
+    // Its heartbeat moves once: it runs, so it must go on moving.
+    b.beat.set(7);
+    keyed_to(&mut c, &mut b, 3002, 3002 + u64::from(limits::CORE1_MS) - 1);
+    assert_eq!(c.keyer().trip(), Trip::None);
+    keyed_to(&mut c, &mut b, 3002 + u64::from(limits::CORE1_MS), 3200);
+    assert_eq!(c.keyer().trip(), Trip::Core1);
+}
+
+/// `RX <command>` goes to core 1 as `<command>` under the same id, framed again,
+/// and never to the keyer: `RX CW` keys nothing and refreshes no run. Core 1's
+/// reply comes back as `RX <reply>`.
+#[test]
+fn rx_lines_go_to_core1_and_never_to_the_keyer() {
+    let (mut c, mut b) = rig();
+    b.send(0x21, "RX CW 20 E");
+    b.send(0x22, "RX HELLO");
+    b.send(0x23, "RX");
+    b.send(0x24, "RX STOP");
+    c.pass(&mut b);
+    assert_eq!(
+        b.core1_got(),
+        vec![
+            encode(0x21, format_args!("CW 20 E"))
+                .unwrap()
+                .as_str()
+                .to_string(),
+            encode(0x22, format_args!("HELLO"))
+                .unwrap()
+                .as_str()
+                .to_string(),
+            encode(0x24, format_args!("STOP"))
+                .unwrap()
+                .as_str()
+                .to_string(),
+        ]
+    );
+    assert_eq!(b.replies(), vec!["ERR RX ARGS"]);
+    assert!(!b.key && !c.keyer().running());
+    assert!(c.rx_open());
+    b.core1_says(0x22, "OK HELLO 1 32000 8000 80 3 POWER - PICO2-DECODER");
+    b.t = 1;
+    c.pass(&mut b);
+    let tx = std::mem::take(&mut b.tx);
+    let line = std::str::from_utf8(&tx).unwrap();
+    let (id, body) = decode(line.trim_end().as_bytes()).unwrap();
+    assert_eq!(id, 0x22);
+    assert_eq!(body, "RX OK HELLO 1 32000 8000 80 3 POWER - PICO2-DECODER");
+    // A run is not kept alive by RX lines: it ends on the link timeout.
+    b.send(0x25, "CW 5 TTTTTTTTTT");
+    for t in 2..=3000u64 {
+        b.t = t;
+        if t % 250 == 0 {
+            b.send(0x26, "RX STATUS");
+        }
+        c.pass(&mut b);
+    }
+    assert_eq!(c.keyer().ended(), Ended::Link);
+    // Core 1's ring full: the box says so.
+    b.core1_full = true;
+    b.send(0x27, "RX STATUS");
+    b.t = 3001;
+    c.pass(&mut b);
+    assert!(b.replies().contains(&"ERR RX BUSY".to_string()));
+}
+
+/// The decoder's own lines (id 00) reach the host only between its `RX HELLO`
+/// and its `RX TEXT`, the USB link going away, or the link timeout; replies to
+/// `RX` commands (any other id) whenever they come.
+#[test]
+fn the_decoder_s_own_lines_reach_the_host_only_after_rx_hello() {
+    let (mut c, mut b) = rig();
+    let own = |b: &mut Board, c: &mut Control, t: u64| -> Vec<String> {
+        b.core1_says(0, "ST 400 0 0 50 0");
+        b.t = t;
+        c.pass(b);
+        b.replies()
+    };
+    assert!(own(&mut b, &mut c, 0).is_empty(), "before RX HELLO");
+    b.core1_says(5, "OK STATUS TEXT 0 600 150 600 400 0 0 0");
+    b.t = 1;
+    c.pass(&mut b);
+    assert_eq!(
+        b.replies(),
+        vec!["RX OK STATUS TEXT 0 600 150 600 400 0 0 0"]
+    );
+    b.send(6, "RX HELLO");
+    assert_eq!(own(&mut b, &mut c, 2), vec!["RX ST 400 0 0 50 0"]);
+    // RX TEXT closes it.
+    b.send(7, "RX TEXT");
+    assert!(own(&mut b, &mut c, 3).is_empty());
+    // USB going away closes it.
+    b.send(8, "RX HELLO");
+    assert_eq!(own(&mut b, &mut c, 4), vec!["RX ST 400 0 0 50 0"]);
+    b.epoch += 1;
+    assert!(own(&mut b, &mut c, 5).is_empty());
+    assert_eq!(b.core1_epoch, b.epoch, "core 1 told the new epoch");
+    // So does the host going quiet for the link timeout; any valid line from it,
+    // keyer or RX, keeps it open.
+    b.send(9, "RX HELLO");
+    assert_eq!(own(&mut b, &mut c, 6), vec!["RX ST 400 0 0 50 0"]);
+    let quiet = u64::from(limits::LINK_TIMEOUT_MS);
+    b.send(10, "STATUS");
+    assert_eq!(own(&mut b, &mut c, 1000).len(), 2, "STATUS reply and ST");
+    assert_eq!(own(&mut b, &mut c, 1000 + quiet - 1).len(), 1);
+    assert!(own(&mut b, &mut c, 1000 + quiet).is_empty());
+    assert!(!c.rx_open());
+}
+
+/// Only lines that decode go on, each with `RX ` added if it still fits a line;
+/// anything else core 1 sends (text mode's plain letters, a broken line, a line
+/// too long) is dropped.
+#[test]
+fn only_valid_lines_from_core1_reach_the_host() {
+    let (mut c, mut b) = rig();
+    b.send(1, "RX HELLO");
+    c.pass(&mut b);
+    b.from_core1.extend(b"CQ CQ DE K8ONS\r\n");
+    b.from_core1.extend(b"00 ST 1 2 3*00\n");
+    // A line that fits as it is but not with `RX ` (94 + 3 > 96).
+    let long = "CH 1 ".to_string() + &"E".repeat(94 - 3 - 5 - 3);
+    let l = encode(0, format_args!("{long}")).unwrap();
+    assert_eq!(l.len(), 94);
+    b.from_core1.extend(l.as_bytes());
+    b.from_core1.push_back(b'\n');
+    b.from_core1.extend(&[b'X'; 300]);
+    b.from_core1.push_back(b'\n');
+    b.core1_says(0, "CH 400 K");
+    for t in 1..20 {
+        b.t = t;
+        let before = b.from_core1.len();
+        c.pass(&mut b);
+        // However long a line core 1 sends, a pass reads at most a line's worth.
+        assert!(before - b.from_core1.len() <= LINE_BYTES, "at {t}");
+    }
+    assert_eq!(b.replies(), vec!["RX CH 400 K"]);
+    assert!(b.from_core1.is_empty());
+}
+
+/// A pass sends at most one of core 1's lines, and reads at most a line's worth
+/// of its bytes; the keyer's own replies always go first, and a decoder line goes
+/// only if a whole keyer reply would still fit behind it, so a keyer reply never
+/// waits behind the decoder.
+#[test]
+fn a_keyer_reply_never_waits_behind_the_decoder() {
+    let (mut c, mut b) = rig();
+    b.send(1, "RX HELLO");
+    c.pass(&mut b);
+    for i in 0..50 {
+        b.core1_says(
+            0,
+            &format!("SL {i} -300,-200 -300,-200 -300,-200 -300,-200 -300,-200"),
+        );
+    }
+    // One line a pass, never more than 97 bytes read.
+    let before = b.from_core1.len();
+    b.t = 1;
+    c.pass(&mut b);
+    assert_eq!(b.replies().len(), 1);
+    assert!(before - b.from_core1.len() <= LINE_BYTES);
+    // A 512-byte USB buffer the host does not empty: decoder lines stop while there
+    // is still room for a whole keyer reply behind them.
+    b.cap = Some(512);
+    for t in 2..60 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    assert!(512 - b.queued.len() >= LINE_BYTES, "{}", b.queued.len());
+    b.send(2, "STATUS");
+    b.t = 60;
+    c.pass(&mut b);
+    b.host_reads(512);
+    let r = b.replies();
+    assert!(r.last().unwrap().starts_with("OK STATUS"), "{r:?}");
+    // The host reading again lets the decoder's lines on.
+    for t in 61..200 {
+        b.t = t;
+        c.pass(&mut b);
+        b.host_reads(512);
+    }
+    assert!(b.replies().len() > 10);
+}
+
+/// Should the USB driver's room ever read more than it takes, decoder lines still
+/// never pile up in the queue: a keyer reply waits behind at most the rest of the
+/// one decoder line already going out.
+#[test]
+fn decoder_lines_never_pile_up_ahead_of_a_keyer_reply() {
+    let (mut c, mut b) = rig();
+    b.send(1, "RX HELLO");
+    c.pass(&mut b);
+    b.room = 5;
+    b.room_lies = 1000;
+    // Core 1 has a line ready on every pass.
+    for t in 1..100 {
+        b.t = t;
+        b.core1_says(0, &format!("ST {t} 0 0 50 0"));
+        c.pass(&mut b);
+    }
+    // Lines the host has whole when it asks.
+    let had = b.tx.iter().filter(|&&x| x == b'\n').count();
+    b.send(2, "STATUS");
+    for t in 100..400 {
+        b.t = t;
+        b.core1_says(0, &format!("ST {t} 0 0 50 0"));
+        c.pass(&mut b);
+    }
+    b.room = usize::MAX;
+    b.room_lies = 0;
+    for t in 400..500 {
+        b.t = t;
+        c.pass(&mut b);
+    }
+    let r = b.replies();
+    let status = r.iter().position(|l| l.starts_with("OK STATUS")).unwrap();
+    assert!(
+        status <= had + 1,
+        "{} decoder lines first: {r:?}",
+        status - had
+    );
+}
+
+/// A trip for core 1 stops everything from it: no line read from it, no `RX`
+/// line sent to it.
+#[test]
+fn after_a_core1_trip_nothing_passes_between_the_cores() {
+    let (mut c, mut b) = rig();
+    b.send(1, "RX HELLO");
+    c.pass(&mut b);
+    b.core1_got();
+    b.fault = true;
+    b.t = 1;
+    c.pass(&mut b);
+    b.core1_says(0, "CH 400 K");
+    b.send(2, "RX STATUS");
+    b.t = 2;
+    b.take_calls();
+    c.pass(&mut b);
+    assert_eq!(b.replies(), vec!["ERR RX OFF"]);
+    assert!(b.core1_got().is_empty());
+    assert!(!b.take_calls().contains(&Call::Core1Read));
+}
+
+/// `TEST CORE1 HANG` and `TEST CORE1 FAULT` reach core 1 once each, on the pass
+/// where they come due, after the pins are driven.
+#[test]
+fn core1_tests_are_handed_to_core1_once() {
+    let (mut c, mut b) = rig();
+    b.send(1, "CW 5 TTTT");
+    keyed_to(&mut c, &mut b, 0, 100);
+    b.send(2, "TEST ARM");
+    b.send(3, "TEST CORE1 HANG");
+    b.t = 101;
+    b.take_calls();
+    c.pass(&mut b);
+    assert_eq!(b.core1_tests, vec![Core1Test::Hang]);
+    let calls = b.take_calls();
+    let key = calls
+        .iter()
+        .position(|c| matches!(c, Call::Key(_)))
+        .unwrap();
+    let test = calls.iter().position(|&c| c == Call::Core1Test).unwrap();
+    assert!(key < test, "{calls:?}");
+    keyed_to(&mut c, &mut b, 102, 400);
+    assert_eq!(b.core1_tests, vec![Core1Test::Hang], "once");
+}
+
+/// Whatever core 1 sends, and whatever the host sends through `RX`, nothing keys:
+/// framed keyer commands from core 1 and `RX` lines of every kind leave the key,
+/// the tone and the PTT open, and the keyer untouched.
+#[test]
+fn nothing_from_core1_or_rx_keys_anything() {
+    let mut rng = 0x9E3779B97F4A7C15u64;
+    let mut next = |n: u64| {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % n
+    };
+    let (mut c, mut b) = rig();
+    let bodies = [
+        "CW 20 E",
+        "MCW 20 E",
+        "TEST ARM",
+        "TEST HANG",
+        "HELLO",
+        "OK CW",
+        "STOP",
+        "RX CW 20 E",
+    ];
+    for t in 1..=20_000u64 {
+        b.t = t;
+        if t % 7 == 0 {
+            let body = bodies[next(bodies.len() as u64) as usize];
+            match next(3) {
+                0 => b.core1_says(next(256) as u8, body),
+                1 => b.send(next(255) as u8 + 1, &format!("RX {body}")),
+                _ => {
+                    for _ in 0..next(120) {
+                        b.from_core1.push_back(next(256) as u8);
+                    }
+                }
+            }
+        }
+        if t % 3 == 0 {
+            b.host_reads(1000);
+        }
+        c.pass(&mut b);
+        b.tx.clear();
+        assert!(!b.key && !b.tone && !b.ptt, "at {t}");
+    }
+    assert!(!c.keyer().running());
+    assert_eq!(c.keyer().ended(), Ended::None);
+    assert_eq!(c.keyer().trip(), Trip::None);
 }

@@ -308,6 +308,16 @@ the key down on purpose). Into the dummy load, at minimum power:
     talking to the box, as it would if it were killed or its cable came out. The box
     must open its key by itself within its 2 s link timeout and report the run ended
     `LINK`.
+11. A box with the decoder on its second core (keyer protocol 5,
+    [keyer-protocol.md](keyer-protocol.md), "The decoder") only:
+    `hfnode keyer --config C core1test`, then `core1test --fault`. The node
+    identifies, then makes the decoder's core stop (or, with `--fault`, make a
+    store its memory protection must refuse) during a short transmission. The
+    keyer must see it within 0.1 s, open the key, trip (`CORE1`) and let its
+    watchdog reset the box, which comes back tripped (`CORE1`). The key is down
+    for at most about 0.1 s, too short for the sidetone check, so the node does not
+    require one here. Unplug the box and plug it in again after each, and handle
+    `state_dir/tx-inhibited` as after `hangtest`.
 
 Then set `commissioned = "done"`, and `hfnode run` will start.
 
@@ -348,6 +358,13 @@ Fastest first:
    opens the key, trips the box and stops it feeding its watchdog. If the processor
    clock itself stops, no software runs to see it: the watchdog, on the other
    clock, resets the chip.
+
+   On a box with the decoder on its second core (protocol 5), the loop also watches
+   that core: if its heartbeat stops for 0.1 s, or it faults, the key opens, the
+   box trips (`CORE1`) and stops feeding its watchdog, the same way. The decoder's
+   core cannot reach the key itself: its memory protection lets it reach only its
+   own memory, the memory the two cores share and the audio, and a fault on it
+   opens the key first ([keyer-protocol.md](keyer-protocol.md), "The decoder").
 5. **The box's link timeout.** A run stops when no valid line has come from the node
    for 2 s (the node checks in every 0.25 s while keying): hfnode was killed or
    hung, the computer crashed. It stops at once when USB goes away: the cable

@@ -12,7 +12,7 @@
 use super::link::Transport;
 use super::monitor::Monitor;
 use crate::audio::{Block, BlockSender};
-use keyer_core::keyer::{Boot, Ended, Keyer, Limits, Pin};
+use keyer_core::keyer::{Boot, Core1Test, Ended, Keyer, Limits, Pin, Trip};
 use keyer_core::mcw;
 use std::collections::VecDeque;
 use std::io;
@@ -222,6 +222,10 @@ pub struct BoxState {
     replies: VecDeque<String>,
     /// When the control loop hung (`TEST HANG`).
     hung_at: Option<u64>,
+    /// When the watch on the decoder's core trips the box, after `TEST CORE1`.
+    core1_trips_at: Option<u64>,
+    /// When the box stopped feeding its watchdog (a `CORE1` trip).
+    starved_at: Option<u64>,
     /// Lines the box took, for tests.
     pub lines: Vec<String>,
     /// Every `CW` and `MCW` command it took, in order.
@@ -237,6 +241,9 @@ pub struct BoxState {
     /// A fault: after its watchdog fires, `STATUS` reports no trip, as firmware
     /// without the safety audit's KB-7 did (`HELLO` still says `WATCHDOG`).
     pub hides_watchdog_trip: bool,
+    /// A fault: `TEST CORE1` does nothing, as on a box whose watch on its decoder
+    /// core, or that core's memory protection, does not work.
+    pub core1_unwatched: bool,
 }
 
 impl BoxState {
@@ -249,12 +256,15 @@ impl BoxState {
             usb: Usb::Up,
             replies: VecDeque::new(),
             hung_at: None,
+            core1_trips_at: None,
+            starved_at: None,
             lines: Vec::new(),
             runs: Vec::new(),
             resets: 0,
             deaf_to_silence: false,
             slow_wpm: None,
             hides_watchdog_trip: false,
+            core1_unwatched: false,
         }
     }
 
@@ -294,10 +304,35 @@ impl BoxState {
         self.keyer = Keyer::restore(Limits::BOX, Boot::Watchdog, at, Some(saved));
         self.at = at;
         self.hung_at = None;
+        self.core1_trips_at = None;
+        self.starved_at = None;
         self.resets += 1;
         self.replies.clear();
         if self.usb != Usb::Unplugged {
             self.usb = Usb::Back(at + USB_RESET_MS);
+        }
+    }
+
+    /// The decoder's core at `t`, as the firmware's watch on it sees it: a test
+    /// handed over makes it stop (`HANG`, seen [`keyer_core::limits::CORE1_MS`]
+    /// later) or fault (seen on the next pass); then the box trips (`CORE1`) and
+    /// stops feeding its watchdog.
+    fn core1(&mut self, t: u64) {
+        if let Some(test) = self.keyer.core1_test() {
+            if !self.core1_unwatched {
+                let after = match test {
+                    Core1Test::Hang => u64::from(keyer_core::limits::CORE1_MS),
+                    Core1Test::Fault => 1,
+                };
+                self.core1_trips_at = Some(t + after);
+            }
+        }
+        if self.core1_trips_at.is_some_and(|at| t >= at) {
+            self.core1_trips_at = None;
+            let ch = &mut self.changes;
+            self.keyer
+                .trip_now(t, Trip::Core1, |at, pin, on| ch.push(at, pin, on));
+            self.starved_at.get_or_insert(t);
         }
     }
 
@@ -311,6 +346,12 @@ impl BoxState {
                 if now < reset {
                     break;
                 }
+                self.watchdog_reset(reset);
+            } else if let Some(reset) = self
+                .starved_at
+                .map(|s| s + u64::from(keyer_core::limits::WATCHDOG_MS))
+                .filter(|&r| r <= now && self.at >= r - 1)
+            {
                 self.watchdog_reset(reset);
             } else if self.at < now {
                 let t = self.at + 1;
@@ -327,6 +368,7 @@ impl BoxState {
                 self.keyer.set_line(self.line.reads(t, self.keyer.ptt()));
                 let ch = &mut self.changes;
                 self.keyer.poll_with(t, |at, pin, on| ch.push(at, pin, on));
+                self.core1(t);
                 self.at = t;
             } else {
                 break;
@@ -444,6 +486,8 @@ impl MockBox {
                 run.ended = Ended::Usb;
             }
             s.hung_at = None;
+            s.core1_trips_at = None;
+            s.starved_at = None;
             s.usb = Usb::Unplugged;
         } else if s.usb == Usb::Unplugged {
             s.keyer = Keyer::new(Limits::BOX, Boot::Power, now);
