@@ -47,7 +47,7 @@
 //!   driver's skipping of its own echoed frames is exercised.
 //! - The settings [`crate::preflight`] reads before the node writes anything: the
 //!   transceiver ID (19 00, p. 19-4) and the items in [`Menu`] (16 46, 1A 05 ...,
-//!   27 11, pp. 19-3 to 19-7, 19-14), each answered as set and never written.
+//!   27 11, pp. 19-3 to 19-7, 19-12, 19-14), each answered as set and never written.
 //!   Defaults are the settings the bring-up asks for (docs/hardware-test-plan.md),
 //!   so a preflight passes unless a test changes one.
 //! - TX Inhibit (16 66, "00=OFF, 01=ON", p. 19-4), which the node may set: while it
@@ -172,6 +172,19 @@ pub struct Menu {
     /// 1A 05 00 73 CI-V Output (for ANT), "00=OFF, 01=ON" (p. 19-5; line 8973). OFF,
     /// the factory default (line 6846).
     pub civ_output_ant: u8,
+    /// 1A 05 01 98, 01 99, 02 00 and 02 01, Front Key Customize [VOX/BK-IN],
+    /// [AUTOTUNE], [▲] and [▼] (p. 19-7; lines 9271-9278), coded as on p. 19-12
+    /// (lines 9629-9638, 9688-9705). 00, 00, 00 and 01, the factory defaults
+    /// VOX/BK-IN, AUTOTUNE, M-CH UP and M-CH DOWN (lines 6425-6429).
+    pub front_key_vox_bk_in: u8,
+    pub front_key_autotune: u8,
+    pub front_key_up: u8,
+    pub front_key_down: u8,
+    /// 1A 05 02 02 and 02 03, MIC Key Customize [UP] and [DN] (p. 19-7; lines
+    /// 9279-9282), coded as on p. 19-12 (lines 9639-9661). 03 and 04, the factory
+    /// defaults UP (VFO: kHz) and DOWN (VFO: kHz) (lines 6434-6435).
+    pub mic_key_up: u8,
+    pub mic_key_down: u8,
 }
 
 impl Default for Menu {
@@ -191,6 +204,12 @@ impl Default for Menu {
             mod_input_data_off: 0x02,
             mod_input_data: 0x01,
             civ_output_ant: 0x00,
+            front_key_vox_bk_in: 0x00,
+            front_key_autotune: 0x00,
+            front_key_up: 0x00,
+            front_key_down: 0x01,
+            mic_key_up: 0x03,
+            mic_key_down: 0x04,
         }
     }
 }
@@ -211,6 +230,12 @@ impl Menu {
             (0x00, 0x84) => self.meter_peak_hold,
             (0x01, 0x61) => self.keyer_ratio,
             (0x01, 0x97) => self.usb_inhibit_timer,
+            (0x01, 0x98) => self.front_key_vox_bk_in,
+            (0x01, 0x99) => self.front_key_autotune,
+            (0x02, 0x00) => self.front_key_up,
+            (0x02, 0x01) => self.front_key_down,
+            (0x02, 0x02) => self.mic_key_up,
+            (0x02, 0x03) => self.mic_key_down,
             _ => return None,
         })
     }
@@ -233,7 +258,8 @@ pub fn is_read(body: &[u8]) -> bool {
                 0x00,
                 0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73 | 0x74 | 0x75 | 0x78 | 0x79 | 0x80 | 0x84
             ]
-            | [0x1A, 0x05, 0x01, 0x61 | 0x97]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x97 | 0x98 | 0x99]
+            | [0x1A, 0x05, 0x02, 0x00..=0x03]
             | [0x1C, 0x00 | 0x01 | 0x03]
             | [0x21, 0x02]
             | [0x27, 0x11]
@@ -950,7 +976,8 @@ impl State {
             [0x27, 0x11] => Ok(vec![0x27, 0x11, self.cfg.menu.scope_data_output]),
             [0x1A, 0x05, 0x00, 0x29 | 0x35 | 0x66 | 0x67 | 0x71 | 0x73, _, ..]
             | [0x1A, 0x05, 0x00, 0x74 | 0x78 | 0x79 | 0x80 | 0x84, _, ..]
-            | [0x1A, 0x05, 0x01, 0x61 | 0x97, _, ..]
+            | [0x1A, 0x05, 0x01, 0x61 | 0x97 | 0x98 | 0x99, _, ..]
+            | [0x1A, 0x05, 0x02, 0x00..=0x03, _, ..]
             | [0x27, 0x11, _, ..]
             | [0x16, 0x46, _, ..]
             | [0x19, 0x00, _, ..] => Err(format!(
@@ -2052,9 +2079,38 @@ mod tests {
             // Every item answered: no warning for an item it could not read.
             assert!(rep.checks.iter().all(|c| c.level != Level::Warn), "{rep}");
             let cmds = m.commands();
-            assert_eq!(cmds.len(), 27);
+            assert_eq!(cmds.len(), 33);
             assert!(cmds.iter().all(|(_, b)| is_read(b)), "{cmds:02X?}");
             assert!(m.report().violations.is_empty());
+        }
+    }
+
+    /// A front-key read the radio does not answer, or answers NG, fails the
+    /// preflight whatever the command, as the other required reads do.
+    #[test]
+    fn an_unanswered_key_read_fails_the_preflight() {
+        use crate::preflight::{preflight, Level, Purpose};
+        for cmd in [[0x1A, 0x05, 0x01, 0x98], [0x1A, 0x05, 0x02, 0x03]] {
+            for kind in [ReplyFault::Drop, ReplyFault::Ng] {
+                for purpose in [Purpose::Check, Purpose::Setup, Purpose::Transmit] {
+                    let (m, mut r) = radio(100.0);
+                    m.inject(Fault::Reply {
+                        cmd: cmd.to_vec(),
+                        skip: 0,
+                        times: 1,
+                        kind,
+                    });
+                    let rep = preflight(&mut r, purpose);
+                    let case = format!("{cmd:02X?} {kind:?} for {purpose:?}\n{rep}");
+                    assert!(!rep.passed(), "{case}");
+                    let failed: Vec<_> = rep.failures().map(|c| c.name).collect();
+                    assert_eq!(failed.len(), 1, "{case}");
+                    assert!(failed[0].contains("Key ["), "{case}");
+                    assert!(rep.checks.iter().all(|c| c.level != Level::Warn), "{case}");
+                    assert!(m.commands().iter().all(|(_, b)| is_read(b)), "{case}");
+                    assert!(m.report().violations.is_empty(), "{case}");
+                }
+            }
         }
     }
 
@@ -2062,7 +2118,7 @@ mod tests {
     fn menu_settings_read_as_set_and_are_never_written() {
         use crate::preflight::{preflight, Level, Purpose};
         type Change = fn(&mut MockConfig);
-        let cases: [(&str, Change, Level); 13] = [
+        let cases: [(&str, Change, Level); 19] = [
             (
                 "Time-Out Timer (CI-V)",
                 |c| c.menu.time_out_timer = 0x00,
@@ -2108,6 +2164,25 @@ mod tests {
                 |c| c.menu.civ_output_ant = 0x01,
                 Level::Warn,
             ),
+            // Each key set to a keyer memory (p. 19-12).
+            (
+                "Front Key [VOX/BK-IN]",
+                |c| c.menu.front_key_vox_bk_in = 0x02,
+                Level::Fail,
+            ),
+            (
+                "Front Key [AUTOTUNE]",
+                |c| c.menu.front_key_autotune = 0x05,
+                Level::Fail,
+            ),
+            ("Front Key [▲]", |c| c.menu.front_key_up = 0x03, Level::Fail),
+            (
+                "Front Key [▼]",
+                |c| c.menu.front_key_down = 0x06,
+                Level::Fail,
+            ),
+            ("MIC Key [UP]", |c| c.menu.mic_key_up = 0x11, Level::Fail),
+            ("MIC Key [DN]", |c| c.menu.mic_key_down = 0x14, Level::Fail),
         ];
         for (name, change, level) in cases {
             let (m, mut r) = radio(100.0);
@@ -2127,6 +2202,12 @@ mod tests {
             c.menu.mod_input_data_off = 0x03;
             c.menu.mod_input_data = 0x04;
             c.menu.civ_output_ant = 0x01;
+            c.menu.front_key_vox_bk_in = 0x01;
+            c.menu.front_key_autotune = 0x04;
+            c.menu.front_key_up = 0x02;
+            c.menu.front_key_down = 0x05;
+            c.menu.mic_key_up = 0x19;
+            c.menu.mic_key_down = 0x12;
         });
         for read in [
             &[0x16, 0x46, 0x01][..],
@@ -2135,6 +2216,12 @@ mod tests {
             &[0x1A, 0x05, 0x00, 0x67, 0x04],
             &[0x1A, 0x05, 0x00, 0x73, 0x01],
             &[0x16, 0x66, 0x00],
+            &[0x1A, 0x05, 0x01, 0x98, 0x01],
+            &[0x1A, 0x05, 0x01, 0x99, 0x04],
+            &[0x1A, 0x05, 0x02, 0x00, 0x02],
+            &[0x1A, 0x05, 0x02, 0x01, 0x05],
+            &[0x1A, 0x05, 0x02, 0x02, 0x19],
+            &[0x1A, 0x05, 0x02, 0x03, 0x12],
         ] {
             let cmd = &read[..read.len() - 1];
             assert!(is_read(cmd), "{cmd:02X?}");
@@ -2159,6 +2246,12 @@ mod tests {
             &[0x1A, 0x05, 0x00, 0x66, 0x03],
             &[0x1A, 0x05, 0x00, 0x67, 0x01],
             &[0x1A, 0x05, 0x00, 0x73, 0x00],
+            &[0x1A, 0x05, 0x01, 0x98, 0x02],
+            &[0x1A, 0x05, 0x01, 0x99, 0x00],
+            &[0x1A, 0x05, 0x02, 0x00, 0x03],
+            &[0x1A, 0x05, 0x02, 0x01, 0x01],
+            &[0x1A, 0x05, 0x02, 0x02, 0x11],
+            &[0x1A, 0x05, 0x02, 0x03, 0x04],
         ] {
             let (m, _) = radio(100.0);
             let frame = [&[0xFE, 0xFE, 0x94, 0xE0][..], write, &[0xFD]].concat();

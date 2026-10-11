@@ -3736,6 +3736,13 @@ pub fn scenarios() -> Vec<Scenario> {
         "TX Inhibit",
         |r| r.tx_inhibit = true,
     ));
+    v.push(refused(
+        "preflight-front-key-memory",
+        "the front panel's [VOX/BK-IN] key is set to a keyer memory, so pushing it would \
+         transmit: the node refuses to start, having only read from the radio",
+        "Front Key [VOX/BK-IN]",
+        |r| r.menu.front_key_vox_bk_in = 0x02,
+    ));
 
     // Listening all the time, as the node does by default.
     v.push({

@@ -112,6 +112,8 @@ named test-plan step measures it.
 | `1A 05 00 84` | Meter peak hold: warns if ON | 9006 | Yes |
 | `1A 05 01 61` | Keyer dot/dash ratio: refused unless `30` (1:1:3.0) | 9185 | Yes |
 | `1A 05 01 97` | Inhibit Timer at USB Connection: warns if OFF | 9269 | Yes |
+| `1A 05 01 98`, `01 99`, `02 00`, `02 01` | Front Key Customize [VOX/BK-IN], [AUTOTUNE], [▲], [▼]: a Voice/Keyer/RTTY Memory (`02`-`05`, `02`-`05`, `03`-`06`) refused by `tune`, `cw` and `run`, warns for `check` and `setup`; a value not in the table fails | 9271-9278, 9629-9638, 9688-9705 | Added later, not yet audited |
+| `1A 05 02 02`, `02 03` | MIC Key Customize [UP], [DN]: `11`-`14` (BCD) are the memories, checked as above | 9279-9282, 9639-9661 | Added later, not yet audited |
 | `27 11` | Scope wave data output: refused if ON (the waveform stream keeps the link busy) | 9353-9361 | Yes; reply format bench (step 0) |
 
 **The link:**

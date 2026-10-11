@@ -215,7 +215,15 @@ pub fn open_for<P: Port>(
         log::info!("preflight: {line}");
     }
     if !report.passed() {
-        let failed: Vec<&str> = report.failures().map(|c| c.name).collect();
+        // Each item with what the radio read, so that the message alone says what to
+        // change on the radio (a front key set to a keyer memory names the memory).
+        let failed: Vec<String> = report
+            .failures()
+            .map(|c| match c.value.as_str() {
+                "-" => format!("{} not read", c.name),
+                v => format!("{} = {v}", c.name),
+            })
+            .collect();
         bail!(
             "radio preflight failed ({}); nothing was written to the radio",
             failed.join(", ")
@@ -402,7 +410,7 @@ mod tests {
     #[test]
     fn nothing_is_written_after_a_failed_preflight() {
         type Change = fn(&mut MockConfig);
-        let cases: [(&str, Change); 12] = [
+        let cases: [(&str, Change); 14] = [
             ("USB SEND", |c| c.menu.usb_send = 0x01),
             ("USB Keying (CW)", |c| c.menu.usb_keying_cw = 0x02),
             ("USB Keying (RTTY)", |c| c.menu.usb_keying_rtty = 0x01),
@@ -415,6 +423,10 @@ mod tests {
             ("keyer dot/dash ratio", |c| c.menu.keyer_ratio = 0x33),
             ("scope data output", |c| c.menu.scope_data_output = 0x01),
             ("USB SEND", |c| c.menu.usb_send = 0x02),
+            ("Front Key [VOX/BK-IN]", |c| {
+                c.menu.front_key_vox_bk_in = 0x03
+            }),
+            ("MIC Key [DN]", |c| c.menu.mic_key_down = 0x13),
         ];
         for (name, change) in cases {
             // Every command that can transmit; the stage allows each at 10 W.
@@ -463,6 +475,46 @@ mod tests {
         for action in ACTIONS {
             let (r, _) = open(&mock(Menu::default()), Stage::Done, action, 10);
             assert!(r.is_ok(), "{action:?} at 3 min");
+        }
+    }
+
+    /// A front-panel or microphone key set to a keyer memory transmits when pushed:
+    /// every command that can transmit refuses the radio, naming the key and the
+    /// memory, as for the Time-Out Timer; `radio setup` only warns.
+    #[test]
+    fn every_command_that_can_transmit_refuses_a_key_set_to_a_keyer_memory() {
+        type Change = fn(&mut Menu);
+        let cases: [(&str, &str, Change); 6] = [
+            ("Front Key [VOX/BK-IN]", "Memory 1", |m| {
+                m.front_key_vox_bk_in = 0x02
+            }),
+            ("Front Key [AUTOTUNE]", "Memory 4", |m| {
+                m.front_key_autotune = 0x05
+            }),
+            ("Front Key [▲]", "Memory 2", |m| m.front_key_up = 0x04),
+            ("Front Key [▼]", "Memory 3", |m| m.front_key_down = 0x05),
+            ("MIC Key [UP]", "Memory 1", |m| m.mic_key_up = 0x11),
+            ("MIC Key [DN]", "Memory 4", |m| m.mic_key_down = 0x14),
+        ];
+        for (key, memory, change) in cases {
+            let mut menu = Menu::default();
+            change(&mut menu);
+            for action in [Action::Tune, Action::Cw, Action::Run] {
+                let radio = mock(menu);
+                let (r, opened) = open(&radio, Stage::Done, action, 10);
+                let e = r
+                    .err()
+                    .unwrap_or_else(|| panic!("{key}, {action:?}: preflight passed"))
+                    .to_string();
+                let named = format!("{key} = Voice/Keyer/RTTY {memory}");
+                assert!(opened && e.contains(&named), "{key}, {action:?}: {e}");
+                assert!(radio.commands().iter().all(|(_, b)| is_read(b)));
+                let rep = radio.report();
+                assert!(rep.violations.is_empty() && rep.keyed.is_empty() && rep.tunes == 0);
+            }
+            // `radio setup` transmits nothing: it only warns.
+            let (r, _) = open(&mock(menu), Stage::Done, Action::Setup, 10);
+            assert!(r.is_ok(), "setup with {key} on {memory}");
         }
     }
 

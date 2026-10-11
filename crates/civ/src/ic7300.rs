@@ -65,6 +65,7 @@
 use crate::frame::{bcd_be, bcd_le, from_bcd_be, from_bcd_le, take_frame, Frame, CONTROLLER};
 use crate::serial::{lower_control_lines, ControlLines};
 use crate::{Result, Rig, RigError, MAX_CW_CHARS};
+use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
@@ -213,6 +214,17 @@ mod cmd {
     /// 1A 05 00 73: "Send/read the CI-V Output (for ANT) capability (00=OFF, 01=ON)"
     /// (p. 19-5; lines 8973-8974).
     pub const CIV_OUTPUT_ANT: &[u8] = &[0x1A, 0x05, 0x00, 0x73];
+    /// 1A 05 01 98, 01 99, 02 00, 02 01: "Send/read the Front key customize
+    /// [VOX/BK-IN] setting", "... [AUTOTUNE] setting", "... [▲] setting" and
+    /// "... [▼] setting" (p. 19-7; lines 9271-9278); 1A 05 02 02, 02 03: "Send/read
+    /// the MIC key customize [UP] setting" and "... [DOWN] setting" (lines
+    /// 9279-9282). Data on p. 19-12 (lines 9629-9703); see [`super::CustomKey`].
+    pub const FRONT_KEY_VOX_BK_IN: &[u8] = &[0x1A, 0x05, 0x01, 0x98];
+    pub const FRONT_KEY_AUTOTUNE: &[u8] = &[0x1A, 0x05, 0x01, 0x99];
+    pub const FRONT_KEY_UP: &[u8] = &[0x1A, 0x05, 0x02, 0x00];
+    pub const FRONT_KEY_DOWN: &[u8] = &[0x1A, 0x05, 0x02, 0x01];
+    pub const MIC_KEY_UP: &[u8] = &[0x1A, 0x05, 0x02, 0x02];
+    pub const MIC_KEY_DOWN: &[u8] = &[0x1A, 0x05, 0x02, 0x03];
 }
 
 /// Five BCD bytes, 1 Hz and 10 Hz digits first, the last holding the 1000 MHz and
@@ -242,6 +254,154 @@ pub struct UsbLines {
     pub keying_cw: UsbLine,
     /// USB Keying (RTTY): FSK keying.
     pub keying_rtty: UsbLine,
+}
+
+/// A key whose function can be changed in MENU » SET > Function: "Front Key
+/// Customize" for the [VOX/BK-IN], [AUTOTUNE], [▲] and [▼] keys on the front panel
+/// and "MIC Key Customize" for the microphone's [UP] and [DN] keys (p. 12-6; manual
+/// text lines 6425-6438).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomKey {
+    VoxBkIn,
+    Autotune,
+    Up,
+    Down,
+    MicUp,
+    MicDown,
+}
+
+/// What a [`CustomKey`] is set to do, from its data table on p. 19-12.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFunction {
+    /// "Voice/Keyer/RTTY Memory 1" to "4". "In the CW mode • Push to transmit the
+    /// Keyer memory content once. • Hold down for 1 second to repeatedly transmit
+    /// the memory content.", and in the voice and RTTY modes it transmits their
+    /// memories (p. 12-7; manual text lines 6449-6470; the same for each key, and
+    /// for the microphone's on p. 12-8, lines 6615-6639).
+    Memory(u8),
+    /// Any other function in the table, by its name there. The one that can start a
+    /// transmission is the microphone keys' TUNER: "While “TUNE” is displayed, hold
+    /// down for 1 second to start manual tuning" (p. 12-8; lines 6671-6674), which
+    /// the front panel's own [TUNER] key always does.
+    Other(&'static str),
+}
+
+impl fmt::Display for KeyFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory(n) => write!(f, "Voice/Keyer/RTTY Memory {n}"),
+            Self::Other(name) => f.write_str(name),
+        }
+    }
+}
+
+impl CustomKey {
+    pub const ALL: [CustomKey; 6] = [
+        Self::VoxBkIn,
+        Self::Autotune,
+        Self::Up,
+        Self::Down,
+        Self::MicUp,
+        Self::MicDown,
+    ];
+
+    /// The key, for a report.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::VoxBkIn => "Front Key [VOX/BK-IN]",
+            Self::Autotune => "Front Key [AUTOTUNE]",
+            Self::Up => "Front Key [▲]",
+            Self::Down => "Front Key [▼]",
+            Self::MicUp => "MIC Key [UP]",
+            Self::MicDown => "MIC Key [DN]",
+        }
+    }
+
+    /// Its item in MENU » SET > Function, as the menu names it (lines 6425-6435).
+    pub fn menu_item(self) -> &'static str {
+        match self {
+            Self::VoxBkIn => "Front Key Customize [VOX/BK-IN]",
+            Self::Autotune => "Front Key Customize [AUTOTUNE]",
+            Self::Up => "Front Key Customize [▲]",
+            Self::Down => "Front Key Customize [▼]",
+            Self::MicUp => "MIC Key Customize [UP]",
+            Self::MicDown => "MIC Key Customize [DN]",
+        }
+    }
+
+    /// The 1A 05 item that sends or reads the setting, as the bytes and as text.
+    pub fn command(self) -> (&'static [u8], &'static str) {
+        match self {
+            Self::VoxBkIn => (cmd::FRONT_KEY_VOX_BK_IN, "1A 05 01 98"),
+            Self::Autotune => (cmd::FRONT_KEY_AUTOTUNE, "1A 05 01 99"),
+            Self::Up => (cmd::FRONT_KEY_UP, "1A 05 02 00"),
+            Self::Down => (cmd::FRONT_KEY_DOWN, "1A 05 02 01"),
+            Self::MicUp => (cmd::MIC_KEY_UP, "1A 05 02 02"),
+            Self::MicDown => (cmd::MIC_KEY_DOWN, "1A 05 02 03"),
+        }
+    }
+
+    /// The factory setting (lines 6425-6435).
+    pub fn default_function(self) -> KeyFunction {
+        KeyFunction::Other(match self {
+            Self::VoxBkIn => "VOX/BK-IN",
+            Self::Autotune => "AUTOTUNE",
+            Self::Up => "M-CH UP",
+            Self::Down => "M-CH DOWN",
+            Self::MicUp => "UP (VFO: kHz)",
+            Self::MicDown => "DOWN (VFO: kHz)",
+        })
+    }
+
+    /// The function a data byte stands for in this key's table on p. 19-12, or
+    /// `None` for a byte the table does not list.
+    pub fn function(self, data: u8) -> Option<KeyFunction> {
+        use KeyFunction::{Memory, Other};
+        Some(match (self, data) {
+            // "[VOX/BK-IN] setting": "00 VOX/BK-IN 01 PRESET 02 Voice/Keyer/RTTY
+            // Memory 1" to "05 ... Memory 4" (lines 9688-9696).
+            (Self::VoxBkIn, 0x00) => Other("VOX/BK-IN"),
+            // "[AUTOTUNE] setting": "00 AUTOTUNE 01 PRESET 02 Voice/Keyer/RTTY
+            // Memory 1" to "05 ... Memory 4" (lines 9697-9705).
+            (Self::Autotune, 0x00) => Other("AUTOTUNE"),
+            (Self::VoxBkIn | Self::Autotune, 0x01) => Other("PRESET"),
+            (Self::VoxBkIn | Self::Autotune, v @ 0x02..=0x05) => Memory(v - 0x01),
+            // "[▲]/[▼] setting": "00 M-CH UP 01 M-CH DOWN 02 PRESET 03 Voice/Keyer/
+            // RTTY Memory 1" to "06 ... Memory 4" (lines 9629-9638).
+            (Self::Up | Self::Down, 0x00) => Other("M-CH UP"),
+            (Self::Up | Self::Down, 0x01) => Other("M-CH DOWN"),
+            (Self::Up | Self::Down, 0x02) => Other("PRESET"),
+            (Self::Up | Self::Down, v @ 0x03..=0x06) => Memory(v - 0x02),
+            // "MIC Key Customize setting", "00" to "19" (lines 9639-9661), read as
+            // BCD like the driver's other two-digit 1A 05 data (01 61's "28" to
+            // "45"), so "11" to "14", the memories, are 11h to 14h. A byte that is
+            // not in the table, such as 0Bh, is not taken for anything.
+            (Self::MicUp | Self::MicDown, v) => match v {
+                0x00 => Other("No function"),
+                0x01 => Other("UP"),
+                0x02 => Other("DOWN"),
+                0x03 => Other("UP (VFO: kHz)"),
+                0x04 => Other("DOWN (VFO: kHz)"),
+                0x05 => Other("XFC"),
+                0x06 => Other("VFO/MEMO"),
+                0x07 => Other("BAND UP"),
+                0x08 => Other("BAND DOWN"),
+                // The table prints "09 BAND DOWN" a second time; the list of
+                // functions on p. 12-8 has SPEECH between BAND DOWN and MODE (lines
+                // 6604-6611).
+                0x09 => Other("SPEECH (table: BAND DOWN)"),
+                0x10 => Other("MODE"),
+                0x11..=0x14 => Memory(v - 0x10),
+                0x15 => Other("TS"),
+                0x16 => Other("MPAD"),
+                0x17 => Other("SPLIT"),
+                0x18 => Other("A/B"),
+                0x19 => Other("TUNER"),
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
 }
 
 /// SWR meter calibration points (meter value, SWR) from the 15 12 row (p. 19-3).
@@ -665,6 +825,15 @@ impl<P: Port> Ic7300<P> {
     /// 1A 05 00 73: whether CI-V Output (for ANT) is on.
     pub fn civ_output_ant(&mut self) -> Result<bool> {
         Ok(self.read_byte(cmd::CIV_OUTPUT_ANT, 0x00..=0x01)? == 0x01)
+    }
+
+    /// 1A 05 01 98 to 02 03: what `key` is set to do. A byte its table does not
+    /// list is an error, not a guess.
+    pub fn key_function(&mut self, key: CustomKey) -> Result<KeyFunction> {
+        let (cmd, _) = key.command();
+        let v = self.read_byte(cmd, 0x00..=0xFF)?;
+        key.function(v)
+            .ok_or_else(|| RigError::Protocol(format!("{cmd:02X?} value {v:02X}")))
     }
 }
 
@@ -1170,6 +1339,100 @@ mod tests {
         }
         for _ in 0..2 {
             assert!(matches!(r.tuner_busy(), Err(RigError::Protocol(_))));
+        }
+    }
+
+    /// Each key's item is read with no data, and each data byte is taken as its
+    /// table on p. 19-12 says, or not at all.
+    #[test]
+    fn custom_keys_are_read_and_decoded_by_their_tables() {
+        use KeyFunction::{Memory, Other};
+        let items: [(CustomKey, [u8; 4]); 6] = [
+            (CustomKey::VoxBkIn, [0x1A, 0x05, 0x01, 0x98]),
+            (CustomKey::Autotune, [0x1A, 0x05, 0x01, 0x99]),
+            (CustomKey::Up, [0x1A, 0x05, 0x02, 0x00]),
+            (CustomKey::Down, [0x1A, 0x05, 0x02, 0x01]),
+            (CustomKey::MicUp, [0x1A, 0x05, 0x02, 0x02]),
+            (CustomKey::MicDown, [0x1A, 0x05, 0x02, 0x03]),
+        ];
+        assert_eq!(items.map(|(k, _)| k), CustomKey::ALL);
+        // The factory setting of each key, as the radio would answer it.
+        let defaults: [u8; 6] = [0x00, 0x00, 0x00, 0x01, 0x03, 0x04];
+        let replies: Vec<Vec<u8>> = items
+            .iter()
+            .zip(defaults)
+            .map(|((_, cmd), v)| [&cmd[..], &[v]].concat())
+            .collect();
+        let replies: Vec<&[u8]> = replies.iter().map(|r| &r[..]).collect();
+        let mut r = radio(&replies, false);
+        for (key, cmd) in items {
+            assert_eq!(r.key_function(key).unwrap(), key.default_function());
+            assert_eq!(key.command().0, cmd);
+        }
+        let mut w = r.port.written.clone();
+        let sent: Vec<Vec<u8>> = std::iter::from_fn(|| take_frame(&mut w))
+            .map(|f| f.body)
+            .collect();
+        assert_eq!(sent, items.map(|(_, cmd)| cmd.to_vec()));
+
+        let memories = |key: CustomKey| -> Vec<u8> {
+            (0x00..=0xFF)
+                .filter(|&v| matches!(key.function(v), Some(Memory(_))))
+                .collect()
+        };
+        let known = |key: CustomKey| (0x00..=0xFF).filter(|&v| key.function(v).is_some()).count();
+        for key in [CustomKey::VoxBkIn, CustomKey::Autotune] {
+            assert_eq!(memories(key), [0x02, 0x03, 0x04, 0x05]);
+            assert_eq!(key.function(0x01), Some(Other("PRESET")));
+            assert_eq!(known(key), 6);
+        }
+        for key in [CustomKey::Up, CustomKey::Down] {
+            assert_eq!(memories(key), [0x03, 0x04, 0x05, 0x06]);
+            assert_eq!(key.function(0x01), Some(Other("M-CH DOWN")));
+            assert_eq!(known(key), 7);
+        }
+        for key in [CustomKey::MicUp, CustomKey::MicDown] {
+            assert_eq!(memories(key), [0x11, 0x12, 0x13, 0x14]);
+            assert_eq!(key.function(0x10), Some(Other("MODE")));
+            assert_eq!(key.function(0x19), Some(Other("TUNER")));
+            // "00" to "19" in BCD: nothing between 09h and 10h, nothing above 19h.
+            assert_eq!(key.function(0x0B), None);
+            assert_eq!(key.function(0x20), None);
+            assert_eq!(known(key), 20);
+        }
+        for key in CustomKey::ALL {
+            let n: Vec<_> = memories(key)
+                .into_iter()
+                .filter_map(|v| match key.function(v) {
+                    Some(Memory(n)) => Some(n),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(n, [1, 2, 3, 4], "{key:?}");
+        }
+
+        // A byte not in the table, or a reply of the wrong length, is an error.
+        let mut r = radio(
+            &[
+                &[0x1A, 0x05, 0x01, 0x98, 0x06],
+                &[0x1A, 0x05, 0x02, 0x01, 0x07],
+                &[0x1A, 0x05, 0x02, 0x02, 0x0B],
+                &[0x1A, 0x05, 0x01, 0x99],
+                &[0x1A, 0x05, 0x02, 0x00, 0x00, 0x00],
+            ],
+            false,
+        );
+        for key in [
+            CustomKey::VoxBkIn,
+            CustomKey::Down,
+            CustomKey::MicUp,
+            CustomKey::Autotune,
+            CustomKey::Up,
+        ] {
+            assert!(
+                matches!(r.key_function(key), Err(RigError::Protocol(_))),
+                "{key:?}"
+            );
         }
     }
 
