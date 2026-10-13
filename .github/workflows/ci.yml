@@ -46,6 +46,15 @@ jobs:
           RUSTFLAGS="--cfg cw_force_libm" cargo test -p cw
           cargo test -p cw --no-default-features
 
+      # The decoder box's loop (crates/decoder-core) is the firmware's, built here
+      # for the RP2350 as the firmware builds it, and tested through libm's
+      # arithmetic, as the box decodes.
+      - name: decoder box core without std (RP2350), and with libm's arithmetic
+        run: |
+          cargo clippy -p decoder-core --target thumbv8m.main-none-eabihf -- -D warnings
+          cargo build -p decoder-core --target thumbv8m.main-none-eabihf
+          RUSTFLAGS="--cfg cw_force_libm" cargo test -p decoder-core
+
   # The node also runs on macOS (Core Audio) and Windows (WASAPI); see
   # docs/macos-setup.md and docs/windows-setup.md. No radio or sound card here: the
   # tests and the self-test drive the mock IC-7300, and `hfnode devices` checks the
@@ -214,6 +223,78 @@ jobs:
           path: |
             firmware/pico2-keyer/pico2-keyer.uf2
             firmware/pico2-keyer/pico2-keyer.uf2.sha256
+          if-no-files-found: error
+
+  # The decoder box's firmware (docs/decoder.md): the Pico 2 that listens to a
+  # radio's audio and sends letters. Built and checked as the keyer box's is above,
+  # kept as the run's `pico2-decoder-firmware` artifact with its SHA-256.
+  pico2-decoder:
+    name: decoder box firmware (Pico 2)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware/pico2-decoder
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version firmware/pico2-decoder/rust-toolchain.toml pins: keep the two
+      # the same. llvm-tools: llvm-objdump, for check_pins.py below.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          targets: thumbv8m.main-none-eabihf
+          components: rustfmt, clippy, llvm-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware/pico2-decoder
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --release --locked -- -D warnings
+
+      - name: UF2 and its SHA-256
+        run: |
+          echo "DECODER_BUILD_ID=$(git rev-parse --short=8 HEAD)" >>"$GITHUB_ENV"
+          sh build.sh
+
+      # The image never drives the keyer box's key, PTT or tone pins high, and its
+      # fault and panic handlers drive them low first, read from the machine code
+      # of the ELF the UF2 was made from. The self-test first: the check against
+      # made-up images it must fail.
+      - name: GP16-GP18 never driven high
+        run: |
+          python3 check_pins.py --self-test
+          python3 check_pins.py pico2-decoder.elf
+
+      - name: the UF2 does not depend on where the checkout is
+        run: |
+          other="$RUNNER_TEMP/copy/cw-message-gateway"
+          git worktree add --detach "$other" HEAD
+          sh "$other/firmware/pico2-decoder/build.sh"
+          cmp pico2-decoder.uf2 "$other/firmware/pico2-decoder/pico2-decoder.uf2"
+
+      - name: summary
+        run: |
+          {
+            echo "### Decoder box firmware"
+            echo
+            echo "- build id in \`HELLO\`: \`$DECODER_BUILD_ID\`"
+            echo "- UF2 size: $(wc -c <pico2-decoder.uf2) bytes"
+            echo "- UF2 SHA-256: \`$(cut -d ' ' -f 1 pico2-decoder.uf2.sha256)\`"
+            echo
+            echo "Check the file you copy onto the box against that checksum"
+            echo "(\`sha256sum\` on Linux, \`shasum -a 256\` on a Mac)."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pico2-decoder-firmware
+          path: |
+            firmware/pico2-decoder/pico2-decoder.uf2
+            firmware/pico2-decoder/pico2-decoder.uf2.sha256
           if-no-files-found: error
 
   # hfnode's part of the handheld firmware (firmware/uv-k1/app), compiled for the

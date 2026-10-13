@@ -1,0 +1,20 @@
+[package]
+name = "decoder-core"
+version = "0.1.0"
+description = "The Pico 2 decoder box's loop: radio audio in, Morse decoded to letters, letters out over USB"
+edition.workspace = true
+license.workspace = true
+
+# no_std and without an allocator: the same code runs in the box's firmware
+# (firmware/pico2-decoder) and in these tests (and, later, hfnode's mock box).
+[dependencies]
+# The decoder, without the standard library.
+cw = { path = "../cw", default-features = false }
+# Only its line framing (frame.rs), so that both boxes frame lines the same way.
+keyer-core = { path = "../keyer-core" }
+# The anti-alias filter's coefficients, without the standard library.
+libm = "0.2"
+
+[dev-dependencies]
+# The synthesizer and noise, for test signals.
+cw = { path = "../cw" }

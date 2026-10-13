@@ -7,11 +7,13 @@
 //! feed it with [`Decoder::push_with`] and take each [`Event`] as it is decoded. The
 //! default `std` feature adds the `Vec`/`String` interface hfnode uses
 //! (`Decoder::push`, `DecodeEvent`, `events_to_text`), words of any length, the
-//! Morse timing helpers and the synthesizer.
+//! Morse timing helpers and the synthesizer. [`level`] measures audio the way
+//! hfnode's sidetone monitor does, with or without `std`.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 pub mod decoder;
+pub mod level;
 mod math;
 pub mod morse;
 // Also in the crate's own tests without `std`, which build with the standard library.

@@ -44,6 +44,7 @@
 //! time multiplied by the time scale, which is 1 except in the self-tests, whose
 //! radio and audio run faster than real time.
 
+use cw::level::{self, db};
 use keyer_core::morse::Segment;
 use std::collections::VecDeque;
 use std::fmt;
@@ -387,12 +388,11 @@ impl Monitor {
     /// A monitor whose radio time starts at `t0`.
     pub fn starting_at(s: Settings, t0: Instant) -> Self {
         let slice_len = ((f64::from(s.sample_rate) * SLICE_S).round() as usize).max(8);
-        let w = 2.0 * std::f32::consts::PI * s.pitch_hz / s.sample_rate as f32;
         Self {
             s,
             t0,
             slice_len,
-            coeff: 2.0 * w.cos(),
+            coeff: level::goertzel_coeff(s.pitch_hz, s.sample_rate),
             pending: Vec::new(),
             n: 0,
             stamps: VecDeque::new(),
@@ -1146,34 +1146,13 @@ impl Monitor {
 
 /// Goertzel at the pitch over one slice.
 fn measure(x: &[f32], coeff: f32, t: f64) -> Slice {
-    let (mut s1, mut s2) = (0.0f32, 0.0f32);
-    let mut sum_sq = 0.0f32;
-    for &v in x {
-        let s0 = v + coeff * s1 - s2;
-        s2 = s1;
-        s1 = s0;
-        sum_sq += v * v;
-    }
-    let n = x.len() as f32;
-    let mag_sq = (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0);
-    // A sine of amplitude A at the pitch gives |X| = A n / 2: report A^2 / 2, its
-    // mean square, so that the two levels compare.
-    let tone = 2.0 * mag_sq / (n * n);
-    let total = sum_sq / n;
+    let l = level::measure(x, coeff);
     Slice {
         t,
-        tone_db: db(tone),
-        total_db: db(total),
-        purity: if total > 0.0 {
-            (tone / total).min(1.0)
-        } else {
-            0.0
-        },
+        tone_db: db(l.tone),
+        total_db: db(l.total),
+        purity: l.purity(),
     }
-}
-
-fn db(p: f32) -> f32 {
-    10.0 * (p + 1e-12).log10()
 }
 
 fn median(v: &mut [f32]) -> Option<f32> {
