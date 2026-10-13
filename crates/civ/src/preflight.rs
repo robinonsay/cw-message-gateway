@@ -9,7 +9,8 @@
 //! would transmit somewhere other than the dial frequency (split or ∂TX on). For a
 //! command that can transmit ([`Purpose::Transmit`]) it also requires the radio's
 //! own Time-Out Timer (CI-V) at 3 min, as a backstop that does not depend on this
-//! software, and TX Inhibit OFF.
+//! software, TX Inhibit OFF, no front-panel or microphone key set to send a keyer
+//! memory, and the microphone's keys not set up as a CW key.
 //!
 //! [`verify_setup`] reads back what [`crate::Rig`]'s set commands are meant to have
 //! done, since an OK (FB) only says the radio accepted a command, not that it did
@@ -21,8 +22,8 @@
 //! own menu screens (docs/hardware-test-plan.md, step 1).
 
 use crate::ic7300::{
-    break_in_delay_level, key_speed_level, key_speed_wpm, power_level, Ic7300, Port, UsbLine,
-    IC7300_ID,
+    break_in_delay_level, key_speed_level, key_speed_wpm, power_level, CustomKey, Ic7300,
+    KeyFunction, Port, UsbLine, IC7300_ID,
 };
 use crate::{Rig, RigError};
 use std::fmt;
@@ -363,6 +364,64 @@ pub fn preflight_for<P: Port>(r: &mut Ic7300<P>, purpose: Purpose, node_inhibite
                 "set it to 3 min: the radio's own limit on CI-V transmissions"
             };
             (tot_name(v).into(), level, note.into())
+        },
+    );
+
+    // A front-panel or microphone key set to a "Voice/Keyer/RTTY Memory" transmits
+    // when it is pushed: in the CW mode the keyer memory once, or over and over if
+    // it is held for a second (p. 12-7, lines 6459-6463; p. 12-8, lines 6615-6639).
+    // That is a transmission the node did not start, and not one "initiated by a
+    // CI-V command", so the Time-Out Timer (CI-V) may not end it. Refused like the
+    // Time-Out Timer: by anything that can transmit; `radio check` and `radio
+    // setup` transmit nothing, so for them it is a warning. Every other function
+    // passes: the microphone's TUNER can start a tuner cycle, as the front panel's
+    // [TUNER] key always can, and the bring-up keeps the microphone unplugged
+    // anyway (its PTT transmits).
+    for key in CustomKey::ALL {
+        let (_, command) = key.command();
+        rep.required(key.name(), command, r.key_function(key), |&f| match f {
+            KeyFunction::Memory(n) => (
+                f.to_string(),
+                if purpose == Purpose::Transmit {
+                    Level::Fail
+                } else {
+                    Level::Warn
+                },
+                format!(
+                    "pushed, it transmits memory {n}; set MENU > SET > Function > {} \
+                     back to {}",
+                    key.menu_item(),
+                    key.default_function()
+                ),
+            ),
+            KeyFunction::Other(_) => (f.to_string(), Level::Pass, String::new()),
+        });
+    }
+
+    // With MIC Up/Down Keyer ON, "the [UP]/[DN] keys" are "a CW key" (p. 4-21, lines
+    // 3052-3058): with the break-in the node turns on, pushing either transmits,
+    // whatever the keys are customized to. Refused and warned like a key set to a
+    // keyer memory. ICOM's default is OFF.
+    rep.required(
+        "MIC Up/Down Keyer",
+        "1A 05 01 65",
+        r.mic_up_down_keyer(),
+        |&on| {
+            if on {
+                (
+                    "ON".into(),
+                    if purpose == Purpose::Transmit {
+                        Level::Fail
+                    } else {
+                        Level::Warn
+                    },
+                    "the microphone's [UP]/[DN] keys would key CW; set MENU > KEYER > \
+                     EDIT/SET > CW-KEY SET > MIC Up/Down Keyer OFF (the default)"
+                        .into(),
+                )
+            } else {
+                ("OFF".into(), Level::Pass, String::new())
+            }
         },
     );
 
@@ -749,7 +808,8 @@ mod tests {
     }
 
     /// A radio at factory defaults with the guide's settings: on receive, USB lines
-    /// OFF, VOX and PTT Start OFF, Time-Out Timer 3 min, TX Inhibit OFF.
+    /// OFF, VOX and PTT Start OFF, Time-Out Timer 3 min, TX Inhibit OFF, every
+    /// customizable key at its factory function, MIC Up/Down Keyer OFF.
     fn good() -> Table {
         let mut t = Table::default();
         for (cmd, data) in [
@@ -782,6 +842,13 @@ mod tests {
             (&[0x1A, 0x05, 0x00, 0x84], &[0x00]),
             (&[0x27, 0x11], &[0x00]),
             (&[0x1C, 0x03], &[0x00, 0x00, 0x03, 0x07, 0x00]),
+            (&[0x1A, 0x05, 0x01, 0x98], &[0x00]),
+            (&[0x1A, 0x05, 0x01, 0x99], &[0x00]),
+            (&[0x1A, 0x05, 0x02, 0x00], &[0x00]),
+            (&[0x1A, 0x05, 0x02, 0x01], &[0x01]),
+            (&[0x1A, 0x05, 0x02, 0x02], &[0x03]),
+            (&[0x1A, 0x05, 0x02, 0x03], &[0x04]),
+            (&[0x1A, 0x05, 0x01, 0x65], &[0x00]),
         ] {
             t.answers.insert(cmd.to_vec(), data.to_vec());
         }
@@ -834,7 +901,7 @@ mod tests {
             // nothing that sets a value, keys or tunes.
             let reads: Vec<Vec<u8>> = good().answers.into_keys().collect();
             let sent = sent_bodies(&r);
-            assert_eq!(sent.len(), 27);
+            assert_eq!(sent.len(), 34);
             for body in sent {
                 assert!(reads.contains(&body), "{body:02X?} is not a read");
             }
@@ -942,6 +1009,150 @@ mod tests {
         let mut t = good();
         t.answers.insert(vec![0x16, 0x46], vec![0x01]);
         assert!(!preflight_for(&mut rig(t), Purpose::Transmit, true).passed());
+    }
+
+    /// Each customizable key's item, the data bytes its table on p. 19-12 gives the
+    /// keyer memories, and how many functions the table lists.
+    const KEYS: [(&str, [u8; 4], [u8; 4], usize); 6] = [
+        (
+            "Front Key [VOX/BK-IN]",
+            [0x1A, 0x05, 0x01, 0x98],
+            [0x02, 0x03, 0x04, 0x05],
+            6,
+        ),
+        (
+            "Front Key [AUTOTUNE]",
+            [0x1A, 0x05, 0x01, 0x99],
+            [0x02, 0x03, 0x04, 0x05],
+            6,
+        ),
+        (
+            "Front Key [▲]",
+            [0x1A, 0x05, 0x02, 0x00],
+            [0x03, 0x04, 0x05, 0x06],
+            7,
+        ),
+        (
+            "Front Key [▼]",
+            [0x1A, 0x05, 0x02, 0x01],
+            [0x03, 0x04, 0x05, 0x06],
+            7,
+        ),
+        (
+            "MIC Key [UP]",
+            [0x1A, 0x05, 0x02, 0x02],
+            [0x11, 0x12, 0x13, 0x14],
+            20,
+        ),
+        (
+            "MIC Key [DN]",
+            [0x1A, 0x05, 0x02, 0x03],
+            [0x11, 0x12, 0x13, 0x14],
+            20,
+        ),
+    ];
+
+    /// A key set to send a keyer memory transmits when pushed: refused by anything
+    /// that can transmit, as the Time-Out Timer is, with the key, the value and the
+    /// menu item to change named; a warning for `radio check` and `radio setup`.
+    #[test]
+    fn a_key_set_to_a_keyer_memory_fails_a_command_that_can_transmit() {
+        for (name, cmd, memories, _) in KEYS {
+            for (n, v) in (1..).zip(memories) {
+                let rep = with(&cmd, Some(&[v]), Purpose::Transmit);
+                let case = format!("{name} {v:02X}\n{rep}");
+                assert!(!rep.passed(), "{case}");
+                assert_eq!(rep.failures().count(), 1, "{case}");
+                let c = rep.failures().next().unwrap();
+                assert_eq!(c.name, name, "{case}");
+                assert_eq!(c.value, format!("Voice/Keyer/RTTY Memory {n}"), "{case}");
+                assert!(c.note.contains(&format!("memory {n}")), "{case}");
+                assert!(c.note.contains("Key Customize"), "{case}");
+                for purpose in [Purpose::Check, Purpose::Setup] {
+                    let rep = with(&cmd, Some(&[v]), purpose);
+                    assert!(rep.passed(), "{name} {v:02X} for {purpose:?}\n{rep}");
+                    assert_eq!(level_of(&rep, name), Level::Warn, "{name} for {purpose:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_other_key_function_passes_and_is_reported() {
+        for (name, cmd, memories, functions) in KEYS {
+            let mut passed = 0;
+            for v in 0x00..=0xFF {
+                if memories.contains(&v) {
+                    continue;
+                }
+                let rep = with(&cmd, Some(&[v]), Purpose::Transmit);
+                if rep.passed() {
+                    let c = rep.checks.iter().find(|c| c.name == name).unwrap();
+                    assert_eq!(c.level, Level::Pass, "{name} {v:02X}\n{rep}");
+                    assert!(!c.value.is_empty() && c.value != "-", "{name} {v:02X}");
+                    passed += 1;
+                }
+            }
+            // Every function in the table but the four memories.
+            assert_eq!(passed, functions - 4, "{name}");
+        }
+    }
+
+    /// With MIC Up/Down Keyer ON the microphone's keys key CW: refused like a key on
+    /// a keyer memory, and a failure for every command if it cannot be read.
+    #[test]
+    fn the_mic_up_down_keyer_on_fails_a_command_that_can_transmit() {
+        let cmd = [0x1A, 0x05, 0x01, 0x65];
+        let name = "MIC Up/Down Keyer";
+        let rep = with(&cmd, Some(&[0x01]), Purpose::Transmit);
+        assert!(!rep.passed(), "{rep}");
+        assert_eq!(rep.failures().count(), 1, "{rep}");
+        assert_eq!(level_of(&rep, name), Level::Fail);
+        for purpose in [Purpose::Check, Purpose::Setup] {
+            let rep = with(&cmd, Some(&[0x01]), purpose);
+            assert!(rep.passed(), "{purpose:?}\n{rep}");
+            assert_eq!(level_of(&rep, name), Level::Warn, "{purpose:?}");
+        }
+        for purpose in PURPOSES {
+            assert_eq!(
+                level_of(&with(&cmd, Some(&[0x00]), purpose), name),
+                Level::Pass
+            );
+            for data in [None, Some(&[0x02][..])] {
+                let rep = with(&cmd, data, purpose);
+                assert!(!rep.passed(), "{data:02X?} for {purpose:?}\n{rep}");
+                assert_eq!(
+                    level_of(&rep, name),
+                    Level::Fail,
+                    "{data:02X?} for {purpose:?}"
+                );
+            }
+        }
+    }
+
+    /// A setting that cannot be read, or reads as something the table does not
+    /// list, fails whatever the command, as the Time-Out Timer does.
+    #[test]
+    fn an_unread_or_unknown_key_setting_fails() {
+        for (name, cmd, _, _) in KEYS {
+            // 0Ah to 0Fh are in no table: not in the front keys' 00 to 06, and not
+            // BCD for the microphone's "00" to "19".
+            for data in [
+                None,
+                Some(&[0x0A][..]),
+                Some(&[0x0F]),
+                Some(&[0x20]),
+                Some(&[0xFF]),
+            ] {
+                for purpose in PURPOSES {
+                    let rep = with(&cmd, data, purpose);
+                    let case = format!("{name} {data:02X?} for {purpose:?}\n{rep}");
+                    assert!(!rep.passed(), "{case}");
+                    assert_eq!(level_of(&rep, name), Level::Fail, "{case}");
+                    assert_eq!(rep.failures().count(), 1, "{case}");
+                }
+            }
+        }
     }
 
     #[test]
