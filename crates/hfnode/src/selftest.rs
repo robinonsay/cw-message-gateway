@@ -422,7 +422,9 @@ pub struct Outcome {
     /// What happened, beyond the checks.
     pub facts: Facts,
     /// Earlier runs of the scenario that were not judged, and why: the machine
-    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]).
+    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]),
+    /// or, in a keyer run, held up a write for as long and the operator took an over
+    /// for cut short.
     pub not_judged: Vec<String>,
 }
 
@@ -448,6 +450,9 @@ pub struct Facts {
     pub extra_transmissions: u32,
     /// Why the script stopped early, if it did.
     pub script_failures: Vec<String>,
+    /// The node's overs the operator took for cut short: they stopped for
+    /// [`CUT_AFTER`] before their `DE <call> K`.
+    pub cut_overs: u32,
 }
 
 impl Outcome {
@@ -471,7 +476,7 @@ impl Outcome {
         if !self.not_judged.is_empty() {
             let _ = write!(
                 s,
-                " (after {} run(s) not judged: the machine paused)",
+                " (after {} run(s) not judged: the machine held the test up)",
                 self.not_judged.len()
             );
         }
@@ -846,6 +851,8 @@ struct Air {
     restarts: u32,
     /// Transmissions in exchanges beyond the first open and the first `OK`.
     extra: u32,
+    /// The node's overs taken for cut short.
+    cuts: u32,
     /// The node tunes when it starts listening (not if it starts with transmitting
     /// inhibited): the operator waits for that before calling.
     tune_at_start: bool,
@@ -1106,6 +1113,7 @@ impl Air {
                     self.note(format!("NODE  {text}"));
                     return Ok(Heard::Over(text));
                 }
+                self.cuts += 1;
                 if text.is_empty() {
                     self.note("NODE  (cut short before the first character)");
                 } else {
@@ -1565,13 +1573,16 @@ fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
 type Finished<R> = (anyhow::Result<()>, Station<R>, Session, FakeServices);
 
 /// Times a scenario runs again after a run its `machine` check failed (the machine
-/// paused the test for longer than the scenario's timing allows). A failure of
-/// that check on the last of them stands: the machine could not run the scenario.
+/// paused the test, or in a keyer run held up a write, for longer than the
+/// scenario's timing allows). A failure of that check on the last of them stands:
+/// the machine could not run the scenario.
 const NOT_JUDGED_RERUNS: usize = 2;
 
 /// Run one scenario at `scale` times real time. A run the machine paused in for
 /// longer than the scenario's timing allows is not judged, pass or fail: it runs
-/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it.
+/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it. A keyer run
+/// that failed because the disk held up a write for as long is not judged either
+/// ([`any_radio::disk_write_check`]).
 pub fn run(s: &Scenario, scale: f32) -> Outcome {
     judged(|| run_once(s, scale))
 }
@@ -1904,6 +1915,7 @@ fn air(s: &Scenario, radio: AirRadio, tx: Option<BlockSender>, book: CodeBook, s
         wrong_read_backs: 0,
         restarts: 0,
         extra: 0,
+        cuts: 0,
         tune_at_start,
         first_try: false,
         tunes_noted: 0,
@@ -1929,6 +1941,7 @@ fn operate<R: Rig + 'static>(
         restarts: air.restarts,
         extra_transmissions: air.extra,
         script_failures: failures.clone(),
+        cut_overs: air.cuts,
         ..Facts::default()
     };
     out.checks.push(check(
@@ -5266,6 +5279,110 @@ mod tests {
         assert!(!any_radio::machine_check(ms(350), 10.0, 5.0).pass);
         assert!(any_radio::machine_check(ms(999), 10.0, 1.0).pass);
         assert!(!any_radio::machine_check(ms(1001), 10.0, 1.0).pass);
+    }
+
+    #[test]
+    fn a_keyer_run_cut_short_while_the_disk_held_a_write_up_is_run_again() {
+        let ms = Duration::from_millis;
+        // A keyer run at 5x whose process never paused: these checks besides
+        // `machine`, `cuts` overs the operator took for cut short, and `write` its
+        // longest disk write.
+        let run = |checks: &[(&'static str, bool)], cuts: u32, write: Duration| {
+            let mut out = outcome_with(checks);
+            out.facts.cut_overs = cuts;
+            out.checks
+                .push(any_radio::machine_check(ms(10), 160.0, 5.0));
+            any_radio::disk_write_check(&mut out, (write, 160.0), 5.0);
+            out
+        };
+        let machine = |out: &Outcome| {
+            out.checks
+                .iter()
+                .find(|c| c.name == "machine")
+                .cloned()
+                .unwrap()
+        };
+        let cut_short = [("script", false), ("keyed", true)];
+        let passed = [("script", true), ("keyed", true)];
+        // What failed keyer-rx-long on a Windows runner: a write held up for a
+        // second or more between two pieces, the over taken for cut short.
+        let m = machine(&run(&cut_short, 1, ms(1200)));
+        assert!(
+            !m.pass && m.detail.contains("says nothing about the node"),
+            "{}",
+            m.detail
+        );
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            match runs {
+                1 => run(&cut_short, 1, ms(1200)),
+                _ => run(&passed, 0, ms(5)),
+            }
+        });
+        assert_eq!(runs, 2);
+        assert!(out.passed(), "{}", out.render());
+        assert!(
+            out.not_judged[0].contains("failed script"),
+            "{:?}",
+            out.not_judged
+        );
+
+        // Under a second of radio time, the failure stands.
+        assert!(machine(&run(&cut_short, 1, ms(199))).pass);
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            run(&cut_short, 1, ms(199))
+        });
+        assert_eq!(runs, 1);
+        assert!(!out.passed());
+
+        // However slow the disk, a failure stands if no over was cut short, or if a
+        // check of the node's own conduct failed too.
+        for (checks, cuts) in [
+            (&cut_short[..], 0),
+            (&[("script", false), ("forced receive", false)][..], 1),
+            (&[("script", true), ("safety", false)][..], 1),
+            (&[("script", false), ("ended", false)][..], 1),
+            (&[("script", false), ("alert", false)][..], 1),
+            (&[("script", false), ("station ID", false)][..], 1),
+            (&[("script", false), ("self-decode", false)][..], 1),
+        ] {
+            let m = machine(&run(checks, cuts, ms(1200)));
+            assert!(m.pass, "{checks:?}: {}", m.detail);
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                run(checks, cuts, ms(1200))
+            });
+            assert_eq!(runs, 1, "{checks:?}");
+            assert!(!out.passed(), "{checks:?}");
+        }
+
+        // A run that passed every other check stands, however slow the disk.
+        let m = machine(&run(&passed, 0, ms(1200)));
+        assert!(
+            m.pass && m.detail.contains("every other check"),
+            "{}",
+            m.detail
+        );
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            run(&passed, 1, ms(1200))
+        });
+        assert_eq!(runs, 1);
+        assert!(out.passed());
+
+        // A disk that keeps holding writes up fails the scenario.
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            run(&cut_short, 1, ms(1200))
+        });
+        assert_eq!(runs, NOT_JUDGED_RERUNS + 1);
+        assert!(!out.passed());
     }
 
     #[test]

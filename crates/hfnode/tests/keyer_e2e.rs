@@ -9,7 +9,8 @@
 //! They run at most [`selftest::KEYER_MAX_SCALE`] times real time, or
 //! `HFNODE_E2E_SCALE` if lower. A run the machine paused the test in for longer
 //! than the scenario's timing allows is not judged and runs again (its `machine`
-//! check, `selftest::run`).
+//! check, `selftest::run`), and so is one the machine's disk cut short by holding
+//! up the node's write between two pieces for as long.
 
 use hfnode::selftest;
 

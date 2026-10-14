@@ -29,6 +29,23 @@
 //! and the scenario fails through no fault of the node. Each run measures the
 //! longest pause (its `machine` check); a run with a pause of [`PAUSE_LIMIT`] of
 //! radio time or more is not judged, and [`super::run`] runs it again.
+//!
+//! **A busy disk.** The node writes its state (the duty file after every piece it
+//! keys) on the thread that keys, so a write the machine's disk holds up holds up
+//! the node's next piece as long, while the rest of the process runs on and the
+//! pause meter sees nothing. At 5x a write held up for a second leaves 5 s more of
+//! silence between two pieces, and the field operator takes the over for cut short
+//! and answers it while the node is still sending (two failures of `keyer-rx-long`
+//! on a Windows runner fit this, and freezing the disk for 3 s part-way through its
+//! readout does it). Each run also measures the longest write to its scratch
+//! directory ([`DiskMeter`]). One of [`PAUSE_LIMIT`] of radio time or more excuses
+//! a run in which the operator took an over for cut short and which failed only
+//! checks of how the exchange went ([`DISK_EXCUSES`]); that run is not judged, as
+//! after a pause. Any other run stands, passed or failed: a slow write cannot make
+//! a run pass, and a slow disk is just where a node that writes at the wrong moment
+//! fails a safety check, forces receive, alerts or hangs (the station once timed
+//! its duty-file write as keying, which locked it out on a Windows runner only), so
+//! those failures are never excused.
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -157,6 +174,139 @@ impl Drop for PauseMeter {
             let _ = h.join();
         }
     }
+}
+
+/// How often the disk meter writes (real time): often enough that a disk held up
+/// for a little more than the limit and one tick (0.3 s at 5x) is measured at the
+/// limit or over. A write to a disk nothing holds up takes a few milliseconds.
+const DISK_TICK: Duration = Duration::from_millis(100);
+
+/// Measures how long the machine's disk holds up a small write: a thread that, every
+/// [`DISK_TICK`], writes a file in the scenario's scratch directory (where the
+/// node's state directory is) through a file beside it, as the node writes its duty
+/// file, and keeps the longest it took. Nothing the node does holds it up; a disk
+/// the machine holds up for a while holds up its next write as long, less a tick and
+/// a little more at most. A hold-up of the node's own file alone (a virus scanner
+/// reading it) does not reach it, and the run then stands.
+struct DiskMeter {
+    stop: Arc<AtomicBool>,
+    /// The longest write (real time), and the radio time it ended.
+    thread: Option<JoinHandle<(Duration, f64)>>,
+}
+
+impl DiskMeter {
+    fn start(dir: &Path, clock: Clock) -> Self {
+        let (file, tmp) = (dir.join("disk-meter"), dir.join("disk-meter.tmp"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let mut longest = (Duration::ZERO, 0.0);
+                loop {
+                    thread::sleep(DISK_TICK);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let t0 = Instant::now();
+                    // Timed whether or not it worked: a write that fails late was
+                    // held up as long.
+                    let _ = std::fs::write(&tmp, format!("{}\n", clock.ms()))
+                        .and_then(|()| std::fs::rename(&tmp, &file));
+                    let took = t0.elapsed();
+                    if took > longest.0 {
+                        longest = (took, clock.secs());
+                    }
+                }
+                longest
+            })
+        };
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stop measuring: the longest write (real time), and the radio time it ended.
+    fn longest(mut self) -> (Duration, f64) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or((Duration::ZERO, 0.0))
+    }
+}
+
+impl Drop for DiskMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The checks a write held up between two pieces can fail with nothing wrong in the
+/// node: the operator takes the over for cut short and answers it, so the exchange
+/// goes off its script, and what the node keys, reads out and decodes is not what
+/// the script expects. A failure of any other check stands, however slow the disk.
+const DISK_EXCUSES: &[&str] = &["script", "keyed", "gateway", "last_seq", "heard"];
+
+/// Add a keyer run's longest disk write ([`DiskMeter`]: real time, and the radio
+/// time it ended) to its `machine` check. A write held up for [`PAUSE_LIMIT`] of
+/// radio time or more fails the check, so that [`super::run`] runs the scenario
+/// again, only if the operator took an over for cut short and every other check
+/// that failed is one of [`DISK_EXCUSES`].
+pub(super) fn disk_write_check(out: &mut Outcome, write: (Duration, f64), scale: f32) {
+    let (took, at) = write;
+    let limit = PAUSE_LIMIT.div_f32(scale);
+    let failed: Vec<&str> = out
+        .checks
+        .iter()
+        .filter(|c| !c.pass && c.name != "machine")
+        .map(|c| c.name)
+        .collect();
+    let never: Vec<&str> = failed
+        .iter()
+        .copied()
+        .filter(|n| !DISK_EXCUSES.contains(n))
+        .collect();
+    let cut = out.facts.cut_overs > 0;
+    let Some(c) = out.checks.iter_mut().find(|c| c.name == "machine") else {
+        return;
+    };
+    let measured = format!(
+        "longest write to the disk {:.2} s ({:.1} s radio time, at {at:.0} s)",
+        took.as_secs_f32(),
+        took.mul_f32(scale).as_secs_f32()
+    );
+    let stands = if failed.is_empty() {
+        Some("every other check passed, which a slow disk cannot cause".to_string())
+    } else if !never.is_empty() {
+        Some(format!(
+            "the run failed {}, which a slow disk does not excuse",
+            never.join(", ")
+        ))
+    } else if !cut {
+        Some("the operator took no over for cut short, the only way a slow disk fails a run".into())
+    } else {
+        None
+    };
+    c.detail = if took < limit || !c.pass {
+        format!("{}; {measured}", c.detail)
+    } else if let Some(why) = stands {
+        format!(
+            "{}; {measured}: longer than the scenario's timing allows, but {why}",
+            c.detail
+        )
+    } else {
+        c.pass = false;
+        format!(
+            "{}; {measured}: the disk held up a write for longer than the scenario's timing \
+             allows at {scale}x (the node writes its state on the thread that keys), and the \
+             operator took an over for cut short, so the run says nothing about the node",
+            c.detail
+        )
+    };
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -365,6 +515,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let book = node::load_codebook(&cfg)?;
     let clock = Clock::new(scale);
     let pauses = PauseMeter::start(clock);
+    let disk = DiskMeter::start(&dir.0, clock);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
         monitor_settings(&cfg, scale),
@@ -447,10 +598,12 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let ran = operate(s, &mut air, &done, out);
     out.checks.push(pauses.check(scale));
     let Some((station, session, svc)) = ran else {
+        disk_write_check(out, disk.longest(), scale);
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
-    // How the node left the box, before dropping the station stops it.
+    // How the node left the box, before dropping the station stops it, and before
+    // waiting for the disk meter, which can take a tick and a slow write.
     let (left_keying, stops) = {
         let b = keyer_box.now();
         let stops = b.lines[first_line..]
@@ -459,6 +612,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
             .count();
         (b.key_down() || b.running(), stops)
     };
+    let write = disk.longest();
     drop(station);
     let notices: Vec<_> = alerts.try_iter().collect();
     let AirRadio::Keyer(k) = &air.radio else {
@@ -476,6 +630,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         .push(box_safety(&cfg, e, &keyer_box, left_keying, inhibited));
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
+    disk_write_check(out, write, scale);
     // On a failure, what the station recorded (why a transmission failed, among
     // others): a test keeps no log of the node's.
     if !out.passed() {
