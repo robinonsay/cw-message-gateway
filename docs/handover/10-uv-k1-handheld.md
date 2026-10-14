@@ -276,7 +276,7 @@ From `bench/quansheng.md` (the bench file numbers its stages 0-8; its stages 3 a
 | 4 | Touch test (no RF) | Not started |
 | 5, 5b | Cable in, 0.2 V idle check, 30 s watch, then `commissioned = "listen"`; `key` and `sidetone` at Break-In OFF (no RF) | Not started |
 | 6, 7 | On the air: `key`, `sidetone`; then `commissioned = "keying"` and `hangtest`, `stucktest`, `linktest` | Cleared by the audit; waits for 1-5b and Robin's go |
-| 8 | Later: the speaker into the box's GP26 for the one-Pico image | Waits for PR #31 to merge and be flashed ([11 Decoder box and one-Pico image](11-decoder-box-one-pico.md)) |
+| 8 | Later: the speaker into the box's GP26 for the one-Pico image | Waits for PR #31 to merge and be flashed ([11 Decoder box and the one-Pico image](11-decoder-box-one-pico.md)) |
 
 The audit's answer on the skipped continuity check: a wrong ground shows up as no keying at stage 5b, with no RF and no damage, as long as the radio runs on its battery alone with nothing in USB-C.
 
@@ -294,7 +294,7 @@ The audit's answer on the skipped continuity check: a wrong ground shows up as n
 | Keyer rig (`KeyerRig`) and sidetone monitor | calls in | B, C | `MCW` or `CW` runs; `Mode::Mute` (B) or `Mode::Sidetone` (C) | [09 Keyer box: host side](09-keyer-host-side.md) |
 | Keyer box firmware | USB serial | B, C | keyer protocol 4 (`HELLO`, `CW`, `MCW`, `STATUS`, `STOP`, `TEST ...`) | [08 Keyer box: firmware](08-keyer-box-firmware.md) |
 | The radio's speaker | audio in | all | sound card (A, B) or the Mac's built-in microphone on the bench (C) into the decoder and the monitor | [04 CW decoder and audio](04-cw-decoder-audio.md) |
-| One-Pico image (PR #31, draft, not on main) | later | C | the speaker into the box's GP26 instead of a sound card | [11 Decoder box and one-Pico image](11-decoder-box-one-pico.md) |
+| One-Pico image (PR #31, draft, not on main) | later | C | the speaker into the box's GP26 instead of a sound card | [11 Decoder box and the one-Pico image](11-decoder-box-one-pico.md) |
 | Config and CLI | reads | all | `[handheld]` (A), `[keyer] output` (B, C) | [15 Config, CLI and deployment](15-config-cli-deployment.md) |
 | Safety audit and bench | gates | all | every flash, wiring change and keyed stage | [14 Audit, bench and flashing](14-audit-bench-flashing.md) |
 

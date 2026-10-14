@@ -104,7 +104,7 @@ The [deployment figure above](#how-it-works) shows the node's neighbours: the su
 | Config section | Read by | Page |
 |---|---|---|
 | top level `state_dir` | `check_state_dir`, the station, the session, the gateways | this page, [05](05-node-loop-station-safety.md) |
-| top level `pending_timeout_secs` | `session_config` ([`crates/hfnode/src/node.rs:48-61`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/node.rs#L48-L61)) | [03 Field protocol, auth and session](03-field-protocol-auth-session.md) |
+| top level `pending_timeout_secs` | `session_config` ([`crates/hfnode/src/node.rs:48-61`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/node.rs#L48-L61)) | [03 Field protocol, codes and sessions](03-field-protocol-auth-session.md) |
 | `[station]` | `StationConfig::from_config` ([`crates/hfnode/src/station.rs:149-178`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/station.rs#L149-L178)), `commissioning::open_for`, the CI-V driver | [05](05-node-loop-station-safety.md), [07 CI-V and the IC-7300](07-civ-ic7300.md) |
 | `[audio]` | the capture and the decoder (`decoder_config`, [`crates/hfnode/src/config.rs:1197-1202`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L1197-L1202)) | [04 CW decoder and audio](04-cw-decoder-audio.md) |
 | `[auth]` | `load_codebook` ([`crates/hfnode/src/node.rs:36-46`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/node.rs#L36-L46)) | [03](03-field-protocol-auth-session.md) |
@@ -114,7 +114,7 @@ The [deployment figure above](#how-it-works) shows the node's neighbours: the su
 | `[storm]` | the storm watch | [05](05-node-loop-station-safety.md) |
 | `[filter]` | the reply filter | [06](06-gateways-messages.md) |
 | `[keyer]` | the keyer host side | [09 Keyer box: host side](09-keyer-host-side.md) |
-| `[handheld]` | the handheld route (parked) | [10 UV-K1 handheld](10-uv-k1-handheld.md) |
+| `[handheld]` | the handheld route (parked) | [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md) |
 
 Outside the config, the node reads two secrets from environment variables named in the config, a key file named in the config, and writes only in the state directory (and in files named on the command line: `keygen --out`, `record --out`, `synth --out`, `testvectors --out`, `messages check --save-raw`, `selftest --csv`).
 
@@ -727,7 +727,7 @@ Unverified:
 - Add a test that the plist's `ExitTimeOut` covers the script's stop timeout plus its receive check.
 - Fix the doc drift listed above.
 - A `hfnode check-config` (or similar) that only loads and validates would save operators from using `storm` for it: not found in the code at `44185fa`.
-- The decoder box (PRs #30 and #31, not on main) has no config key on main; the planned PR 4 adds a `[receive]` section (`source = "audio"` or `"box"`, `box_port`) and `selftest --box` (project files, `design/pico-decoder-pr4.patch`, not opened). This page will need those keys when it lands. See [11 Decoder box (one Pico)](11-decoder-box-one-pico.md).
+- The decoder box (PRs #30 and #31, not on main) has no config key on main; the planned PR 4 adds a `[receive]` section (`source = "audio"` or `"box"`, `box_port`) and `selftest --box` (project files, `design/pico-decoder-pr4.patch`, not opened). This page will need those keys when it lands. See [11 Decoder box and the one-Pico image](11-decoder-box-one-pico.md).
 - PR #31 (draft) adds `hfnode keyer core1test [--fault]` and its README row.
 - PR #27 (open, ready, audit-cleared) adds read-only preflight reads of the front-panel keys, the microphone keys and MIC Up/Down Keyer, which `radio tune`, `radio cw` and `run` will then require ([`crates/civ/src/preflight.rs:10-13`](https://github.com/robinonsay/cw-message-gateway/blob/3c97427bcf59fcb8223af7a3676eeebdec529f52/crates/civ/src/preflight.rs#L10-L13)), and edits section 6 of [docs/raspberry-pi-setup.md](../raspberry-pi-setup.md). When it merges, the [IC-7300 preflight](#ic-7300-preflight-before-anything-is-written) paragraph and the "Needs" column above change with it.
 

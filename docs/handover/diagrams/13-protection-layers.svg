@@ -43,9 +43,9 @@
   <rect x="104" y="484" width="512" height="190" rx="10" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
   <text x="118" y="508" font-weight="bold">6. The radio's time-out timer</text>
   <text x="602" y="508" font-size="14" fill="#4b5563" text-anchor="end">works with the box failed</text>
-  <text x="118" y="528" font-size="14">IC-7300 TOT 3 min, required; covers CI-V, not the KEY jack</text>
-  <text x="118" y="546" font-size="14">UV-K1 in FM: 1 min. NR7Y CW mode: none</text>
-  <text x="118" y="564" font-size="14">None yet measured on a radio</text>
+  <text x="118" y="528" font-size="14">IC-7300 TOT 3 min, required by the preflight</text>
+  <text x="118" y="546" font-size="14">Covers CW keyed by CI-V 17: unproven (H11). Not the KEY jack</text>
+  <text x="118" y="564" font-size="14">UV-K1 in FM: 1 min. NR7Y CW: none. None measured yet</text>
 
   <!-- 7 hardware timer (planned, purple dashed) -->
   <rect x="120" y="582" width="480" height="76" rx="10" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>

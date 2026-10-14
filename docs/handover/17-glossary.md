@@ -36,6 +36,12 @@ Several words mean different things in different parts of the project. When you 
 | watchdog | (1) The keyer box's hardware watchdog, which its control loop must feed every `WATCHDOG_MS = 500` ms ([`crates/keyer-core/src/lib.rs:61-62`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/lib.rs#L61-L62)). (2) The host's software keying watchdog, a thread that forces the radio to receive after `station.max_key_seconds` of keying ([`crates/hfnode/src/station.rs:21-24`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/station.rs#L21-L24)). (3) The parked UV-K1 firmware's own hardware watchdog, which resets the radio if it hangs during a run ([`crates/hfnode/src/handheld.rs:27-30`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/handheld.rs#L27-L30)). The hardware transmit timer of test-plan step 10 is a separate device, not any of these. See [Watchdog](#watchdog). |
 | key | (1) A Morse key, or a radio's [key line](#key-line-and-keying). (2) The node's secret key for the code sheet: the file `auth.key_file`, made with `hfnode keygen --out` ([`crates/hfnode/src/config.rs:197-198`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L197-L198), [`crates/hfnode/src/main.rs:31-35`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/main.rs#L31-L35)). (3) The IC-7300's front-panel and microphone keys, which PR #27 (open, not on main) checks are not set to send a keyer memory (see [Preflight](#preflight)). |
 | session | (1) `hfnode::session::Session`, the transaction state machine. (2) In the bench docs, one sitting at the radio. See [Session](#session). |
+| step | (1) A step of [`docs/hardware-test-plan.md`](../hardware-test-plan.md), the IC-7300 bring-up, numbered -1 to 13: [`docs/hardware-test-plan.md:316`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/hardware-test-plan.md#L316), [`docs/hardware-test-plan.md:1079`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/hardware-test-plan.md#L1079). (2) A flashing step in `docs/keyer.md`, 1 to 5 on main ([`docs/keyer.md:128-141`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L128-L141)); PR #31 adds a sixth. (3) A keyer-box bring-up step in `docs/keyer.md`, 1 to 10 on main ([`docs/keyer.md:256-310`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L256-L310)); PR #31 adds step 11, `core1test`, and the handheld and NR7Y sections number their own. (4) A [bench stage](#bench-stage) in a bench file (project files), which runs test-plan steps under other numbers: `bench/ic7300.md` stage 8 is test-plan step 5. (5) A config bring-up [stage](#stage). Always qualify it, as in "test-plan step 10" or "IC-7300 bench stage 8". |
+| thread | (1) An operating-system thread in `hfnode`, such as the keep-alive thread or the station's watchdog thread. This is the only meaning in the code. (2) A work stream: one separate Claude session with one role, such as "the audit thread". See [Thread (work stream)](#thread-work-stream). |
+| C1, C3 | (1) Criteria of the audit's rubric (`audit/rubric.md` §C, project files): C1 "Power bounded", C3 "Thermal". (2) The UV-K1 route constraints C1 to C11 (`audit/req-handheld-generic-route-constraints.md` §2): C1 "Pinout from evidence", C3 "The box's limits must fit PTT", which the code cites for the PTT limit ([`crates/keyer-core/src/lib.rs:53-57`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/lib.rs#L53-L57)). Say "rubric C3" or "route constraint C3". See [Audit IDs](#audit-ids). |
+| H1 to H8 | (1) The rubric's unattended-use criteria H1 to H7 (`audit/rubric.md` §H); H1 is "Bench proven" ([H1](#h1)), and there is no rubric H8. (2) The IC-7300 items that need hardware, H1 to H11 (`audit/report.md` §4): H1 there is "DTR/RTS at port open", H8 "Meters (steps 6, 8)". The report's "C1/H7/H8 stay BENCH" means rubric C1 and report items H7 and H8. See [Audit IDs](#audit-ids). |
+| K1 | (1) The Quansheng UV-K1 handheld, often called "the K1". (2) Finding K1 of the audit's IC-7300 review, one of K1 to K16 (`audit/report.md` §4). (3) rustos's own known issue K1, one of K1 to K17 on rustos page 09 (Work left and known issues). See [Audit IDs](#audit-ids). |
+| PR 4, PR #4 | "PR 4" and "PR 5", with no `#`, are steps of the decoder plan that have no pull request yet. "PR #4" and "PR #5" are merged pull requests, in this repository and in rustos alike. See [PR 4 and PR 5 (planned)](#pr-4-and-pr-5-planned). |
 
 ## 0-9
 
@@ -105,6 +111,26 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 
 **Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md).
 
+### Audit IDs
+
+**Definition.** In this project, the short labels the safety audit gives its criteria, findings, constraints and open items, such as `C3`, `K11` or `KB-9`. Several families share letters, so a bare label is ambiguous: always say which document it comes from.
+
+**In this project.** Every family lives in the project files (not public):
+
+| Label | What it is | Defined in |
+|---|---|---|
+| A1-A6, B1-B8, C1-C3, D1-D4, E1-E2, F1-F3, H1-H7 | Rubric criteria: A installing firmware, B transmitter control, C RF and heat, D electrical interface, E data and configuration, F evidence, H unattended operation (H1 to H7 only). §G, regulatory, is flagged, not graded, and has no numbers. | `audit/rubric.md` |
+| KB-1 to KB-14 | Findings on the keyer box at `2e39996` | `audit/report.md` §1; `audit/req-keyer-box-fixes.md` |
+| Q1 to Q4; Q1-1 to Q1-14, Q2-1 to Q2-13 | The parked UV-K1 firmware audit: four question areas (Q1 flashing, Q2 calibration data, Q3 transmit control, Q4 keying paths), and the graded findings of the two that were finished | `audit/report.md` §2 |
+| K1 to K16 | Findings on the IC-7300 CI-V driver and guards at `2e39996` | `audit/report.md` §4; `audit/req-ic7300-fixes.md` |
+| H1 to H11 | IC-7300 items that need hardware, such as H8 "Meters (steps 6, 8)" and H11 "Does the TOT cover 17-keyed CW?". Not rubric criteria. | `audit/report.md` §4, "Open items that need hardware" |
+| C1 to C11 | Constraints on the UV-K1 as a plain radio on the keyer box, from C1 (pinout from evidence) to C11 (regulatory) | `audit/req-handheld-generic-route-constraints.md` §2 |
+| Questions 1 to 4 of §8 | What only Robin (the project owner) can say about her radios' NR7Y paddle rework | `audit/req-handheld-nr7y-cw-ruling.md` §8 |
+
+The code names some of them in its comments: route constraint C3 for the PTT limit ([`crates/keyer-core/src/lib.rs:53-57`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/lib.rs#L53-L57)), KB-2 for the stored sidetone level ([`crates/hfnode/src/keyer/bench.rs:85-89`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/keyer/bench.rs#L85-L89)), KB-9 for the fault-handler check ([`firmware/pico2-keyer/check_faults.py:5`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/check_faults.py#L5)), K6 for the full `state_dir` path ([`crates/hfnode/src/config.rs:911-914`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L911-L914)) and K11 for the preflight ([`crates/civ/src/preflight.rs:862`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/preflight.rs#L862)). The handover pages' own lists are separate again: [16 Work left and known bugs](16-work-left-known-bugs.md) numbers WL (work left), BG (code bugs), LM (known limits), FL (flakes), HW (hardware assumptions) and DOC (out-of-date documents), and rustos page 09 (Work left and known issues) numbers K1 to K17 and W1 to W15. [13 Safety rules (never loosen)](13-safety-rules.md) numbers its rules 1.1, 4.8 and so on. The words "step" and "stage" collide the same way (see the table at the top).
+
+**Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md), [16 Work left and known bugs](16-work-left-known-bugs.md).
+
 ### Automatic control
 
 **Definition.** A US amateur-radio term for a station that transmits without its control operator at the control point. The audit's rubric cites it as 47 CFR 97.109(d) (not checked against the eCFR here). Whether a given use is allowed under it is a legal question for the station's licensee, not a technical one.
@@ -115,6 +141,14 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 
 ## B
 
+### BCD
+
+**Definition.** Binary-coded decimal: each decimal digit is stored in four bits, two digits to a byte, so the byte `0x45` means 45, not 69. ICOM's CI-V protocol writes its numbers this way.
+
+**In this project.** A CI-V frequency is 5 BCD bytes, least significant byte first (`bcd_le`); a level such as RF power or keyer speed is 2 BCD bytes, most significant first (`bcd_be`, `00 00` to `02 55`). A nibble above 9 is not BCD, and decoding it gives `None`: [`crates/civ/src/frame.rs:82-120`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/frame.rs#L82-L120).
+
+**Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md).
+
 ### Bench stage
 
 **Definition.** One numbered step of a hardware bench test. Hardware stages are done by Robin (the project owner) at the radio, only on her go, and each result is recorded for the audit.
@@ -122,6 +156,14 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 **In this project.** The bench notes are project files. `bench/quansheng.md` numbers its stages 0, 0b, 1, H, 2 to 5, 5b and 6 to 8; its stages 0 and 0b check the code and the flash file, and nothing in them touches a radio. `bench/ic7300.md` numbers its stages 0 to 13 (stage 0 checks the code on the host) and maps them to the steps of [`docs/hardware-test-plan.md`](../hardware-test-plan.md). These numbers are not the config's bring-up [stages](#stage), and bench stage 0 is not `docs/keyer.md`'s "stage zero". Not found in the code at `44185fa`.
 
 **Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md).
+
+### BK4819
+
+**Definition.** The radio chip inside the Quansheng UV-K1: one chip that receives and transmits, set up by the radio's processor through its registers.
+
+**In this project.** Only the parked handheld route (route A, `firmware/uv-k1`) reads it. That firmware counts the radio as transmitting if its own state says so or the BK4819's transmit DSP bit (register `0x30`) is set, and it resets the chip as soon as its pins are set up at start-up: [`firmware/uv-k1/app/hfnode.c:210-221`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/uv-k1/app/hfnode.c#L210-L221), [`firmware/uv-k1/README.md:21`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/uv-k1/README.md#L21). Nothing in it has run on a radio. The keyer-box routes (B and C) never touch the chip.
+
+**Covered in.** [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md).
 
 ### BOOTSEL
 
@@ -221,6 +263,14 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 
 **Covered in.** [04 CW decoder and audio](04-cw-decoder-audio.md), [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md).
 
+### CWkin
+
+**Definition.** A menu item of NR7Y's CW firmware for the UV-K1: which input the radio's CW keyer reads as its key, and in what keying style (straight key, iambic paddle or bug, on the PTT line, the headset jack's port or the USB-C lines).
+
+**In this project.** On route C it must be `PTT HandKey`, which reads only the PTT line as a straight key. Never a Port mode, a USB Port mode, an iambic or a bug mode: Port modes drive the jack's serial-input pin low as a paddle ground, and in iambic or bug modes a held contact becomes repeated elements: [`docs/keyer.md:1161-1167`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L1161-L1167). **Never loosen** (rule 6.2 in [13 Safety rules (never loosen)](13-safety-rules.md)). Its neighbour `CWbkin` is the radio's break-in (see [Zero-RF](#zero-rf)). Not found in the code at `44185fa`: it is a radio setting.
+
+**Covered in.** [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md).
+
 ## D
 
 ### DE
@@ -254,6 +304,14 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 **In this project.** The keyer box on `main` does not use DMA. In the one-Pico image (PR #31, draft, not on main, untested on hardware), DMA channel 0 streams ADC samples into a 16 kB ring for the whole boot. Core 1 only reads the channel's position and the ring: [`firmware/pico2-keyer/src/core1.rs:67-72`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/src/core1.rs#L67-L72). The [decoder box](#decoder-box) (PR #30, not on main, untested on hardware) does the same on its one core: [`firmware/pico2-decoder/src/main.rs:64`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/firmware/pico2-decoder/src/main.rs#L64), [`firmware/pico2-decoder/src/main.rs:170-178`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/firmware/pico2-decoder/src/main.rs#L170-L178). See also [SECCFG](#seccfg).
 
 **Covered in.** [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md), and rustos page 05 (Drivers: GPIO, USB, PWM, ADC, DMA).
+
+### DTR and RTS
+
+**Definition.** Two output control lines of a serial port, Data Terminal Ready and Request To Send; a USB serial port carries them as signals from the computer to the device. Some radios can be set to transmit or key CW while one of them is raised, and opening a port can raise both for a moment, depending on the operating system.
+
+**In this project.** Every port the node opens, the IC-7300's, the keyer box's or a handheld's, has DTR and then RTS lowered at once, and is not used if either fails: [`crates/civ/src/serial.rs:1-14`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/serial.rs#L1-L14), [`crates/civ/src/serial.rs:40`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/serial.rs#L40). What makes the lines harmless on the IC-7300 is its [USB SEND and USB Keying](#usb-send-and-usb-keying) items set to OFF, which the preflight requires: [`crates/civ/src/ic7300.rs:35-63`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L35-L63). The keyer box's firmware never reads them: [`firmware/pico2-keyer/src/main.rs:22-23`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/src/main.rs#L22-L23). **Never loosen** (rules 1.11 and 4.3 in [13 Safety rules (never loosen)](13-safety-rules.md)). The pulse at port open has not been measured.
+
+**Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md), [09 Keyer box: host side](09-keyer-host-side.md).
 
 ### Dummy load
 
@@ -295,6 +353,14 @@ See [K](#k-1). `AR` ("end of message") and `SK` ("end of contact") are overs the
 **Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), [13 Safety rules (never loosen)](13-safety-rules.md).
 
 ## F
+
+### Fault flag
+
+**Definition.** In this project, a flag one part of the firmware raises so that another part learns a fault has happened.
+
+**In this project.** Only in the one-Pico image (PR #31, draft, not on main, untested on hardware): `LINK.fault`, an atomic flag in the memory the two cores share. The fault and panic handlers set it last in `safe_state`, after opening the key and the PTT; core 0 reads it every pass and trips the box (`CORE1`) at once if it is set: [`crates/keyer-core/src/cores.rs:125-126`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/cores.rs#L125-L126), [`firmware/pico2-keyer/src/main.rs:343-355`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/src/main.rs#L343-L355), [`crates/keyer-core/src/control.rs:217-228`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/control.rs#L217-L228). **Never loosen** (rule 1.19 in [13 Safety rules (never loosen)](13-safety-rules.md)). On `main`, the mock keyer box's fault options are something else: `BoxState` fields that make the mock box misbehave in tests (`deaf_to_silence`, `slow_wpm`, `hides_watchdog_trip`; see [09 Keyer box: host side](09-keyer-host-side.md)): [`crates/hfnode/src/keyer/mock.rs:231-239`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/keyer/mock.rs#L231-L239).
+
+**Covered in.** [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md) (the core-1 fault flag), [09 Keyer box: host side](09-keyer-host-side.md) (the mock box's fault options).
 
 ### Field operator
 
@@ -357,7 +423,7 @@ The decoder box and the one-Pico image are built into files of their own:
 
 **Definition.** In this project, criterion H1 "Bench proven" of the safety audit's rubric (`audit/rubric.md` §H, project files). It is met only when every bench item for keying has been measured on Robin's own hardware and passed, with the result written down; code alone never satisfies it.
 
-**In this project.** Unattended use is graded only from it: no route is cleared for unattended use until her bench results are in (`audit/final-grades.md`, project files). The bench files record each stage's result for it. Not found in the code at `44185fa`. See [Automatic control](#automatic-control) for the separate legal question.
+**In this project.** Unattended use is graded only from it: no route is cleared for unattended use until her bench results are in (`audit/final-grades.md`, project files). The bench files record each stage's result for it. Not found in the code at `44185fa`. See [Automatic control](#automatic-control) for the separate legal question. Item H1 of `audit/report.md` §4, "DTR/RTS at port open", is a different thing (see [Audit IDs](#audit-ids)).
 
 **Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md), [16 Work left and known bugs](16-work-left-known-bugs.md).
 
@@ -368,6 +434,22 @@ The decoder box and the one-Pico image are built into files of their own:
 **In this project.** `hfnode keyer hangtest` hangs the box's control loop mid-run, and its watchdog must reset it and open the key within 0.5 s. `hfnode keyer stucktest` makes the box hold its key down, and its 1 s limit must open it and trip the box. `hfnode keyer linktest` keys a long message and then stops talking to the box, and its link timeout must open the key: [`crates/hfnode/src/main.rs:312-321`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/main.rs#L312-L321). The box takes `TEST HANG` and `TEST STUCK` only within `ARM_MS = 2_000` ms of `TEST ARM`: [`crates/keyer-core/src/lib.rs:79-80`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/lib.rs#L79-L80). The parked handheld route has `hfnode handheld linktest` and `hangtest`: [`crates/hfnode/src/main.rs:332-339`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/main.rs#L332-L339). Stage `keying` allows the hang and stuck tests, and once both have shown the box opening the key on its own the keyer box's [stage](#stage) may be set to `done`: [`crates/hfnode/src/keyer.rs:133-137`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/keyer.rs#L133-L137).
 
 **Covered in.** [09 Keyer box: host side](09-keyer-host-side.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
+
+### HardFault
+
+**Definition.** The Arm Cortex-M exception (number 3) that the processor takes for a fault it cannot handle any other way: a bus fault, an illegal or misaligned access, or a jump through a bad pointer. Its handler runs in place of the program, and the program does not resume.
+
+**In this project.** rustos's `OnHardFault`, like its handler for every other unexpected exception (`DefaultHandler`), calls the application's `safe_state` first and then spins: [`firmware/pico2/src/lib.rs:459-469`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/lib.rs#L459-L469) (rustos master; the same handler, two lines higher, at the keyer's pin `8c91507`). The keyer box's `safe_state` opens the key and the PTT with one store to SIO `GPIO_OUT_CLR` before anything else, then turns the PWM off and holds the tone pin low, and the watchdog then resets the box: [`firmware/pico2-keyer/src/main.rs:236-252`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/src/main.rs#L236-L252). CI runs `check_faults.py`, which reads the built image and fails unless that store is the first one each handler makes (the audit's KB-9): [`firmware/pico2-keyer/check_faults.py:1-29`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/check_faults.py#L1-L29). **Never loosen** (the key line open in fault handlers; see [13 Safety rules (never loosen)](13-safety-rules.md)).
+
+**Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), [12 Testing](12-testing.md), and rustos page 02 (Boot and runtime).
+
+### Hardware transmit timer
+
+**Definition.** In this project, a separate piece of hardware, not built yet, that ends any IC-7300 transmission after about 60 s whatever the software does, by cutting the radio's DC supply. It is the last line of defence against a stuck transmitter. [`docs/hardware-test-plan.md`](../hardware-test-plan.md) calls it the hardware PTT timer.
+
+**In this project.** Test-plan step 10 specifies it and its test: [`docs/hardware-test-plan.md:876-879`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/hardware-test-plan.md#L876-L879). The node keys the IC-7300 with CI-V command `17`, so a timer in series with the KEY jack or a PTT line would not stop it: the timer must sense transmit (the rear SEND jack) and cut DC, never switch the antenna or RF path: [`docs/hardware-test-plan.md:891-912`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/hardware-test-plan.md#L891-L912). `run` accepts `station.max_key_seconds` of at most `RUN_MAX_KEY_SECONDS = 55`, below the timer's 60 s, so the node's own [watchdog](#watchdog) acts first: [`crates/hfnode/src/commissioning.rs:121-125`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/commissioning.rs#L121-L125). **Never loosen** (rules 5.2 and 7.15 in [13 Safety rules (never loosen)](13-safety-rules.md)). The audit requires it before unattended use (`audit/report.md` §4, H9, project files), and route C on the UV-K1 needs an independent hardware timer of its own (rule 6.3). It is none of the [watchdogs](#watchdog), and it is not the radio's [TOT](#tot), which the audit says is not proven to cover CW keyed with `17` (`audit/report.md` §4, H11). Not found in the code at `44185fa` beyond that limit.
+
+**Covered in.** [05 Node loop and station safety](05-node-loop-station-safety.md), [13 Safety rules (never loosen)](13-safety-rules.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
 
 ### Hash
 
@@ -410,6 +492,22 @@ The decoder box and the one-Pico image are built into files of their own:
 **In this project.** It is the node's default radio (`station.rig = "ic7300"`): [`crates/hfnode/src/config.rs:85-93`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L85-L93). The driver is `civ::ic7300`: [`crates/civ/src/ic7300.rs:1-13`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L1-L13). The design calls for 30-50 W: [`crates/hfnode/src/config.rs:64-66`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L64-L66). Until bring-up stage `keying` has passed, power is capped at `BENCH_MAX_WATTS = 10`: [`crates/hfnode/src/commissioning.rs:60-61`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/commissioning.rs#L60-L61). **Never loosen** (rule 4.6 in [13 Safety rules (never loosen)](13-safety-rules.md)). `hfnode` has never yet been connected to a real IC-7300 (bench notes, project files).
 
 **Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md).
+
+### IMAGE_DEF
+
+**Definition.** The RP2350's image metadata block: a few words between two marker words that the boot ROM looks for in the first 4 kB of flash before it will start a program. Without one the chip does not run the image and comes back as the `RP2350` drive (see [BOOTSEL](#bootsel)).
+
+**In this project.** rustos supplies it as `BOOT_INFO`, five words the linker script places in the first 4 kB: [`firmware/pico2/src/lib.rs:152-160`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/lib.rs#L152-L160) (rustos master; the same block, two lines higher, at the keyer's pin `8c91507`). The keyer's UF2 converter refuses an image with no IMAGE_DEF in its first 4 kB: [`firmware/pico2-keyer/uf2.py:18-19`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/uf2.py#L18-L19), [`firmware/pico2-keyer/uf2.py:37-39`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/uf2.py#L37-L39), [`firmware/pico2-keyer/uf2.py:109`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/uf2.py#L109).
+
+**Covered in.** [02 Codebase, build and CI](02-codebase-build-ci.md), [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), and rustos page 02 (Boot and runtime).
+
+### Inhibit Timer at USB Connection
+
+**Definition.** An IC-7300 menu item. While it is ON (ICOM's default), the radio holds off a USB SEND or keying signal for a few seconds after a computer opens its virtual serial port, to cover the moment the port opening may raise [DTR or RTS](#dtr-and-rts).
+
+**In this project.** CI-V `1A 05 01 97` reads it: [`crates/civ/src/ic7300.rs:186-187`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L186-L187). The preflight passes ON and only warns on OFF ("ICOM's default is ON; it covers the moment the port opens"): [`crates/civ/src/preflight.rs:442-458`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/preflight.rs#L442-L458). It only delays a line that stays up; what makes the lines harmless is [USB SEND and USB Keying](#usb-send-and-usb-keying) set to OFF: [`crates/civ/src/ic7300.rs:57-63`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L57-L63). On the bench it is checked ON by hand before the USB cable goes in, and turned OFF only for the item-number check, in a fixed order (rules 7.7 and 7.16 in [13 Safety rules (never loosen)](13-safety-rules.md)). It is not the radio's TX Inhibit (`16 66`; see [Transmit inhibit](#transmit-inhibit)).
+
+**Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
 
 ### ISO latch
 
@@ -527,6 +625,14 @@ The decoder box and the one-Pico image are built into files of their own:
 
 **Covered in.** [05 Node loop and station safety](05-node-loop-station-safety.md).
 
+### LOW 1
+
+**Definition.** The lowest setting of the UV-K1's `Power` menu on NR7Y's firmware. The watts it gives have not been measured.
+
+**In this project.** Route C runs at `Power` `LOW 1`: never `USER` or `HIGH`, and nothing above LOW 1 without the safety audit: [`docs/keyer.md:1192-1195`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L1192-L1195). The audit's on-air ruling clears the attended UV-K1 bench at LOW 1 on the radio's own antenna, never on coax (`audit/req-on-air-bench-ruling.md` §3, project files): [`docs/keyer.md:868-871`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L868-L871). **Never loosen** (rules 6.2 and 6.7 in [13 Safety rules (never loosen)](13-safety-rules.md)). Not found in the code at `44185fa`: it is a radio setting, and nothing on this route reads power or SWR.
+
+**Covered in.** [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
+
 ## M
 
 ### Maidenhead grid square
@@ -585,6 +691,14 @@ The [self-test](#selftest) runs the whole node against them.
 
 **Covered in.** [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md), and rustos page 06 (Multicore).
 
+### Mutant build
+
+**Definition.** In this project, a deliberately broken build of the firmware, made to prove that a check on the built image catches the breakage it exists to catch. A check that lets a mutant through proves nothing.
+
+**In this project.** Only on the open pull requests, run by hand and not in CI. `mutants.py` (PR #30, not on main) builds seven broken decoder images, for example one that sets GP16 high at boot, and fails unless `check_pins.py` rejects every one: [`firmware/pico2-decoder/mutants.py:1-19`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/firmware/pico2-decoder/mutants.py#L1-L19). `mutants_core1.py` (PR #31, draft, not on main) does the same with eight broken one-Pico images against `check_core1.py`, for example core 1 storing to `GPIO_OUT_SET`: [`firmware/pico2-keyer/mutants_core1.py:1-19`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/mutants_core1.py#L1-L19). Both build what is committed (`git archive`), never the working tree. Not found in the code at `44185fa`. A new rule in either check gets a mutant of its own.
+
+**Covered in.** [12 Testing](12-testing.md), [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md).
+
 ## N
 
 ### NR7Y firmware
@@ -626,6 +740,14 @@ See [K](#k-1).
 **In this project.** The code cites §97.119(a) for identification ([Station ID](#station-id-and-47-cfr-97119)), §97.301 and §97.305(a) for the band table, and §97.305(c) for the MCW bands (50.1-54, 144.1-148, 222-225 and 420-450 MHz). Those band edges are marked "from memory, not checked against the eCFR": [`crates/hfnode/src/keyer.rs:37-67`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/keyer.rs#L37-L67). It cites §97.113 for the content of inbound messages, which the reply filter screens: [`crates/hfnode/src/gateway/filter.rs:1-21`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/gateway/filter.rs#L1-L21). The audit grades hardware safety only; Part 97 questions, including [automatic control](#automatic-control) for unattended operation (§97.109(d)), are outside it and are Robin's call as licensee (`audit/rubric.md` §G and §H; `audit/final-grades.md`, project files). Separately, unattended operation is not cleared on any route until Robin's own bench results are in ([H1](#h1)). An earlier IC-7300 grading (`audit/report.md` §4, at `2e39996`, 2026-10-07) called unattended use out of scope until the Part 97 automatic-control question was answered. Rubric section H (added 2026-10-08) replaced that, and `audit/final-grades.md` now grades IC-7300 unattended "not yet": it needs Robin's bench results (H1), the hardware timer of test-plan step 10 and the audit's link-loss test.
 
 **Covered in.** [06 Gateways and messages](06-gateways-messages.md), [13 Safety rules (never loosen)](13-safety-rules.md), [16 Work left and known bugs](16-work-left-known-bugs.md) (WL15).
+
+### Pause meter and not-judged runs
+
+**Definition.** In this project, the self-test's measure of how long a busy machine stopped the whole test process, and what it does with a run such a pause may have spoiled.
+
+**In this project.** `PauseMeter` is a thread that looks at the clock every 5 ms and keeps every longer gap; nothing the node does can hold it up, only the machine: [`crates/hfnode/src/selftest/any_radio.rs:57-66`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest/any_radio.rs#L57-L66). Its longest pause is the run's `machine` check: at most 1 s of radio time for a `keyer-` scenario ([`crates/hfnode/src/selftest/any_radio.rs:50-55`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest/any_radio.rs#L50-L55)), and `pause_limit(scale)`, 500 ms / scale + 20 ms of real time, for an IC-7300 scenario ([`crates/hfnode/src/selftest.rs:133-142`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest.rs#L133-L142)). A run whose `machine` check failed is "not judged": it is set aside and run again, at most `NOT_JUDGED_RERUNS = 2` times, and the last allowed run stands whatever it says: [`crates/hfnode/src/selftest.rs:1567-1581`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest.rs#L1567-L1581). A pause never makes a failing check pass, and the check's own limit is never raised to get a run through. See [Time scale](#time-scale).
+
+**Covered in.** [12 Testing](12-testing.md).
 
 ### PC817 optocoupler
 
@@ -675,6 +797,14 @@ See [K](#k-1).
 
 **Covered in.** [05 Node loop and station safety](05-node-loop-station-safety.md), [07 CI-V and the IC-7300](07-civ-ic7300.md).
 
+### PR 4 and PR 5 (planned)
+
+**Definition.** In this project, steps of the decoder plan that have no pull request yet. The plan (`design/spec-pico-decoder.md`, "PRs", project files) numbers its work PR 1 to PR 7 with no `#`; those are not GitHub numbers.
+
+**In this project.** Plan PR 4 adds `[receive] source = "box"`, so that `hfnode` hears through the [decoder box](#decoder-box), with a mock box and self-tests, receive only. It exists only as a patch in the project files (`design/pico-decoder-pr4.patch`) and is to be opened after PR #30 merges; on PR #30, hfnode does not use the box yet: [`docs/decoder.md:16`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/docs/decoder.md#L16). Plan PR 5 feeds the keyer rig's [sidetone monitor](#sidetone-monitor) from the box's `SL` level lines; it is keyer-area work and needs the audit's review. In the same plan, PR 3 is PR #30, PR 6 is rustos PR #6, and PR 7 is PR #31 together with the still-planned `source = "keyer"`. "PR #4" and "PR #5", with a `#`, are merged pull requests in both repositories and have nothing to do with these. Not found in the code at `44185fa`.
+
+**Covered in.** [16 Work left and known bugs](16-work-left-known-bugs.md), [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md).
+
 ### Preflight
 
 **Definition.** In this project, the read-only check of the IC-7300 that runs before the node writes anything to it. Because it only reads, a radio in an unsafe state is refused before anything has been written to it.
@@ -707,6 +837,14 @@ See [K](#k-1).
 
 **Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), and rustos page 05 (Drivers: GPIO, USB, PWM, ADC, DMA).
 
+### PY32F071
+
+**Definition.** The UV-K1's processor, a microcontroller that runs the radio's firmware and reads its PTT and key inputs on its own pins.
+
+**In this project.** On route C the radio's key line is a PY32F071 pin with a 30-70 kΩ internal pull-up, so the key switch has at most about 110 µA to sink and must pull the pin below about 1.0 V at 3.3 V: [`docs/keyer.md:995-998`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L995-L998). With NR7Y's paddle rework the 3.5 mm tip reaches its PTT pin, PB10, directly (`audit/req-handheld-nr7y-cw-ruling.md` §8, project files). Whether its watchdog survives a system reset is an open audit item for the parked route A (`audit/report.md` §2, Q1-8). Not found in the code at `44185fa`; the repo docs name it.
+
+**Covered in.** [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md).
+
 ## Q
 
 ### QRL?
@@ -735,6 +873,14 @@ See [K](#k-1).
 
 **Covered in.** [03 Field protocol, codes and sessions](03-field-protocol-auth-session.md).
 
+### Reply filter
+
+**Definition.** In this project, the screening of inbound third-party messages, the texts and emails people send to the field operator, before the node keys them on the air. The station's licensee answers for everything it transmits (47 CFR 97.113), and the senders are not licensed operators.
+
+**In this project.** `hfnode::gateway::filter` asks a language model, Claude through the Anthropic API or a local model through Ollama (`[filter] provider`), for a [verdict](#verdict): keep, redact named spans, or drop. The node itself replaces each span with `REDACTED` and keys `MSG WITHHELD BY FILTER` for a dropped message. A message the service could not screen stays unscreened and is never transmitted meanwhile, and an answer that is not exactly a complete verdict withholds it: [`crates/hfnode/src/gateway/filter.rs:1-21`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/gateway/filter.rs#L1-L21), [`crates/hfnode/src/gateway/filter.rs:29-32`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/gateway/filter.rs#L29-L32). It is on by default (`[filter] enabled = true`): [`crates/hfnode/src/config.rs:541-548`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L541-L548). `hfnode filter --config C test` and `screen` try it without the radio: [`crates/hfnode/src/main.rs:135-142`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/main.rs#L135-L142).
+
+**Covered in.** [06 Gateways and messages](06-gateways-messages.md).
+
 ### Rest
 
 **Definition.** In this project, a time the keyer box keeps the key up after a run, before it takes another. It stops a stream of runs sent back to back from adding up to one long key-down.
@@ -759,9 +905,11 @@ See [K](#k-1).
 
 - **IC-7300 over CI-V** (`station.rig = "ic7300"`): the node keys the radio's internal keyer.
 - **Keyer box, key output** (`station.rig = "keyer"`, `output = "key"`): any CW radio's KEY jack.
-- **NR7Y straight key** (`station.rig = "keyer"`, `output = "key"`): a paddle-reworked UV-K1 on NR7Y's CW firmware, its PTT line keyed as a straight key ([`docs/keyer.md:840-847`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L840-L847)).
-- **MCW** (`station.rig = "keyer"`, `output = "ptt"`): an FM handheld on stock firmware, its PTT held and a tone keyed into its microphone.
-- **Parked handheld route** (`station.rig = "handheld"`): hfnode commands added to NR7Y's firmware over USB-C; parked, never run on a radio.
+- **NR7Y straight key**, the UV-K1's **route C** (`station.rig = "keyer"`, `output = "key"`): a paddle-reworked UV-K1 on NR7Y's CW firmware, its PTT line keyed as a straight key ([`docs/keyer.md:840-847`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L840-L847)). This is Robin's route.
+- **MCW**, the UV-K1's **route B** (`station.rig = "keyer"`, `output = "ptt"`): an FM handheld on stock firmware, its PTT held and a tone keyed into its microphone.
+- **Parked handheld route**, the UV-K1's **route A** (`station.rig = "handheld"`): hfnode commands added to NR7Y's firmware over USB-C; parked, never run on a radio.
+
+The letters A, B and C name only the UV-K1's three routes, as [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md) defines them; pages 01, 09 and 16 use them the same way. The IC-7300 and the plain keyer-box route have no letter. The audit's "option C" is something else: the one-transistor key switch that route C uses (see [2N3904](#2n3904)).
 
 **Covered in.** [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md), [13 Safety rules (never loosen)](13-safety-rules.md) (group 6, handheld rules).
 
@@ -855,6 +1003,14 @@ See [K](#k-1).
 
 **Covered in.** [09 Keyer box: host side](09-keyer-host-side.md).
 
+### SIO, IO_BANK0 and CPACR
+
+**Definition.** Three register blocks that the firmware's safety checks name. `SIO` is the RP2350's single-cycle I/O block; one store to its `GPIO_OUT_CLR` or `GPIO_OUT_SET` register drives the pins whose bits are set low or high. `IO_BANK0` selects which function (SIO, PWM, USB and so on) drives each pin (see [GPIO](#gpio)). `CPACR`, the Coprocessor Access Control Register of each Arm core, turns coprocessors on and off, among them the RP2350's GPIO coprocessor, [CP0](#cp0).
+
+**In this project.** The keyer box's fault path opens the key and the PTT with one store to SIO `GPIO_OUT_CLR` (`0xd0000020`), with no driver and nothing that can fault: [`firmware/pico2-keyer/src/main.rs:254-261`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/src/main.rs#L254-L261). In the one-Pico image (PR #31, draft, not on main, untested on hardware), core 1 writes `CPACR` so that only the FPU is on and any CP0 instruction faults: [`firmware/pico2-keyer/src/core1.rs:289-308`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/src/core1.rs#L289-L308). The checks that read the built machine code (`check_faults.py` on main, `check_pins.py` and `check_core1.py` on PR #30 and PR #31) look for stores to these registers.
+
+**Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), [12 Testing](12-testing.md), [11 Decoder box and the one-Pico image (in flight)](11-decoder-box-one-pico.md), and rustos page 05 (Drivers: GPIO, USB, PWM, ADC, DMA).
+
 ### Snap
 
 **Definition.** In this project, matching a garbled decoded word to the nearest word the parser expects, by how many Morse elements differ rather than how many letters differ.
@@ -862,6 +1018,14 @@ See [K](#k-1).
 **In this project.** `protocol::fuzzy::snap` returns the vocabulary entry nearest to a token if it is within a tolerance and strictly nearer than every other entry; ties are refused: [`crates/protocol/src/fuzzy.rs:40-43`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/protocol/src/fuzzy.rs#L40-L43). The distance is `morse_distance`, an edit distance over dot and dash patterns: [`crates/protocol/src/fuzzy.rs:10-11`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/protocol/src/fuzzy.rs#L10-L11).
 
 **Covered in.** [03 Field protocol, codes and sessions](03-field-protocol-auth-session.md).
+
+### SNR
+
+**Definition.** Signal-to-noise ratio, in dB: how much stronger a signal is than the noise beside it. The figure depends on the bandwidth the noise is measured in; radio amateurs usually measure it in 2500 Hz, the width of a voice receiver.
+
+**In this project.** The test synthesizer's `Noise::sigma_for_snr` sets the noise for an SNR measured in 2500 Hz: [`crates/cw/src/synth.rs:123-125`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/cw/src/synth.rs#L123-L125). The decoder's tests decode at 0 dB and -3 dB, and below about -4 dB its errors climb quickly: [`crates/cw/src/decoder.rs:1008-1012`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/cw/src/decoder.rs#L1008-L1012). `cargo run --release -p cw --example sweep` prints the error rate against SNR: [`crates/cw/examples/sweep.rs:1`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/cw/examples/sweep.rs#L1).
+
+**Covered in.** [04 CW decoder and audio](04-cw-decoder-audio.md), [12 Testing](12-testing.md).
 
 ### Squelch
 
@@ -884,6 +1048,14 @@ See [K](#k-1).
 "Stage zero" in `docs/keyer.md` is different: a meter measurement of the radio's key line, with no computer involved, before stage `none`: [`docs/keyer.md:236-251`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L236-L251). The bench files number their own [bench stages](#bench-stage).
 
 **Covered in.** [15 Config, CLI and deployment](15-config-cli-deployment.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
+
+### State directory
+
+**Definition.** In this project, the folder where `hfnode` keeps everything it must remember across a restart, named by the config key `state_dir`.
+
+**In this project.** `state_dir` is required, and it must be a full path (a leading `~` is expanded first), so that the service and a command run by hand cannot keep `tx-inhibited` in two places: [`crates/hfnode/src/config.rs:15-16`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L15-L16), [`crates/hfnode/src/config.rs:910-924`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/config.rs#L910-L924). It holds [last_seq](#last_seq), the [transmit inhibit](#transmit-inhibit) file `tx-inhibited`, the duty log `key-down`, the measured sidetone level `keyer-sidetone`, the inbox, the logs `rx.log` and `health.csv`, and the texting state. Every command that can key checks that it can write there before it opens any port, because a node that cannot write `tx-inhibited` must not key: [`crates/hfnode/src/station.rs:600-609`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/station.rs#L600-L609). **Never loosen** (rule 5.11 in [13 Safety rules (never loosen)](13-safety-rules.md)).
+
+**Covered in.** [15 Config, CLI and deployment](15-config-cli-deployment.md), which lists every file in it.
 
 ### Station
 
@@ -933,7 +1105,31 @@ See [K](#k-1).
 
 **Covered in.** [05 Node loop and station safety](05-node-loop-station-safety.md), [07 CI-V and the IC-7300](07-civ-ic7300.md).
 
+### SysTick
+
+**Definition.** A 24-bit countdown timer built into every Arm Cortex-M core. It can count the processor's own clock, and it can raise a regular interrupt.
+
+**In this project.** On the keyer box it is a second, independent clock: rustos runs it free on the processor clock with no interrupt, and the control loop checks its own clock (TIMER0, on the microsecond tick) against it, so a stopped microsecond tick trips the box (`CLOCK`) and stops feeding the watchdog: [`firmware/pico2/src/systick.rs:1-17`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/systick.rs#L1-L17) (rustos master; the same file at the keyer's pin `8c91507`), [`firmware/pico2-keyer/src/main.rs:28-32`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/src/main.rs#L28-L32). **Never loosen** (rule 1.13 in [13 Safety rules (never loosen)](13-safety-rules.md)). In the parked UV-K1 firmware (route A), the radio's SysTick tick every 10 ms counts `hfnode`'s own clock and feeds the radio's watchdog: [`firmware/uv-k1/app/hfnode.h:34-36`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/uv-k1/app/hfnode.h#L34-L36).
+
+**Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md), [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md), and rustos page 04 (Drivers: board, clocks, time, watchdog).
+
 ## T
+
+### Thread (work stream)
+
+**Definition.** In this project's way of working, a thread is one separate Claude session with one role, such as writing one area of the code, running one bench, or auditing, with a coordinator passing messages between them. It is not an operating-system thread.
+
+**In this project.** Pages name them by role: "the audit thread", "the keyer-image thread" (which owns the keyer firmware and PR #31), "the decoder thread", "the Quansheng bench thread". The roles are kept apart on purpose, and who takes each one once human engineers join is not decided. Not found in the code at `44185fa`: in the code, "thread" always means an operating-system thread, such as the keep-alive thread or the station's watchdog thread.
+
+**Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md).
+
+### Time scale
+
+**Definition.** In this project, how many times faster than real time the mock radio and the self-test run. At scale 20, one second of radio time passes in 50 ms.
+
+**In this project.** `hfnode selftest --scale` defaults to 100 and allows 1 to 200; the cargo tests take `HFNODE_E2E_SCALE`, else 100; the `keyer-` scenarios run at most 5 (`KEYER_MAX_SCALE`): [`crates/hfnode/src/selftest.rs:71-77`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest.rs#L71-L77), [`crates/hfnode/src/selftest/any_radio.rs:47-48`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/selftest/any_radio.rs#L47-L48). CI fixes it at 20 on every system, because GitHub's runners can hold a test's threads up for a few hundred milliseconds, and at 100x that is more than the keying watchdog or the stuck margin allows: [`.github/workflows/ci.yml:14-16`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/.github/workflows/ci.yml#L14-L16), [`.github/workflows/ci.yml:59-63`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/.github/workflows/ci.yml#L59-L63). **Never loosen the 20x CI scale** (rule 7.11 in [13 Safety rules (never loosen)](13-safety-rules.md)). Some waits stay in real time, which is why `MAX_SCALE` stops at 200. See [Pause meter and not-judged runs](#pause-meter-and-not-judged-runs) and [Selftest](#selftest).
+
+**Covered in.** [12 Testing](12-testing.md).
 
 ### TOT
 
@@ -955,7 +1151,7 @@ See [K](#k-1).
 
 **Definition.** In this project, a latched fault in the keyer box. A tripped box keys nothing until it is power-cycled.
 
-**In this project.** `keyer_core::keyer::Trip` lists the trips: `Down` (the key or tone stayed on past the key-down limit), `Pin` (the firmware saw a pin on past its limit), `Slow` (a slow control-loop pass with the key on), `Clock` (the loop's clock disagreed with the processor's count), `Watchdog` (the box restarted because its watchdog fired), `Ptt` (PTT limit) and `Line` (something else is holding the PTT line). A trip survives a restart that is not a power-up: [`crates/keyer-core/src/keyer.rs:164-190`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L164-L190). PR #31 (draft, not on main, untested on hardware) adds `Core1`, for core 1 faulting or not moving its [heartbeat](#heartbeat) within `CORE1_MS = 100` ms: [`crates/keyer-core/src/keyer.rs:194-197`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/keyer.rs#L194-L197), [`crates/keyer-core/src/lib.rs:104-110`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/lib.rs#L104-L110). **Never loosen** (rule 1.19 in [13 Safety rules (never loosen)](13-safety-rules.md)). A tripped box answers `CW` and `MCW` with the error code `TRIP`: [`crates/keyer-core/src/keyer.rs:34-36`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L34-L36).
+**In this project.** `keyer_core::keyer::Trip` lists the trips. The box's `STATUS` line, and every page of this set, names a trip by its wire name, which `Trip::as_str` gives; the Rust variant is in brackets: `DOWN` (`Trip::Down`: the key or tone stayed on past the key-down limit), `PIN` (`Trip::Pin`: the firmware saw a pin on past its limit), `SLOW` (`Trip::Slow`: a slow control-loop pass with the key on), `CLOCK` (`Trip::Clock`: the loop's clock disagreed with the processor's count), `WATCHDOG` (`Trip::Watchdog`: the box restarted because its watchdog fired), `PTT` (`Trip::Ptt`: PTT limit) and `LINE` (`Trip::Line`: something else is holding the PTT line); an untripped box reports `NONE`. A trip survives a restart that is not a power-up: [`crates/keyer-core/src/keyer.rs:164-190`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L164-L190), wire names [`crates/keyer-core/src/keyer.rs:204-215`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L204-L215), the `STATUS` line [`crates/keyer-core/src/keyer.rs:25`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L25). `hfnode` explains each trip in words with `trip_text`: [`crates/hfnode/src/keyer.rs:346-368`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/keyer.rs#L346-L368). PR #31 (draft, not on main, untested on hardware) adds `CORE1` (`Trip::Core1`), for core 1 faulting or not moving its [heartbeat](#heartbeat) within `CORE1_MS = 100` ms: [`crates/keyer-core/src/keyer.rs:194-197`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/keyer.rs#L194-L197), [`crates/keyer-core/src/lib.rs:104-110`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/lib.rs#L104-L110). **Never loosen** (rule 1.19 in [13 Safety rules (never loosen)](13-safety-rules.md)). A tripped box answers `CW` and `MCW` with the error code `TRIP`: [`crates/keyer-core/src/keyer.rs:34-36`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/keyer-core/src/keyer.rs#L34-L36).
 
 **Covered in.** [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md).
 
@@ -968,6 +1164,14 @@ See [K](#k-1).
 **In this project.** `firmware/pico2-keyer/uf2.py` turns the built ELF into `pico2-keyer.uf2` for family `RP2350_ARM_S`: [`firmware/pico2-keyer/uf2.py:2-19`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/uf2.py#L2-L19), [`firmware/pico2-keyer/uf2.py:30-35`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/uf2.py#L30-L35). CI builds and uploads it: [`.github/workflows/ci.yml:211-216`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/.github/workflows/ci.yml#L211-L216). See [BOOTSEL](#bootsel) and [Flash file](#flash-file).
 
 **Covered in.** [14 Audit, bench and flashing](14-audit-bench-flashing.md), [02 Codebase, build and CI](02-codebase-build-ci.md).
+
+### USB SEND and USB Keying
+
+**Definition.** IC-7300 menu items that let a computer key the radio through its USB serial port's control lines. USB SEND puts the radio on transmit while [DTR or RTS](#dtr-and-rts) is raised, USB Keying (CW) keys CW from one of them, and USB Keying (RTTY) keys RTTY, a teleprinter mode. Each is set to OFF, DTR or RTS.
+
+**In this project.** CI-V `1A 05 00 78`, `00 79` and `00 80` read them: [`crates/civ/src/ic7300.rs:177-185`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L177-L185). The preflight fails unless all three read OFF, because a raised line would key the radio and the driver is not the only program that can raise one: [`crates/civ/src/preflight.rs:262-291`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/preflight.rs#L262-L291). The preflight only reads, so nothing is written to the radio until they have read back OFF. **Never loosen** (rules 4.8 and 7.7 in [13 Safety rules (never loosen)](13-safety-rules.md)): never set them to DTR or RTS to "test" the check. The [Inhibit Timer at USB Connection](#inhibit-timer-at-usb-connection) only delays such a signal.
+
+**Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md), [14 Audit, bench and flashing](14-audit-bench-flashing.md).
 
 ### UV-K1
 
@@ -997,6 +1201,14 @@ See [K](#k-1).
 **In this project.** The node must transmit only on its listening frequency. The preflight fails if split is on, because the radio "would transmit on the other VFO": [`crates/civ/src/preflight.rs:293-302`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/preflight.rs#L293-L302). The station checks split, ∂TX and the transmit frequency again before every transmission: [`crates/hfnode/src/station.rs:36-39`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/hfnode/src/station.rs#L36-L39).
 
 **Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md).
+
+### VOX
+
+**Definition.** Voice-operated transmit: a radio function that puts the radio on transmit when sound reaches its microphone, with no PTT pressed.
+
+**In this project.** With VOX on, sound at the microphone keys the radio and none of the node's or the box's limits apply, so it is off on every route. On the IC-7300, CI-V `16 46` reads it and the preflight fails if it is on: [`crates/civ/src/ic7300.rs:199-202`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/ic7300.rs#L199-L202), [`crates/civ/src/preflight.rs:317-329`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/civ/src/preflight.rs#L317-L329). On a UV-K1 it is a radio setting set by hand: on the MCW route the keypad is locked as well, because F+7 toggles VOX, and on NR7Y CW a VOX trigger starts a CW carrier: [`docs/keyer.md:664-667`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L664-L667), [`docs/keyer.md:1189-1191`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L1189-L1191). **Never loosen** (rules 4.8, 6.2 and 6.4 in [13 Safety rules (never loosen)](13-safety-rules.md)).
+
+**Covered in.** [07 CI-V and the IC-7300](07-civ-ic7300.md), [10 Quansheng UV-K1 handheld](10-uv-k1-handheld.md).
 
 ## W
 
@@ -1032,18 +1244,19 @@ The glossary changes whenever a term is added or a pull request merges. To chang
 
 1. Add a term in alphabetical order under its letter, with the three parts (definition, in this project, covered in) and a permalink to the line that defines it. Add a new letter to "Jump to" if needed.
 2. Add any word with more than one meaning to the table at the top.
-3. Any safety number added must carry **Never loosen** and agree with [13 Safety rules (never loosen)](13-safety-rules.md); cite the code, never a memory note.
+3. Any safety number added must carry **Never loosen** and agree with [13 Safety rules (never loosen)](13-safety-rules.md); cite the code, never the project notes.
 4. Code only on an open pull request is cited at that PR's head and labelled "(PR #N, not on main)", with "untested on hardware" where that is true.
-5. Re-run `python3 -I /home/claude/tools/citecheck.py docs/handover/17-glossary.md` from the repository root until it reports 0 broken.
+5. Re-run `python3 docs/handover/tools/citecheck.py docs/handover/17-glossary.md` from the repository root until it reports 0 broken (see "Keeping these docs right" in the [index](README.md)).
 
 ## Known bugs, limits and flakes
 
-This page has no code of its own, so it has no bugs. Four naming hazards trip up new readers:
+This page has no code of its own, so it has no bugs. Five naming hazards trip up new readers:
 
 - **"Stage 0" is ambiguous.** `bench/quansheng.md`'s stage 0 (code on main matches what the audit passed) and `bench/ic7300.md`'s stage 0 (the code on the host) are not `docs/keyer.md`'s "stage zero" (a meter on the key line), and none of them is a config bring-up [stage](#stage). Always say which list you mean.
 - **"Verdict" in the code is not the audit's verdict.** `gateway::filter::Verdict` is the reply filter's decision. The audit's verdicts (GO, GO with steps, NO-GO, not yet, n/a) exist only in the project files.
 - **"Piece" and "chunk" are different units.** A piece is at most 30 characters, the radio keyer's limit. A chunk is a lettered part of a reply, by default at most 60 characters, sent as one or more pieces. Beware: `protocol::reply::Chunk`'s doc comment and its `pieces()` helper say "piece" for a chunk ([`crates/protocol/src/reply.rs:72-75`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/protocol/src/reply.rs#L72-L75), [`crates/protocol/src/reply.rs:93-94`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/crates/protocol/src/reply.rs#L93-L94)); on these pages "piece" always means the ≤30-character keying unit (`civ::MAX_CW_CHARS`, `keyer_core::MAX_TEXT`).
 - **"Watchdog" has three meanings** (the box's hardware watchdog, the host's keying watchdog, the parked UV-K1 firmware's watchdog), and none of them is the hardware transmit timer of test-plan step 10.
+- **Audit labels collide.** `C3`, `H1`, `H8` and `K1` each name more than one thing in the project files, and the handover pages number their own lists on top. Name the document with the label (see [Audit IDs](#audit-ids)).
 
 Some code comments and docs on `main` are older than the audit's on-air ruling: the bring-up stage comments and the keyer box's parts list still say "dummy load" (see [Dummy load](#dummy-load)).
 
@@ -1051,15 +1264,16 @@ For the project's real bugs and limits, see [16 Work left and known bugs](16-wor
 
 ## Work left
 
-- When PR #30 and PR #31 merge, re-cite the entries labelled with them (ADC, ADC_VREF, AGND, core 0 and core 1, CP0, decoder box, DMA, flash file, Goertzel, GP26, heartbeat, MPU, MSPLIM, one-Pico image, Secure and Non-secure, SECCFG, trip `Core1`) at the merge commit, and remove the "not on main" labels.
+- When PR #30 and PR #31 merge, re-cite the entries labelled with them (ADC, ADC_VREF, AGND, core 0 and core 1, CP0, decoder box, DMA, flash file, Goertzel, GP26, heartbeat, MPU, MSPLIM, one-Pico image, Secure and Non-secure, SECCFG, the fault flag, mutant builds, trip `CORE1`) at the merge commit, and remove the "not on main" labels.
+- When the decoder plan's PR 4 or PR 5 is opened, give it its GitHub number in [PR 4 and PR 5 (planned)](#pr-4-and-pr-5-planned).
 - When PR #27 merges, re-cite the [Preflight](#preflight) entry's front-key and MIC Up/Down Keyer checks at the merge commit.
 - When rustos PR #6 merges and the firmware is re-pinned at master's merge, re-cite the multicore entries and the [rustos](#rustos) pin at the new commits.
 - The project-wide list is [16 Work left and known bugs](16-work-left-known-bugs.md).
 
 ## Sources
 
-- cw-message-gateway at `main` `44185fa`: `crates/keyer-core`, `crates/cw`, `crates/protocol`, `crates/auth`, `crates/civ` (`lib.rs`, `ic7300.rs`, `preflight.rs`, `mock.rs`, `sim.rs`, `frame.rs`), `crates/hfnode` (`main.rs`, `config.rs`, `commissioning.rs`, `station.rs`, `session.rs`, `storm.rs`, `selftest.rs`, `selftest/any_radio.rs`, `keyer.rs`, `keyer/`, `handheld.rs`, `handheld/mock.rs`, `gateway/filter.rs`), `firmware/pico2-keyer`, `firmware/uv-k1/README.md`, `.github/workflows/ci.yml`, `README.md`, [`docs/keyer.md`](../keyer.md), [`docs/keyer-protocol.md`](../keyer-protocol.md), [`docs/handheld.md`](../handheld.md), [`docs/hardware-test-plan.md`](../hardware-test-plan.md), [`docs/raspberry-pi-setup.md`](../raspberry-pi-setup.md).
-- cw-message-gateway PR #27 at `3c97427` (`crates/civ/src/preflight.rs`), PR #30 at `3efaf84` (`docs/decoder.md`, `firmware/pico2-decoder/src/main.rs`, `crates/cw/src/level.rs`) and PR #31 at `bc5062a` (`firmware/pico2-keyer/src/core1.rs`, `firmware/pico2-keyer/src/main.rs`, `firmware/pico2-keyer/Cargo.toml`, `crates/keyer-core/src/lib.rs`, `crates/keyer-core/src/keyer.rs`).
-- rustos master at `80bf599` (`Cargo.toml`, `api/src/lib.rs`, `firmware/pico2/src/`: `watchdog.rs`, `gpio/gpio.rs`, `adc.rs`, `dma.rs`, `pwm.rs`, `usb/mod.rs`), the firmware's pin `8c91507` (compared with master), and rustos PR #6 at `410dffa` (`firmware/pico2/src/multicore.rs`).
-- Project files (not public, named only): `design/spec.md`, `design/spec-pico-decoder.md`, `audit/rubric.md`, `audit/final-grades.md`, `audit/report.md`, `audit/req-on-air-bench-ruling.md`, `audit/req-handheld-nr7y-cw-ruling.md`, `bench/quansheng.md`, `bench/ic7300.md`, `reference/IC-7300_ENG_FM_12b.txt` (∂TX, p. 4-11).
-- The project's memory notes, checked against the code above.
+- cw-message-gateway at `main` `44185fa`: `crates/keyer-core`, `crates/cw`, `crates/protocol`, `crates/auth`, `crates/civ` (`lib.rs`, `ic7300.rs`, `preflight.rs`, `serial.rs`, `mock.rs`, `sim.rs`, `frame.rs`), `crates/hfnode` (`main.rs`, `config.rs`, `commissioning.rs`, `station.rs`, `session.rs`, `storm.rs`, `selftest.rs`, `selftest/any_radio.rs`, `keyer.rs`, `keyer/`, `handheld.rs`, `handheld/mock.rs`, `gateway/filter.rs`), `firmware/pico2-keyer`, `firmware/uv-k1` (`README.md`, `app/hfnode.c`, `app/hfnode.h`), `.github/workflows/ci.yml`, `README.md`, [`docs/keyer.md`](../keyer.md), [`docs/keyer-protocol.md`](../keyer-protocol.md), [`docs/handheld.md`](../handheld.md), [`docs/hardware-test-plan.md`](../hardware-test-plan.md), [`docs/raspberry-pi-setup.md`](../raspberry-pi-setup.md).
+- cw-message-gateway PR #27 at `3c97427` (`crates/civ/src/preflight.rs`), PR #30 at `3efaf84` (`docs/decoder.md`, `firmware/pico2-decoder/src/main.rs`, `firmware/pico2-decoder/mutants.py`, `crates/cw/src/level.rs`) and PR #31 at `bc5062a` (`firmware/pico2-keyer/src/core1.rs`, `firmware/pico2-keyer/src/main.rs`, `firmware/pico2-keyer/mutants_core1.py`, `firmware/pico2-keyer/Cargo.toml`, `docs/keyer.md`, `crates/keyer-core/src/lib.rs`, `crates/keyer-core/src/keyer.rs`, `crates/keyer-core/src/cores.rs`, `crates/keyer-core/src/control.rs`).
+- rustos master at `80bf599` (`Cargo.toml`, `api/src/lib.rs`, `firmware/pico2/src/`: `lib.rs`, `systick.rs`, `watchdog.rs`, `gpio/gpio.rs`, `adc.rs`, `dma.rs`, `pwm.rs`, `usb/mod.rs`), the firmware's pin `8c91507` (compared with master), and rustos PR #6 at `410dffa` (`firmware/pico2/src/multicore.rs`).
+- Project files (not public, named only): `design/spec.md`, `design/spec-pico-decoder.md`, `design/pico-decoder-pr4.patch`, `audit/rubric.md`, `audit/final-grades.md`, `audit/report.md`, `audit/req-on-air-bench-ruling.md`, `audit/req-handheld-nr7y-cw-ruling.md`, `audit/req-handheld-generic-route-constraints.md`, `audit/req-keyer-box-fixes.md`, `audit/req-ic7300-fixes.md`, `bench/quansheng.md`, `bench/ic7300.md`, `reference/IC-7300_ENG_FM_12b.txt` (∂TX, p. 4-11).
+- The project notes (`MEMORY.md`, for the work-stream thread names and the merge plan), checked against the code and the project files above.
