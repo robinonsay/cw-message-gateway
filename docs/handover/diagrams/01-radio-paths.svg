@@ -24,12 +24,12 @@
   <text x="360" y="198" text-anchor="middle" font-size="14" fill="#4b5563">receive audio from its USB codec</text>
   <path d="M534,208 L186,208" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
   <text x="360" y="244" text-anchor="middle" font-size="14" fill="#4b5563">one USB cable; CI-V 17 sends at most 30 characters</text>
-  <rect x="24" y="256" width="160" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="104" y="278" text-anchor="middle" font-size="14">read-only preflight</text>
-  <text x="104" y="297" text-anchor="middle" font-size="14">before any write</text>
-  <rect x="536" y="256" width="160" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="616" y="278" text-anchor="middle" font-size="14">its Time-Out Timer,</text>
-  <text x="616" y="297" text-anchor="middle" font-size="14">3 min, required</text>
+  <rect x="24" y="256" width="280" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="164" y="278" text-anchor="middle" font-size="14">read-only preflight</text>
+  <text x="164" y="297" text-anchor="middle" font-size="14">before any write</text>
+  <rect x="416" y="256" width="280" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="556" y="278" text-anchor="middle" font-size="14">its Time-Out Timer must read 3 min</text>
+  <text x="556" y="297" text-anchor="middle" font-size="14">(the audit: do not rely on it)</text>
 
   <!-- Panel 2: any CW radio through the keyer box -->
   <text x="24" y="348" font-weight="bold">2. Any CW radio<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "keyer", output = "key"</tspan></text>

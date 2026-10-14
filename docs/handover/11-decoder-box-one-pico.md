@@ -4,7 +4,7 @@
 
 | Piece | Where | State at the commits cited |
 |---|---|---|
-| Decoder loop, protocol v1, standalone decoder firmware, `cw::level` | PR #30, branch `claude/pico-decoder-u9bum5`, `3efaf842` | Open, audit-cleared at `3efaf842`; ready once CI is green |
+| Decoder loop, protocol v1, standalone decoder firmware, `cw::level` | PR #30, branch `claude/pico-decoder-u9bum5`, `3efaf842` | Open, ready, audit-cleared at `3efaf842`; CI green (16 of 16) |
 | One-Pico keyer image: decoder on core 1, keyer protocol 5, `CORE1` trip | PR #31, branch `claude/one-pico-keyer-image-cm9luj`, `bc5062ae` | Draft, stacked on #30; audit-cleared to flash after it merges |
 | rustos multicore (`pico2::multicore`) and `Rp2350Usb::room()` | rustos PR #6, `410dffa` | Open; PR #31 pins rustos here |
 | `hfnode` hears through the decoder box (`[receive] source = "box"`) | PR 4, a patch in the project files (`design/pico-decoder-pr4.patch`, commit `9e1956a`) | Written, not opened; waits for #30 to merge |
@@ -79,7 +79,7 @@ PR #31 at `bc5062ae` (draft, stacked on #30, not on main; `decoder-core` is iden
 | [`firmware/pico2-keyer/check_faults.py`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/check_faults.py) (unchanged from `main`) | The CI gate that every handler's first store opens key and PTT; it now covers `safe_state`'s new last step | 158 |
 | [`.github/workflows/ci.yml:194-204`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/.github/workflows/ci.yml#L194-L204) | CI steps "fault handlers open the key first" (`check_faults.py`) and "core 1 never reaches a pin" (`check_core1.py`) | - |
 
-rustos (the rustos handover set, <https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/README.md>, explains these from the driver side: its pages 05 Drivers: I/O for the ADC and DMA, 06 Multicore, and 08 Changes for cw-gateway):
+rustos (the rustos handover set, <https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/README.md>, explains these from the driver side: its pages [05 Drivers: GPIO, USB, PWM, ADC, DMA](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/05-drivers-io.md) for the ADC and DMA, [06 Multicore](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/06-multicore.md), and [08 Changes made for cw-message-gateway](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/08-changes-for-cw-gateway.md)):
 
 | Path | What it holds | Lines |
 |---|---|---|
@@ -229,13 +229,7 @@ Const asserts pin `RATE == 8000`, `SLICE == 80`, `BLOCK == 400` and `BLOCK == SL
 
 ### `cw::level` (PR #30 adds it; `hfnode`'s monitor now calls it)
 
-| Item | Signature | Line |
-|---|---|---|
-| `goertzel_coeff` | `pub fn goertzel_coeff(pitch_hz: f32, sample_rate: u32) -> f32`: `2 cos(2π f / fs)` | [`crates/cw/src/level.rs:10-13`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L10-L13) |
-| `Level` | `pub struct Level { pub tone: f32, pub total: f32 }`, mean squares, full scale 1.0 | [`crates/cw/src/level.rs:18-24`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L18-L24) |
-| `Level::purity` | `pub fn purity(&self) -> f32`: `tone / total`, 0 to 1 | [`crates/cw/src/level.rs:28-34`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L28-L34) |
-| `measure` | `pub fn measure(x: &[f32], coeff: f32) -> Level` | [`crates/cw/src/level.rs:38-55`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L38-L55) |
-| `db` | `pub fn db(p: f32) -> f32`: `10 log10(p + 1e-12)` | [`crates/cw/src/level.rs:59-61`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L59-L61) |
+The box's monitor measures each 10 ms slice with `cw::level` (`goertzel_coeff`, `Level`, `measure`, `db`; [`crates/cw/src/level.rs:9-61`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L9-L61)), the one copy it shares with `hfnode`'s sidetone monitor; the signatures and the Goertzel arithmetic are on [04 CW decoder and audio](04-cw-decoder-audio.md).
 
 ### Decoder protocol version 1 (wire format)
 
@@ -398,7 +392,7 @@ There is no analog anti-alias filter: the firmware samples at 32 kHz and this FI
 
 ### Monitor: one Goertzel per 10 ms
 
-Every decoded sample also goes into an 80-sample slice ([`crates/decoder-core/src/control.rs:365-402`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/decoder-core/src/control.rs#L365-L402)). When a slice is full, `cw::level::measure` runs a Goertzel at the monitor pitch: `s0 = v + c·s1 − s2` over the slice, then `|X|² = s1² + s2² − c·s1·s2`, `tone = 2|X|²/n²` (so a sine of amplitude A reads A²/2) and `total` = mean square ([`crates/cw/src/level.rs:38-55`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L38-L55)). Each is converted to tenths of a dB (`round(10·10 log10(p + 1e-12))`). Five slices make one `SL` line in hfnode mode. The monitor runs through `HOLD` and the keyed hold on purpose: the sidetone check needs it most while the node transmits ([`docs/decoder-protocol.md:81-83`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/docs/decoder-protocol.md#L81-L83)).
+Every decoded sample also goes into an 80-sample slice ([`crates/decoder-core/src/control.rs:365-402`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/decoder-core/src/control.rs#L365-L402)). When a slice is full, `cw::level::measure` gives `tone`, the power at the monitor pitch (one Goertzel filter), and `total`, the slice's mean square, scaled so that a sine of amplitude A reads A²/2 in each ([`crates/cw/src/level.rs:38-55`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/crates/cw/src/level.rs#L38-L55); the arithmetic is on [04 CW decoder and audio](04-cw-decoder-audio.md)). Each is converted to tenths of a dB (`round(10·10 log10(p + 1e-12))`). Five slices make one `SL` line in hfnode mode. The monitor runs through `HOLD` and the keyed hold on purpose: the sidetone check needs it most while the node transmits ([`docs/decoder-protocol.md:81-83`](https://github.com/robinonsay/cw-message-gateway/blob/3efaf842e1aab75354e5e19d0384a703d4d786be/docs/decoder-protocol.md#L81-L83)).
 
 ### The decoder box's pass
 
@@ -419,7 +413,7 @@ The **out queue** ([`crates/decoder-core/src/control.rs:603-660`](https://github
 
 ### The ADC ring (rustos)
 
-The ADC fills an 8-entry FIFO, which at 32 kHz is 250 µs of audio, too little to poll beside USB, so DMA channel 0 empties it into a 16 kB ring of 8192 samples (256 ms) ([`firmware/pico2/src/adc.rs:40-48`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L40-L48)). The channel runs endlessly with its write address wrapping on the ring's size; software finds the channel's position from `WRITE_ADDR`. Every slot is set to `0xFFFF` before the channel starts and again as soon as it is read; the ADC never writes `0xFFFF`. `read` looks at the slot 512 samples ahead of the channel: if it is not the sentinel, reading has fallen `RING_SAMPLES` − `GUARD_SAMPLES` = 7680 samples (240 ms) behind, and it reports `Overrun` and resyncs ([`firmware/pico2/src/adc.rs:50-88`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L50-L88), [`firmware/pico2/src/adc.rs:603-605`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L603-L605), [`firmware/pico2/src/adc.rs:606-637`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L606-L637)). docs/decoder-protocol.md rounds this to "a whole ring" in its `GAP OVERRUN` entry. The full driver is in the rustos handover set's page 05 Drivers: I/O (<https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/README.md>).
+The ADC fills an 8-entry FIFO, which at 32 kHz is 250 µs of audio, too little to poll beside USB, so DMA channel 0 empties it into a 16 kB ring of 8192 samples (256 ms) ([`firmware/pico2/src/adc.rs:40-48`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L40-L48)). The channel runs endlessly with its write address wrapping on the ring's size; software finds the channel's position from `WRITE_ADDR`. Every slot is set to `0xFFFF` before the channel starts and again as soon as it is read; the ADC never writes `0xFFFF`. `read` looks at the slot 512 samples ahead of the channel: if it is not the sentinel, reading has fallen `RING_SAMPLES` − `GUARD_SAMPLES` = 7680 samples (240 ms) behind, and it reports `Overrun` and resyncs ([`firmware/pico2/src/adc.rs:50-88`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L50-L88), [`firmware/pico2/src/adc.rs:603-605`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L603-L605), [`firmware/pico2/src/adc.rs:606-637`](https://github.com/robinonsay/rustos/blob/80bf5998a60a41b3741041062ff7e9c59caf95b2/firmware/pico2/src/adc.rs#L606-L637)). docs/decoder-protocol.md rounds this to "a whole ring" in its `GAP OVERRUN` entry. The full driver is in the rustos handover set's page [05 Drivers: GPIO, USB, PWM, ADC, DMA](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/05-drivers-io.md).
 
 ### The ring between the cores
 
@@ -473,8 +467,10 @@ The seven MPU regions ([`firmware/pico2-keyer/src/core1.rs:249-287`](https://git
 
 ### The fault path, step by step
 
-1. **Core 1 faults** (a store the MPU refuses, a push below `MSPLIM`, `TEST CORE1 FAULT`) or **panics** (the panic handler runs `safe_state`, whose first store, to the SIO, the MPU refuses: a fault). Both cores share one vector table; rustos's `OnHardFault` and `DefaultHandler` call the application's `safe_state` and spin ([`firmware/pico2/src/lib.rs:460-474`](https://github.com/robinonsay/rustos/blob/410dffa091e247e6e7546c7f2ff465f0af499d5a/firmware/pico2/src/lib.rs#L460-L474)).
+1. **Core 1 faults** (a store the MPU refuses, `TEST CORE1 FAULT`) or **panics** (the panic handler runs `safe_state`, whose first store, to the SIO, the MPU refuses: a fault). Both cores share one vector table; rustos's `OnHardFault` and `DefaultHandler` call the application's `safe_state` and spin ([`firmware/pico2/src/lib.rs:460-474`](https://github.com/robinonsay/rustos/blob/410dffa091e247e6e7546c7f2ff465f0af499d5a/firmware/pico2/src/lib.rs#L460-L474)).
 2. In the handler the MPU is off (`HFNMIENA` = 0) and the core privileged. `safe_state` ([`firmware/pico2-keyer/src/main.rs:347-355`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/src/main.rs#L347-L355)): open key and PTT with one store to SIO `GPIO_OUT_CLR`; silence every PWM output; hold GP18 low through its output override; set `LINK.fault` (release). `check_faults.py` checks in the built image that the first store of each handler is the one that opens key and PTT.
+
+   A push below `MSPLIM` may instead lock core 1 up before any handler runs: exception entry pushes on the same stack, and rustos leaves `CCR.STKOFHFNMIGN` at 0 (analysis from the Arm rules, not tested on a chip; rustos [06 Multicore](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/06-multicore.md)). Then no `safe_state` runs and no fault flag is set, and core 0 trips `CORE1` through the hang path (steps 3-4).
 3. **Core 1 hangs**: the beat stops moving.
 4. Core 0, on its next pass, loads the beat and the fault flag. `Core1Watch::check` ([`crates/keyer-core/src/control.rs:220-228`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/control.rs#L220-L228)): a new beat value marks core 1 running and restarts the 100 ms timer; trip `CORE1` if the fault flag is set, or if core 1 is running and 100 ms have passed without a new beat. A core 1 that was launched but never beats trips too ([`crates/keyer-core/src/control/tests.rs:1238`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/crates/keyer-core/src/control/tests.rs#L1238)).
 5. `trip_now(CORE1)`: key, PTT and tone off and driven open on that pass; `starved = true`; the trip, the key state and the duty budget are saved to two watchdog scratch registers every pass.
@@ -483,9 +479,9 @@ The seven MPU regions ([`firmware/pico2-keyer/src/core1.rs:249-287`](https://git
 
 ![When core 1 faults, panics or hangs: the fault handler opens the key and sets the fault flag, or the heartbeat stops; core 0 sees it on its next pass or after 100 ms, trips CORE1 and stops feeding the watchdog; the watchdog resets the chip and the box comes back tripped CORE1, keying nothing until unplugged](diagrams/11-core1-fault-path.svg)
 
-*Figure: the left path is a fault or panic, the right a hang. Both end in the same latched trip, and core 0 never blocks waiting for core 1 on the way.*
+*Figure: the left path is a fault or panic, the right a hang; a stack overflow that may lock core 1 up (analysis, untested) takes the right path. Both end in the same latched trip, and core 0 never blocks waiting for core 1 on the way.*
 
-Timing bounds: a fault opens the key from core 1's handler at once; a hang opens it within 100 ms plus one pass; the box restarts within 500 ms of the last feed. Core 0 never waits: one atomic load each for the beat and the flag, ring calls that return at once, at most 97 bytes and one line forwarded per pass, and only the 10 ms launch wait, once, at boot.
+Timing bounds: a fault opens the key from core 1's handler at once, except a stack overflow that locks core 1 up, which is caught as a hang; a hang opens it within 100 ms plus one pass; the box restarts within 500 ms of the last feed. Core 0 never waits: one atomic load each for the beat and the flag, ring calls that return at once, at most 97 bytes and one line forwarded per pass, and only the 10 ms launch wait, once, at boot.
 
 ### Static checks of the built images
 
@@ -699,7 +695,7 @@ Never change, in either image:
 
 The one-Pico image, in the order the project's notes give and [16 Work left and known bugs](16-work-left-known-bugs.md) uses (each step waits on the one before, and every flash waits on Robin's go):
 
-1. Robin merges PR #30 once CI is green. #31 is then retargeted to `main`; it stays a draft.
+1. Robin merges PR #30 (ready; CI green at `3efaf84`). #31 is then retargeted to `main`; it stays a draft while it changes (see [16 Work left and known bugs](16-work-left-known-bugs.md), "The merge order").
 2. Rustos PR #6 merges.
 3. #31 moves its rustos pin from `410dffa` to rustos `master`'s merge of #6 ([`firmware/pico2-keyer/Cargo.toml:29`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/Cargo.toml#L29)). That is a new head: a fresh audit check and a new hash, and the cleared `bc5062ae` file stops being the one to flash.
 4. #31 is marked ready and merges; `hfnode` is rebuilt from `main` (the older `hfnode` refuses protocol 5).
@@ -739,7 +735,7 @@ The audit cleared two specific CI artifacts: the decoder box's at `3efaf842`, an
 - cw-message-gateway PR #30 at `3efaf842`: `crates/decoder-core/` and its tests, `crates/cw/src/{level,math}.rs`, `crates/hfnode/src/keyer/monitor.rs`, `firmware/pico2-decoder/` (`src/main.rs`, `check_pins.py`, `mutants.py`, `build.sh`, `README.md`, `Cargo.toml`), `docs/decoder.md`, `docs/decoder-protocol.md`, `.github/workflows/ci.yml`. Also `76c60ef`, PR #30's earlier head, for PR 4's base.
 - cw-message-gateway PR #31 at `bc5062ae`: `crates/keyer-core/src/{cores,control,keyer,lib}.rs` and their tests, `firmware/pico2-keyer/src/{main,core1}.rs`, `check_core1.py`, `check_faults.py`, `mutants_core1.py`, `build.sh`, `README.md`, `Cargo.toml`, `crates/hfnode/src/keyer.rs`, `crates/hfnode/src/keyer/{bench,proto,rig,mock}.rs` and `keyer/{tests,bench/tests}.rs`, `crates/hfnode/src/main.rs`, `docs/keyer-protocol.md`, `docs/keyer.md`, `.github/workflows/ci.yml`.
 - cw-message-gateway `main` at `44185fa9`: `crates/cw/src/decoder.rs`, `crates/keyer-core/src/lib.rs`, `crates/hfnode/src/keyer.rs`, `crates/hfnode/src/config.rs`.
-- rustos master at `80bf599`: `firmware/pico2/src/adc.rs`. rustos PR #6 at `410dffa`: `firmware/pico2/src/multicore.rs`, `firmware/pico2/src/usb/mod.rs`, `firmware/pico2/src/lib.rs`, `firmware/pico2/src/common/board.rs`.
+- rustos master at `80bf599`: `firmware/pico2/src/adc.rs`. rustos PR #6 at `410dffa`: `firmware/pico2/src/multicore.rs`, `firmware/pico2/src/usb/mod.rs`, `firmware/pico2/src/lib.rs`, `firmware/pico2/src/common/board.rs`. The rustos handover page 06 Multicore ("A stack overflow on core 1") for the `MSPLIM` lockup analysis.
 - Project files (not linkable): `design/spec-pico-decoder.md` (§3 front end, §4 monitor, §6 PR 4, §7 the core split, §7.3 rules, §7.4 the work); `design/pico-decoder-pr4.patch` (commit `9e1956a`: its message, its `config.rs`, `decoder_box.rs`, `decoder_box/{link,port}.rs` and `main.rs` hunks, and its base blobs); `audit/report.md` §3 (the PR #30 and #31 entries: cleared files, runs, hashes, flashing steps); `audit/req-handheld-nr7y-cw-ruling.md` §2; `bench/k1-audio-later.svg` and `bench/k1-2n3904-key.svg`; the Raspberry Pi Pico 2 pinout.
 - The project's memory notes on the decoder PRs, the two audits and the files to flash (merge order, cleared builds, carry-forward items); checked against the code and the audit report where they overlap.
 - Diagrams on this page, drawn for it: `diagrams/11-decoder-dataflow.svg`, `11-one-pico-cores.svg`, `11-audio-input.svg`, `11-rx-sequence.svg`, `11-core1-fault-path.svg`.

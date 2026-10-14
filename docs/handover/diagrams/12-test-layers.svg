@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1082" width="720" height="1082" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
-  <title>The test layers from cheapest to most real: unit tests, host end-to-end tests, self-test scenarios against mocks and firmware checks run in CI; the safety audit and the hardware bench are done by people</title>
+  <title>The test layers from cheapest to most real: unit tests, host end-to-end tests, self-test scenarios against mocks and firmware checks run in CI; the safety audit and the hardware bench are done outside CI: the audit by an independent review session, the bench by Robin at the radio</title>
   <defs>
     <marker id="k12t-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
@@ -8,7 +8,7 @@
   <rect x="0" y="0" width="720" height="1082" fill="#ffffff"/>
 
   <text x="24" y="36" font-size="20" font-weight="bold">Test layers, cheapest first</text>
-  <text x="24" y="60" font-size="14" fill="#4b5563">What each layer runs and who runs it. CI runs layers 1 to 4; people do 5 and 6.</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">What each layer runs and who runs it. CI runs layers 1 to 4; layers 5 and 6 run outside CI.</text>
 
   <!-- cheap to real axis -->
   <text x="24" y="96" font-size="14" fill="#4b5563">cheapest, fastest</text>
@@ -64,8 +64,9 @@
   <text x="610" y="408" font-size="14">these on</text>
   <text x="610" y="428" font-size="14">every push</text>
   <path d="M588,724 L600,724 L600,942 L588,942" fill="none" stroke="#374151" stroke-width="2"/>
-  <text x="610" y="826" font-size="14">people,</text>
-  <text x="610" y="846" font-size="14">not CI</text>
+  <text x="610" y="816" font-size="14">audit thread</text>
+  <text x="610" y="836" font-size="14">and Robin,</text>
+  <text x="610" y="856" font-size="14">not CI</text>
 
   <!-- legend -->
   <text x="24" y="1006" font-size="14" font-weight="bold">Legend</text>

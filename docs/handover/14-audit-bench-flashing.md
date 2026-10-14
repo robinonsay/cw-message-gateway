@@ -209,7 +209,7 @@ As of the project's memory note `flash-files.md` (2026-10-11 14:35Z), checked ag
 | Image | For | Status |
 |---|---|---|
 | `pico2-keyer.uf2`, build `eef8c126`, SHA-256 `f548596b…71ef9` | The keyer box, both radios | **The file to flash today.** The audit re-checked it after PR #24: `main` at `76f35d1` built with id `eef8c126` gives `f548596b…`, byte for byte (`audit/report.md` §3, "Firmware pin bump PR #24"). Nothing in `firmware/pico2-keyer` or `crates/keyer-core` changed between `76f35d1` and `44185fa` (`git diff 76f35d1 44185fa -- firmware/pico2-keyer crates/keyer-core` is empty), so a build with this id should still give the same file; no rebuild since #24 is recorded (unverified). The memory note says "up to #28"; it is not an audit record. `main`'s own build ids are different files and are not cleared |
-| `pico2-keyer.uf2`, build `bc5062ae`, SHA-256 `9ea00c58…51a7` | The keyer box, keyer on core 0 and Morse decoder on core 1 | Cleared at PR #31's head `bc5062a`; not merged, not flashed, Robin has not said go. Any new head on #31 makes this entry stale |
+| `pico2-keyer.uf2`, build `bc5062ae`, SHA-256 `9ea00c58…51a7` | The keyer box, keyer on core 0 and Morse decoder on core 1 | Cleared at PR #31's head `bc5062a`; not merged, not flashed, Robin has not said go. Any new head on #31 makes this entry stale; the planned rustos #6 re-pin is such a head |
 | `pico2-decoder.uf2`, build `3efaf842`, SHA-256 `9970b5f561d3eabef29426368144070b9d25ee2bca2ca7ecb954ec9a88d7d11d`, 129,024 bytes, push run 38142799453, artifact 11703403073 | A separate plain Pico 2 as a stand-alone decoder box (PR #30) | Cleared at `3efaf84`, with no merge condition: a plain Pico 2 (not a Pico 2 W), nothing plugged into a radio. If flashed onto the keyer box it replaces the keyer: flash `eef8c126` back and replug before any keying (`audit/report.md` §3) |
 
 Never flash:
@@ -387,7 +387,7 @@ For the keyer box, combining [docs/keyer.md](../keyer.md) "Flashing the firmware
 
 For any radio on the keyer box ([docs/keyer.md](../keyer.md), "Bring-up"; for the UV-K1, "Bring-up on NR7Y CW"):
 
-1. **Stage zero**, no computer: measure the radio's own key line. For the PC817 optocoupler: positive, 17 V or less, 1 mA or less shorted. For a transistor key on the UV-K1: +2.5 V to +5 V. Outside those, do not use that circuit. Then the box's own meter checks.
+1. **Stage zero**, no computer: measure the radio's own key line. For the PC817 optocoupler: positive, 17 V or less, 1 mA or less shorted. For a transistor key on the UV-K1: +2.5 V to +5 V open and under 1 mA through 1 kΩ; a negative reading means stop (a MOSFET's body diode would conduct and key the radio), and over 5 V means use the PC817 ([13 Safety rules](13-safety-rules.md), row 2.5). Outside those, do not use that circuit. Then the box's own meter checks.
 2. **Stage none** (keys nothing): `hfnode devices`, `keyer check`, `listen`. Then `commissioned = "listen"`.
 3. **Stage listen, with no RF first** where the radio allows it (on the UV-K1, break-in set OFF with `CWbkin`: a key-down gives only the sidetone, the radio's own monitor tone; on other radios, minimum power into a dummy load and any transmit-inhibit the radio has): `key "TEST"` must report `heard` and `sidetone` must pass (15 dB or more over the band). Then with RF, lowest power first, keying `key "TEST DE <call>"` so that every transmission identifies (the on-air routine, item 5). Then `commissioned = "keying"`.
 4. **Stage keying:** `hangtest` (the box's hardware watchdog must open the key within half a second), `stucktest` (the 1 s key-down limit must open it), `linktest` (the 2 s link timeout must end the run). After each, replug the box, read `state_dir/tx-inhibited`, and remove it with the node stopped. On PR #31 (draft, not on `main`) this stage adds step 11: `core1test`, then `core1test --fault`, run where `hangtest` runs ([`docs/keyer.md:321-330`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/docs/keyer.md#L321-L330)). Then `commissioned = "done"`.
@@ -414,7 +414,7 @@ The 4.7 kΩ pull-down on GP16 and GP17 is required, never optional (RP2350 errat
 | 5b | `CWbkin` OFF: `key "TEST DE <call>"` heard, `sidetone` passes, red light off throughout | no | not started |
 | 6 | `CWbkin` ON, LOW 1, own antenna, the on-air routine: `key "TEST DE <call>"`, then `sidetone` | yes | cleared by the audit; waits for 1-5b and Robin's go |
 | 7 | The routine, then `hangtest`, `stucktest`, `linktest`; replug, read and remove `tx-inhibited` (records for H1) | yes | cleared; waits for 6 and her go |
-| 8 | Later, one-Pico image only: receive audio into GP26, then stages 5 and 6 again | 6 again: yes | waits for #31's merge and the flash of `bc5062ae` |
+| 8 | Later, one-Pico image only: receive audio into GP26, then stages 5 and 6 again | 6 again: yes | waits for #31's merge and the flash of the file cleared for its final head (`bc5062ae` only if #31 merges with no new head; the planned rustos re-pin gives it one) |
 
 When `[keyer] commissioned` goes up on this bench, from docs/keyer.md "Bring-up on NR7Y CW" ([`docs/keyer.md:1356-1391`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/docs/keyer.md#L1356-L1391)): to `listen` once stage 5's `check`, `listen` and idle watch pass (stages 5b and 6 need it); to `keying` after stage 6; to `done` after stage 7. `bench/quansheng.md` does not record this mapping, and its bench config `bench/k1-bench.toml` is at `none`.
 
@@ -521,7 +521,7 @@ serial_port = "<the port hfnode devices marks '<- the keyer box'>"
 
 [keyer]
 output = "key"                # the box's key output, as on the UV-K1 bench
-firmware_build = "eef8c126"   # the audited build id; bc5062ae only after #31 merges and is flashed
+firmware_build = "eef8c126"   # the audited build id; after #31 merges, the id cleared for its final head
 commissioned = "none"         # raise one stage at a time, only after the stage passes
 ```
 
@@ -621,7 +621,16 @@ The project-wide list is [16 Work left and known bugs](16-work-left-known-bugs.m
 - **After the handover:** who takes the independent-audit role, how engineers read `audit/` and `bench/` (project files, not in the repository), and where new rulings are recorded. Not decided; ask Robin (the project owner). Until then, nothing is flashed or keyed without the audit's posted hash and her go.
 - **UV-K1 bench:** finish stage 1's rework questions, stage 2's wiring and meter checks, stage 3's stage zero, then stages 4, 5, 5b (zero RF) and 6, 7 (keyed, on Robin's go), raising `[keyer] commissioned` as above and recording each result for H1.
 - **IC-7300 bench:** stage 2's photos, then stages 3 to 11 and 13; a non-inductive 100 Ω or 150 Ω load rated for 10 W for stage 12 (`keying`); a wattmeter for step 9; the hardware PTT timer, which does not exist yet, for step 10. Without them the bench ends at `tune`.
-- **The one-Pico image:** merge #30, then #31 (a trial merge of #31's head into `main` at `44185fa` is clean), rebuild hfnode from `main`, flash `bc5062ae` on Robin's go, `keyer check` twice, bring-up step 11 (`core1test`, then `core1test --fault`) where `hangtest` runs, then the GP26 audio wiring and UV-K1 stages 5 and 6 again. A rustos #6 re-pin before the merge is a new head and needs a new hash.
+- **The one-Pico image**, in the order on [16 Work left and known bugs](16-work-left-known-bugs.md) ("The merge order"):
+  - merge #30, after which #31's base moves to `main` and it stays a draft while it changes;
+  - merge rustos #6;
+  - move #31's rustos pin to `master`'s merge of #6. That is a new head, so it needs the audit's fresh review and a new hash, and `bc5062ae` stops being the file to flash (`audit/report.md` §3: "The rustos #6 re-pin needs a new hash");
+  - mark #31 ready and merge it (a trial merge of today's head `bc5062a` into `main` at `44185fa` is clean);
+  - rebuild hfnode from `main`;
+  - on Robin's go, flash the file the audit cleared for #31's final head, never the merge commit's own build, with `[keyer] firmware_build` set to its build id;
+  - `keyer check` twice;
+  - bring-up step 11 (`core1test`, then `core1test --fault`) where `hangtest` runs, under the audit's on-air bench ruling (`audit/req-on-air-bench-ruling.md`);
+  - then the GP26 audio wiring and UV-K1 stages 5 and 6 again.
 - **Unattended use** on any route waits for the H1 results, the audit's grading of them, and a hardware timer (for the UV-K1 in CW, which has no time-out of its own, and for the IC-7300, test-plan step 10). The UV-K1 route is RISK at best afterwards, only on its own antenna at LOW 1, never on coax.
 - **Docs fixes** listed under "Known bugs": the flash source wording in docs/keyer.md, the Mac lines in firmware/pico2-keyer/README.md and docs/keyer.md, the UV-K1 README's flashing section, and optionally the test plan's on-air wording.
 
