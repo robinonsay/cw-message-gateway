@@ -22,16 +22,16 @@
   <line x1="400" y1="132" x2="400" y2="1479" stroke="#374151" stroke-width="1.5" stroke-dasharray="4 4"/>
   <line x1="664" y1="132" x2="664" y2="1479" stroke="#374151" stroke-width="1.5" stroke-dasharray="4 4"/>
 
-  <text x="78" y="164" font-size="15" font-weight="bold">TX: lines 42 (open) and 43 (OK)</text>
+  <text x="78" y="164" font-size="16" font-weight="bold">TX: lines 42 (open) and 43 (OK)</text>
   <rect x="412" y="180" width="236" height="68" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
   <text x="422" y="202" font-size="14" font-weight="bold">save 42</text>
   <text x="422" y="220" font-size="14">fresh line, code ok;</text>
   <text x="422" y="238" font-size="14">pending; read-back keyed</text>
-  <text x="78" y="194" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P 42 MNQSPQLA</text>
-  <text x="78" y="211" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX MOM RUNNING LATE HOME SUN K</text>
+  <text x="78" y="194" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P 42 MNQSPQLA</text>
+  <text x="78" y="211" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX MOM RUNNING LATE HOME SUN K</text>
   <line x1="64" y1="223" x2="400" y2="223" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="257" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 42 TX MOM RUNNING LATE HOME SUN ?</text>
-  <text x="78" y="274" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DE N0CALL K</text>
+  <text x="78" y="257" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 42 TX MOM RUNNING LATE HOME SUN ?</text>
+  <text x="78" y="274" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DE N0CALL K</text>
   <line x1="400" y1="286" x2="104" y2="286" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
   <path d="M97,279 L111,293 M97,293 L111,279" stroke="#374151" stroke-width="3" fill="none"/>
   <text x="118" y="306" font-size="14" fill="#4b5563">lost</text>
@@ -40,24 +40,24 @@
   <text x="422" y="366" font-size="14" font-weight="bold">no save</text>
   <text x="422" y="384" font-size="14">same open, same code:</text>
   <text x="422" y="402" font-size="14">the same read-back</text>
-  <text x="78" y="358" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P 42 MNQSPQLA</text>
-  <text x="78" y="375" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX MOM RUNNING LATE HOME SUN K</text>
+  <text x="78" y="358" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P 42 MNQSPQLA</text>
+  <text x="78" y="375" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX MOM RUNNING LATE HOME SUN K</text>
   <line x1="64" y1="387" x2="400" y2="387" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="421" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 42 TX MOM RUNNING LATE HOME SUN ?</text>
-  <text x="78" y="438" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DE N0CALL K</text>
+  <text x="78" y="421" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 42 TX MOM RUNNING LATE HOME SUN ?</text>
+  <text x="78" y="438" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DE N0CALL K</text>
   <line x1="400" y1="450" x2="64" y2="450" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
   <rect x="412" y="470" width="236" height="68" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
   <text x="422" y="492" font-size="14" font-weight="bold">save 43</text>
   <text x="422" y="510" font-size="14">after open 42, code ok;</text>
   <text x="422" y="528" font-size="14">act once</text>
-  <text x="78" y="484" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 43 QOEHFNXC K</text>
+  <text x="78" y="484" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 43 QOEHFNXC K</text>
   <line x1="64" y1="496" x2="400" y2="496" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="412" y="564" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">send_message(MOM,</text>
-  <text x="412" y="581" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P, ...)</text>
+  <text x="412" y="564" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">send_message(MOM,</text>
+  <text x="412" y="581" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N0CALL/P, ...)</text>
   <line x1="400" y1="593" x2="664" y2="593" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="412" y="619" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ok(())</text>
+  <text x="412" y="619" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ok(())</text>
   <line x1="664" y1="631" x2="400" y2="631" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="665" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT 43 DE N0CALL K</text>
+  <text x="78" y="665" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT 43 DE N0CALL K</text>
   <line x1="400" y1="677" x2="104" y2="677" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
   <path d="M97,670 L111,684 M97,684 L111,670" stroke="#374151" stroke-width="3" fill="none"/>
   <text x="118" y="697" font-size="14" fill="#4b5563">garbled</text>
@@ -66,23 +66,23 @@
   <text x="422" y="757" font-size="14" font-weight="bold">no save, no action</text>
   <text x="422" y="775" font-size="14">repeat 1 of 3, inside</text>
   <text x="422" y="793" font-size="14">again_window: same result</text>
-  <text x="78" y="749" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 43 QOEHFNXC K</text>
+  <text x="78" y="749" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 43 QOEHFNXC K</text>
   <line x1="64" y1="761" x2="400" y2="761" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="833" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT 43 DE N0CALL K</text>
+  <text x="78" y="833" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT 43 DE N0CALL K</text>
   <line x1="400" y1="845" x2="64" y2="845" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="889" font-size="15" font-weight="bold">RX: lines 44 (open) and 45 (OK)</text>
+  <text x="78" y="889" font-size="16" font-weight="bold">RX: lines 44 (open) and 45 (OK)</text>
   <text x="78" y="911" font-size="14" fill="#4b5563">open 44 and read-back as in the worked example</text>
   <rect x="412" y="931" width="236" height="68" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
   <text x="422" y="953" font-size="14" font-weight="bold">save 45</text>
   <text x="422" y="971" font-size="14">after open 44, code ok;</text>
   <text x="422" y="989" font-size="14">act once</text>
-  <text x="78" y="945" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 45 MGWJLTFG K</text>
+  <text x="78" y="945" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 45 MGWJLTFG K</text>
   <line x1="64" y1="957" x2="400" y2="957" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="1023" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NR 1 FM MOM DRIVE SAFE CALL</text>
-  <text x="78" y="1040" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WHEN YOU CAN NR 2 FM BOB THE = A</text>
+  <text x="78" y="1023" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NR 1 FM MOM DRIVE SAFE CALL</text>
+  <text x="78" y="1040" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WHEN YOU CAN NR 2 FM BOB THE = A</text>
   <line x1="400" y1="1052" x2="64" y2="1052" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="1086" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
-  <text x="78" y="1103" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
+  <text x="78" y="1086" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
+  <text x="78" y="1103" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
   <line x1="400" y1="1115" x2="104" y2="1115" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
   <path d="M97,1108 L111,1122 M97,1122 L111,1108" stroke="#374151" stroke-width="3" fill="none"/>
   <text x="118" y="1135" font-size="14" fill="#4b5563">garbled</text>
@@ -91,10 +91,10 @@
   <text x="422" y="1195" font-size="14" font-weight="bold">save 46</text>
   <text x="422" y="1213" font-size="14">fresh, code ok; key chunk B</text>
   <text x="422" y="1231" font-size="14">of the last result</text>
-  <text x="78" y="1187" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">AGN 46 HTFAABWZ B K</text>
+  <text x="78" y="1187" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">AGN 46 HTFAABWZ B K</text>
   <line x1="64" y1="1199" x2="400" y2="1199" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="1253" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
-  <text x="78" y="1270" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
+  <text x="78" y="1253" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
+  <text x="78" y="1270" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
   <line x1="400" y1="1282" x2="104" y2="1282" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
   <path d="M97,1275 L111,1289 M97,1289 L111,1275" stroke="#374151" stroke-width="3" fill="none"/>
   <text x="118" y="1302" font-size="14" fill="#4b5563">lost</text>
@@ -103,15 +103,15 @@
   <text x="422" y="1362" font-size="14" font-weight="bold">no save, no new line</text>
   <text x="422" y="1380" font-size="14">same AGN (line, code, B):</text>
   <text x="422" y="1398" font-size="14">chunk B again, free</text>
-  <text x="78" y="1354" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">AGN 46 HTFAABWZ B K</text>
+  <text x="78" y="1354" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">AGN 46 HTFAABWZ B K</text>
   <line x1="64" y1="1366" x2="400" y2="1366" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
-  <text x="78" y="1420" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
-  <text x="78" y="1437" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
+  <text x="78" y="1420" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GAME WAS POSTPONED TO NEXT</text>
+  <text x="78" y="1437" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SATURDAY AT NOON = B DE N0CALL K</text>
   <line x1="400" y1="1449" x2="64" y2="1449" stroke="#374151" stroke-width="2" marker-end="url(#aq03-arrow)"/>
 
   <rect x="24" y="1489" width="672" height="62" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="40" y="1515" font-size="15">End: last_seq is 46. Lines 42 to 46 were each used once; the</text>
-  <text x="40" y="1535" font-size="15">repeated open, OK and AGN used none. send_message ran once.</text>
+  <text x="40" y="1515" font-size="16">End: last_seq is 46. Lines 42 to 46 were each used once; the</text>
+  <text x="40" y="1535" font-size="16">repeated open, OK and AGN used none. send_message ran once.</text>
   <rect x="24" y="1577" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/>
   <text x="48" y="1589" font-size="14">line checked and saved</text>
   <rect x="230" y="1577" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/>

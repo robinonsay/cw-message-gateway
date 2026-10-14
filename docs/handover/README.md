@@ -110,7 +110,7 @@ Rules the pages follow:
 | Colour | Fill and border | Means |
 |---|---|---|
 | Blue | `#dbeafe`, `#1e40af` | Host code: `hfnode` and the crates that run on a computer |
-| Green | `#dcfce7`, `#166534` | Firmware: code that runs on a Pico 2 or inside a radio |
+| Green | `#dcfce7`, `#166534` | Firmware: code that runs on a Pico 2 or inside a radio, including `keyer-core`, the box's rules, which `hfnode`'s tests also run |
 | Amber | `#fef3c7`, `#92400e` | A radio or other hardware: the IC-7300, the UV-K1, any CW radio, the box's board and wiring |
 | Red | `#fee2e2`, `#991b1b` | A safety limit, gate or rule (never loosened) |
 | Grey | `#f3f4f6`, `#374151` | An external service or a person: Robin, the field operator, the safety audit, mail and text services, the weather service |

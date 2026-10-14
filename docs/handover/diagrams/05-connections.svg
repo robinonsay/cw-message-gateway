@@ -51,7 +51,7 @@
   <text x="274" y="578.7" text-anchor="middle" font-size="14" fill="#111827">alert.rs</text>
   <text x="274" y="596.9" text-anchor="middle" font-size="14" fill="#111827">tries again after</text>
   <text x="274" y="615.1" text-anchor="middle" font-size="14" fill="#111827">1, 5 and 15 min</text>
-  <rect x="368" y="524" width="156" height="116" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <rect x="368" y="524" width="156" height="116" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
   <text x="446" y="560.5" text-anchor="middle" font-size="16" fill="#111827">Radio drivers</text>
   <text x="446" y="578.7" text-anchor="middle" font-size="14" fill="#111827">the <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">civ::Rig</tspan> trait</text>
   <text x="446" y="596.9" text-anchor="middle" font-size="14" fill="#111827">IC-7300: page 07</text>

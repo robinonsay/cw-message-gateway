@@ -100,7 +100,7 @@
   <path d="M100.0,864.0 L100.0,906.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
   <text x="110.0" y="890.0" text-anchor="start" font-size="14" fill="#4b5563">no</text>
   <rect x="30.0" y="908.0" width="230.0" height="56.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="145.0" y="930.9" text-anchor="middle" font-size="15" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n NO ROUTE</tspan></text>
+  <text x="145.0" y="930.9" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n NO ROUTE</tspan></text>
   <text x="145.0" y="948.9" text-anchor="middle" font-size="14" fill="#111827">empty plan: nothing tried</text>
   <text x="30.0" y="990.0" text-anchor="start" font-size="14" fill="#4b5563">Texts and iMessages begin with a tag, by default</text>
   <text x="30.0" y="1010.0" text-anchor="start" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">W5XXX via HF radio, replies are read on air:</tspan></text>
@@ -167,7 +167,7 @@
   <text x="42.0" y="1752.2" text-anchor="start" font-size="14" fill="#111827">after <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK</tspan>, the readout</text>
   <path d="M240.0,1768.0 L240.0,1796.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
   <rect x="30.0" y="1798.0" width="420.0" height="64.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="240.0" y="1824.9" text-anchor="middle" font-size="15" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NR 1 FM MOM SEE YOU SUNDAY ...</tspan></text>
+  <text x="240.0" y="1824.9" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NR 1 FM MOM SEE YOU SUNDAY ...</tspan></text>
   <text x="240.0" y="1842.9" text-anchor="middle" font-size="14" fill="#111827">at most 5 messages, 26 chunks; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">n MORE</tspan></text>
   <path d="M240.0,1862.0 L240.0,1890.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
   <rect x="30.0" y="1892.0" width="420.0" height="82.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>

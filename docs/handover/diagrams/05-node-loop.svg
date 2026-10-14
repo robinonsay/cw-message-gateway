@@ -120,9 +120,9 @@
   <path d="M222,1512 L222,1536" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
   <path d="M570,1513 L570,1578 L414,1578" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
   <rect x="32" y="1538" width="380" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
-  <text x="222" y="1565.6" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.transmit(reply)</tspan>: Figure 2;</text>
-  <text x="222" y="1583.8" text-anchor="middle" font-size="14" fill="#111827">the inbound messages it carries are</text>
-  <text x="222" y="1602" text-anchor="middle" font-size="14" fill="#111827">marked read only if it went out</text>
+  <text x="222" y="1565.6" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.transmit(reply)</tspan></text>
+  <text x="222" y="1583.8" text-anchor="middle" font-size="14" fill="#111827">(see the station figure); inbound messages</text>
+  <text x="222" y="1602" text-anchor="middle" font-size="14" fill="#111827">it carries are marked read only if it went out</text>
   <path d="M222,1618 L222,1642" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
   <rect x="32" y="1644" width="380" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
   <text x="222" y="1671.7" text-anchor="middle" font-size="16" fill="#111827">Drop audio from the transmission</text>

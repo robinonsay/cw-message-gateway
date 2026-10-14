@@ -65,7 +65,7 @@
 
   <!-- row 3: core 0 watch -->
   <rect x="28" y="476" width="664" height="104" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="40" y="500" font-weight="bold">Core 0, every pass: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15">Core1Watch::check(now, beat, fault)</tspan></text>
+  <text x="40" y="500" font-weight="bold">Core 0, every pass: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="16">Core1Watch::check(now, beat, fault)</tspan></text>
   <text x="40" y="524" font-size="14">One atomic load each of the beat and the fault flag. Nothing waits.</text>
   <text x="40" y="544" font-size="14">Fault flag set: trips on that pass.</text>
   <text x="40" y="564" font-size="14">Core 1 running and the beat still for 100 ms or more (CORE1_MS, never loosen): trips.</text>

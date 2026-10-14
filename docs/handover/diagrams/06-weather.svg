@@ -44,7 +44,7 @@
   <path d="M360.0,320.0 L360.0,356.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
   <path d="M585.0,320.0 L585.0,356.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
   <rect x="100.0" y="358.0" width="520.0" height="64.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="360.0" y="384.9" text-anchor="middle" font-size="15" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 46 WX 3 DL89IG ? DE N0CALL K</tspan></text>
+  <text x="360.0" y="384.9" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 46 WX 3 DL89IG ? DE N0CALL K</tspan></text>
   <text x="360.0" y="402.9" text-anchor="middle" font-size="14" fill="#111827">the grid it will use, if any; the preset number only if sent (WX 3)</text>
   <path d="M360.0,422.0 L360.0,450.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
   <rect x="100.0" y="452.0" width="520.0" height="56.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>

@@ -26,18 +26,18 @@
 
   <!-- Idle -->
   <rect x="260" y="140" width="240" height="80" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
-  <text x="380" y="173" text-anchor="middle" font-size="18" font-weight="bold">Idle</text>
+  <text x="380" y="173" text-anchor="middle" font-size="16" font-weight="bold">Idle</text>
   <text x="380" y="198" text-anchor="middle" font-size="14" fill="#4b5563">nothing pending</text>
 
   <!-- Pending -->
   <rect x="260" y="440" width="240" height="112" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
-  <text x="380" y="478" text-anchor="middle" font-size="18" font-weight="bold">Pending</text>
+  <text x="380" y="478" text-anchor="middle" font-size="16" font-weight="bold">Pending</text>
   <text x="380" y="504" text-anchor="middle" font-size="14" fill="#4b5563">read-back keyed,</text>
   <text x="380" y="526" text-anchor="middle" font-size="14" fill="#4b5563">waiting for OK or NO</text>
 
   <!-- Result held -->
   <rect x="260" y="800" width="240" height="96" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
-  <text x="380" y="832" text-anchor="middle" font-size="18" font-weight="bold">Result held</text>
+  <text x="380" y="832" text-anchor="middle" font-size="16" font-weight="bold">Result held</text>
   <text x="380" y="856" text-anchor="middle" font-size="14" fill="#4b5563">result keyed, kept for</text>
   <text x="380" y="876" text-anchor="middle" font-size="14" fill="#4b5563">a repeated OK</text>
 

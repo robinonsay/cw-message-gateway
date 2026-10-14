@@ -7,25 +7,25 @@
     </marker>
   </defs>
 
-  <text x="16" y="34" font-size="20" font-weight="bold">NR7Y CW: the one-transistor key (option C)</text>
-  <text x="16" y="58" font-size="14" fill="#4b5563">Source: the safety audit's ruling req-handheld-nr7y-cw-ruling.md §2, option C</text>
-  <text x="16" y="76" font-size="14" fill="#4b5563">(project files), as docs/keyer.md repeats it. Drawn for the bench; not yet built or measured.</text>
+  <text x="24" y="36" font-size="20" font-weight="bold">NR7Y CW: the one-transistor key (option C)</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Source: the safety audit's ruling req-handheld-nr7y-cw-ruling.md §2, option C</text>
+  <text x="24" y="78" font-size="14" fill="#4b5563">(project files), as docs/keyer.md repeats it. Drawn for the bench; not yet built or measured.</text>
 
   <!-- keyer box outline -->
-  <rect x="16" y="96" width="436" height="372" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5"/>
+  <rect x="24" y="96" width="428" height="372" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5"/>
   <text x="444" y="116" text-anchor="end" font-size="14" fill="#4b5563">keyer box</text>
 
   <!-- Pico 2 -->
-  <rect x="28" y="124" width="100" height="328" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
-  <text x="78" y="150" text-anchor="middle" font-weight="bold">Pico 2</text>
-  <text x="78" y="168" text-anchor="middle" font-size="14" fill="#4b5563">RP2350</text>
-  <text x="120" y="205" text-anchor="end" font-weight="bold">GP16</text>
-  <text x="120" y="224" text-anchor="end" font-size="14">pin 21</text>
-  <text x="120" y="417" text-anchor="end" font-weight="bold">GND</text>
-  <text x="120" y="436" text-anchor="end" font-size="14">pin 23</text>
+  <rect x="36" y="124" width="100" height="328" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="86" y="150" text-anchor="middle" font-weight="bold">Pico 2</text>
+  <text x="86" y="168" text-anchor="middle" font-size="14" fill="#4b5563">RP2350</text>
+  <text x="128" y="205" text-anchor="end" font-weight="bold">GP16</text>
+  <text x="128" y="224" text-anchor="end" font-size="14">pin 21</text>
+  <text x="128" y="417" text-anchor="end" font-weight="bold">GND</text>
+  <text x="128" y="436" text-anchor="end" font-size="14">pin 23</text>
 
   <!-- GP16 net: pin 21, junction J1, R2 to the base -->
-  <line x1="128" y1="200" x2="204" y2="200" stroke="#374151" stroke-width="2"/>
+  <line x1="136" y1="200" x2="204" y2="200" stroke="#374151" stroke-width="2"/>
   <rect x="204" y="189" width="60" height="22" fill="#ffffff" stroke="#374151" stroke-width="2"/>
   <text x="234" y="164" text-anchor="middle" font-weight="bold">R2 10 kΩ</text>
   <text x="234" y="182" text-anchor="middle" font-size="14">base: 4.7-10 kΩ</text>
@@ -44,7 +44,7 @@
   <!-- Q1 2N3904, NPN -->
   <circle cx="372" cy="200" r="30" fill="none" stroke="#374151" stroke-width="1.5"/>
   <line x1="360" y1="180" x2="360" y2="220" stroke="#374151" stroke-width="3.5"/>
-  <path d="M360,188 L384,172 L384,156 L506,156" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M360,188 L384,172 L384,156 L498,156" fill="none" stroke="#374151" stroke-width="2"/>
   <path d="M360,212 L384,228" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10w-arrow)"/>
   <line x1="384" y1="228" x2="384" y2="412" stroke="#374151" stroke-width="2"/>
   <text x="391" y="176" font-size="14">C</text>
@@ -55,7 +55,7 @@
   <text x="376" y="312" text-anchor="end" font-size="14">to you, legs down</text>
 
   <!-- GND net: pin 23, J2 (R1), J3 (emitter), ground wire to the 2.5 mm sleeve -->
-  <line x1="128" y1="412" x2="506" y2="412" stroke="#374151" stroke-width="2"/>
+  <line x1="136" y1="412" x2="498" y2="412" stroke="#374151" stroke-width="2"/>
 
   <!-- junction dots -->
   <circle cx="164" cy="200" r="4" fill="#374151"/>
@@ -68,85 +68,85 @@
   <text x="476" y="136" text-anchor="middle" font-size="14">ferrite</text>
 
   <!-- 3.5 mm plug -->
-  <rect x="506" y="104" width="198" height="244" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
-  <text x="520" y="128" font-weight="bold">3.5 mm plug</text>
-  <circle cx="506" cy="156" r="5" fill="#374151"/>
-  <text x="520" y="161" font-weight="bold">TIP</text>
-  <text x="520" y="180" font-size="14">key: PTT line, PB10</text>
-  <circle cx="506" cy="216" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="520" y="221" font-weight="bold">RING</text>
-  <text x="520" y="240" font-size="14">not connected:</text>
-  <text x="520" y="258" font-size="14">mic + dah wire</text>
-  <circle cx="506" cy="290" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="520" y="295" font-weight="bold" fill="#991b1b">SLEEVE</text>
-  <text x="520" y="314" font-size="14" fill="#991b1b">NOT ground: serial</text>
-  <text x="520" y="332" font-size="14" fill="#991b1b">input (PA10)</text>
+  <rect x="498" y="104" width="198" height="244" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="512" y="128" font-weight="bold">3.5 mm plug</text>
+  <circle cx="498" cy="156" r="5" fill="#374151"/>
+  <text x="512" y="161" font-weight="bold">TIP</text>
+  <text x="512" y="180" font-size="14">key: PTT line, PB10</text>
+  <circle cx="498" cy="216" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="512" y="221" font-weight="bold">RING</text>
+  <text x="512" y="240" font-size="14">not connected:</text>
+  <text x="512" y="258" font-size="14">mic + dah wire</text>
+  <circle cx="498" cy="290" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="512" y="295" font-weight="bold" fill="#991b1b">SLEEVE</text>
+  <text x="512" y="314" font-size="14" fill="#991b1b">NOT ground: serial</text>
+  <text x="512" y="332" font-size="14" fill="#991b1b">input (PA10)</text>
 
   <!-- 2.5 mm plug -->
-  <rect x="506" y="364" width="198" height="240" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
-  <text x="520" y="388" font-weight="bold">2.5 mm plug</text>
-  <circle cx="506" cy="412" r="5" fill="#374151"/>
-  <text x="520" y="417" font-weight="bold">SLEEVE</text>
-  <text x="520" y="436" font-size="14">the radio's ground</text>
-  <circle cx="506" cy="470" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="520" y="475" font-weight="bold">RING</text>
-  <text x="520" y="494" font-size="14">not connected:</text>
-  <text x="520" y="512" font-size="14">serial out</text>
-  <circle cx="506" cy="546" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="520" y="551" font-weight="bold">TIP</text>
-  <text x="520" y="570" font-size="14">speaker: not wired today</text>
-  <text x="520" y="588" font-size="14">GP26 later (page 11)</text>
+  <rect x="498" y="364" width="198" height="240" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="512" y="388" font-weight="bold">2.5 mm plug</text>
+  <circle cx="498" cy="412" r="5" fill="#374151"/>
+  <text x="512" y="417" font-weight="bold">SLEEVE</text>
+  <text x="512" y="436" font-size="14">the radio's ground</text>
+  <circle cx="498" cy="470" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="512" y="475" font-weight="bold">RING</text>
+  <text x="512" y="494" font-size="14">not connected:</text>
+  <text x="512" y="512" font-size="14">serial out</text>
+  <circle cx="498" cy="546" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="512" y="551" font-weight="bold">TIP</text>
+  <text x="512" y="570" font-size="14">speaker: not wired today</text>
+  <text x="512" y="588" font-size="14">GP26 later (page 11)</text>
 
   <!-- wire names, between the box and the radio -->
-  <text x="28" y="494" font-size="14" fill="#4b5563">R1, R2 and Q1 sit in the box, at GP16.</text>
-  <text x="28" y="514" font-size="14" fill="#4b5563">The long wires are the key wire (collector)</text>
-  <text x="28" y="534" font-size="14" fill="#4b5563">and the ground wire, with a clip-on ferrite</text>
-  <text x="28" y="554" font-size="14" fill="#4b5563">on the key wire at the radio end.</text>
-  <text x="28" y="574" font-size="14" fill="#4b5563">CWkin PTT HandKey reads only the tip.</text>
+  <text x="36" y="494" font-size="14" fill="#4b5563">R1, R2 and Q1 sit in the box, at GP16.</text>
+  <text x="36" y="514" font-size="14" fill="#4b5563">The long wires are the key wire (collector)</text>
+  <text x="36" y="534" font-size="14" fill="#4b5563">and the ground wire, with a clip-on ferrite</text>
+  <text x="36" y="554" font-size="14" fill="#4b5563">on the key wire at the radio end.</text>
+  <text x="36" y="574" font-size="14" fill="#4b5563">CWkin PTT HandKey reads only the tip.</text>
 
   <!-- the radio's side of the key line -->
-  <rect x="16" y="620" width="688" height="80" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
-  <text x="28" y="644" font-weight="bold">Inside the K1, after NR7Y's rework</text>
-  <text x="28" y="666" font-size="14">The 3.5 mm tip is wired to PB10, the PTT pin: 30-70 kΩ pull-up inside,</text>
-  <text x="28" y="686" font-size="14">key down below about 1.0 V, at most about 110 µA to sink.</text>
+  <rect x="24" y="620" width="672" height="80" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="36" y="644" font-weight="bold">Inside the K1, after NR7Y's rework</text>
+  <text x="36" y="666" font-size="14">The 3.5 mm tip is wired to PB10, the PTT pin: 30-70 kΩ pull-up inside,</text>
+  <text x="36" y="686" font-size="14">key down below about 1.0 V, at most about 110 µA to sink.</text>
 
   <!-- the checks, tied to the page's chain test steps -->
-  <rect x="16" y="716" width="688" height="388" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="28" y="740" font-weight="bold">The checks, by the page's chain test steps</text>
-  <text x="28" y="762" font-size="14">Take Q1's pins from the data sheet of the part in hand: TO-92 pinouts differ.</text>
-  <text x="28" y="788" font-size="14"><tspan font-weight="bold">Step 2, stage zero, key line.</tspan> Radio in CW, nothing connected: the</text>
-  <text x="28" y="806" font-size="14">3.5 mm tip to the 2.5 mm sleeve reads +2.5 to +5 V and carries under 1 mA</text>
-  <text x="28" y="824" font-size="14">through 1 kΩ. Negative: stop. Over 5 V: stop and use the PC817.</text>
-  <text x="28" y="850" font-size="14"><tspan font-weight="bold">Step 3, touch test.</tspan> The 3.5 mm tip to ground (the 2.5 mm sleeve) through</text>
-  <text x="28" y="868" font-size="14">1 kΩ for 1 s: the sidetone sounds, the red light stays off. Red light: pull the</text>
-  <text x="28" y="886" font-size="14">plug and stop.</text>
-  <text x="28" y="912" font-size="14"><tspan font-weight="bold">Step 4, box checks</tspan> (no radio; docs/keyer.md:1058-1070):</text>
-  <text x="28" y="932" font-size="14">• Bare Q1, diode test: red on the base, black on each other leg reads one</text>
-  <text x="42" y="950" font-size="14">drop (about 0.5-0.8 V) each; every other pair reads open both ways.</text>
-  <text x="28" y="970" font-size="14">• In the box, on USB, nothing running, nothing in the radio: C to E 0 V.</text>
-  <text x="42" y="988" font-size="14">Diode test C to E, both ways: open, or above about 1.5 V. A beep or under</text>
-  <text x="42" y="1006" font-size="14">about 1 V either way: a shorted part or the base on the tip wire. Do not</text>
-  <text x="42" y="1024" font-size="14">plug it in. GP16 to GND 0 V.</text>
-  <text x="28" y="1044" font-size="14">• Box unplugged from USB: GP16 to GND about 4.7 kΩ (a little less is fine).</text>
-  <text x="28" y="1070" font-size="14"><tspan font-weight="bold">Step 5, cable in, box idle, CWbkin OFF.</tspan> The 3.5 mm tip reads within 0.2 V</text>
-  <text x="28" y="1088" font-size="14">of its stage-zero reading. Lower: the switch leaks; unplug it, use another part.</text>
+  <rect x="24" y="716" width="672" height="388" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="36" y="740" font-weight="bold">The checks, by the page's chain test steps</text>
+  <text x="36" y="762" font-size="14">Take Q1's pins from the data sheet of the part in hand: TO-92 pinouts differ.</text>
+  <text x="36" y="788" font-size="14"><tspan font-weight="bold">Step 2, stage zero, key line.</tspan> Radio in CW, nothing connected: the</text>
+  <text x="36" y="806" font-size="14">3.5 mm tip to the 2.5 mm sleeve reads +2.5 to +5 V and carries under 1 mA</text>
+  <text x="36" y="824" font-size="14">through 1 kΩ. Negative: stop. Over 5 V: stop and use the PC817.</text>
+  <text x="36" y="850" font-size="14"><tspan font-weight="bold">Step 3, touch test.</tspan> The 3.5 mm tip to ground (the 2.5 mm sleeve) through</text>
+  <text x="36" y="868" font-size="14">1 kΩ for 1 s: the sidetone sounds, the red light stays off. Red light: pull the</text>
+  <text x="36" y="886" font-size="14">plug and stop.</text>
+  <text x="36" y="912" font-size="14"><tspan font-weight="bold">Step 4, box checks</tspan> (no radio; docs/keyer.md:1058-1070):</text>
+  <text x="36" y="932" font-size="14">• Bare Q1, diode test: red on the base, black on each other leg reads one</text>
+  <text x="50" y="950" font-size="14">drop (about 0.5-0.8 V) each; every other pair reads open both ways.</text>
+  <text x="36" y="970" font-size="14">• In the box, on USB, nothing running, nothing in the radio: C to E 0 V.</text>
+  <text x="50" y="988" font-size="14">Diode test C to E, both ways: open, or above about 1.5 V. A beep or under</text>
+  <text x="50" y="1006" font-size="14">about 1 V either way: a shorted part or the base on the tip wire. Do not</text>
+  <text x="50" y="1024" font-size="14">plug it in. GP16 to GND 0 V.</text>
+  <text x="36" y="1044" font-size="14">• Box unplugged from USB: GP16 to GND about 4.7 kΩ (a little less is fine).</text>
+  <text x="36" y="1070" font-size="14"><tspan font-weight="bold">Step 5, cable in, box idle, CWbkin OFF.</tspan> The 3.5 mm tip reads within 0.2 V</text>
+  <text x="36" y="1088" font-size="14">of its stage-zero reading. Lower: the switch leaks; unplug it, use another part.</text>
 
-  <rect x="16" y="1124" width="688" height="128" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="28" y="1148" font-weight="bold">Never, and the cable</text>
-  <text x="28" y="1170" font-size="14">Never the pull-down from base to GND (an undriven pad at about 2 V leaves</text>
-  <text x="28" y="1190" font-size="14">about 0.64 V on the base), never the 3.5 mm sleeve, never a bare Pico pin.</text>
-  <text x="28" y="1216" font-size="14">Unused contacts: cut short and insulate them.</text>
-  <text x="28" y="1236" font-size="14">Plugs: 3-contact or the cut-up K-plug, never mono.</text>
+  <rect x="24" y="1124" width="672" height="128" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="36" y="1148" font-weight="bold">Never, and the cable</text>
+  <text x="36" y="1170" font-size="14">Never the pull-down from base to GND (an undriven pad at about 2 V leaves</text>
+  <text x="36" y="1190" font-size="14">about 0.64 V on the base), never the 3.5 mm sleeve, never a bare Pico pin.</text>
+  <text x="36" y="1216" font-size="14">Unused contacts: cut short and insulate them.</text>
+  <text x="36" y="1236" font-size="14">Plugs: 3-contact or the cut-up K-plug, never mono.</text>
 
   <!-- legend -->
-  <rect x="16" y="1264" width="18" height="18" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
-  <text x="42" y="1278" font-size="14">hardware</text>
-  <rect x="122" y="1264" width="18" height="18" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
-  <text x="148" y="1278" font-size="14">safety part, rule</text>
-  <circle cx="290" cy="1273" r="5" fill="#374151"/>
-  <text x="302" y="1278" font-size="14">junction, wired</text>
-  <circle cx="436" cy="1273" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="448" y="1278" font-size="14">not connected</text>
-  <rect x="562" y="1264" width="18" height="18" rx="5" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
-  <text x="588" y="1278" font-size="14">ferrite</text>
+  <rect x="24" y="1264" width="18" height="18" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="50" y="1278" font-size="14">hardware</text>
+  <rect x="130" y="1264" width="18" height="18" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="156" y="1278" font-size="14">safety part, rule</text>
+  <circle cx="298" cy="1273" r="5" fill="#374151"/>
+  <text x="310" y="1278" font-size="14">junction, wired</text>
+  <circle cx="444" cy="1273" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="456" y="1278" font-size="14">not connected</text>
+  <rect x="570" y="1264" width="18" height="18" rx="5" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="596" y="1278" font-size="14">ferrite</text>
 </svg>

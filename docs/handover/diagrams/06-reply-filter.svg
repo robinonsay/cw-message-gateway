@@ -44,7 +44,7 @@
   <path d="M330.0,492.0 L378.0,492.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06filter-arrow)"/>
   <text x="349.0" y="480.0" text-anchor="middle" font-size="14" fill="#4b5563">no</text>
   <rect x="380.0" y="460.0" width="310.0" height="64.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
-  <text x="392.0" y="486.9" text-anchor="start" font-size="15" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MSG WITHHELD BY FILTER</tspan></text>
+  <text x="392.0" y="486.9" text-anchor="start" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MSG WITHHELD BY FILTER</tspan></text>
   <text x="392.0" y="504.9" text-anchor="start" font-size="14" fill="#111827">without asking the model</text>
   <path d="M180.0,532.0 L180.0,562.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06filter-arrow)"/>
   <text x="192.0" y="547.0" text-anchor="start" font-size="14" fill="#4b5563">yes, or Claude</text>

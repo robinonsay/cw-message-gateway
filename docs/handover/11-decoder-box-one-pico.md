@@ -163,7 +163,7 @@ On the one-Pico box every decoder command and line passes through core 0's loop 
 
 ![Sequence of an RX session on the one-Pico keyer box: the host sends 07 RX HELLO; core 0 re-frames it and writes it whole into the ring to core 1, or answers ERR RX BUSY or ERR RX OFF; core 1 replies into the ring back; core 0 forwards the reply as 07 RX OK HELLO only after the keyer's own replies have gone, then forwards the decoder's id-00 lines only while rx_open](diagrams/11-rx-sequence.svg)
 
-*Figure: time runs down the page. The red note is the forwarding gate; the dashed reply happens only when the ring to core 1 lacks room. A keyer command sent meanwhile (`08 STATUS`) is answered before the decoder's reply goes out.*
+*Figure: time runs down the page. The red note is the forwarding gate; the dashed reply happens only when the ring to core 1 lacks room. A keyer command sent meanwhile (`08 STATUS`) is answered before the decoder's reply goes out. The purple border marks code that is not on `main`.*
 
 ## Interfaces and APIs
 

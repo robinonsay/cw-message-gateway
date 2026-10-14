@@ -9,8 +9,8 @@
     </marker>
   </defs>
   <rect x="0" y="0" width="720" height="1924" fill="#ffffff"/>
-  <text x="24" y="34" font-size="20" font-weight="bold">What CI runs, and what each job guards</text>
-  <text x="24" y="58" font-size="14" fill="#4b5563">Six jobs on main and one from PR #30, none waiting for another; red steps are safety checks</text>
+  <text x="24" y="36" font-size="20" font-weight="bold">What CI runs, and what each job guards</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Six jobs on main and one from PR #30, none waiting for another; red steps are safety checks</text>
   <rect x="24" y="76" width="672" height="60" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
   <text x="40" y="102" font-size="16" font-weight="bold">GitHub Actions, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.github/workflows/ci.yml</tspan></text>
   <text x="40" y="124" font-size="14" fill="#4b5563">on every <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">push</tspan> (any branch) and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pull_request</tspan>; all jobs start at once</text>
