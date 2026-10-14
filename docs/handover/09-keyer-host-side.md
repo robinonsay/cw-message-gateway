@@ -783,7 +783,7 @@ To run the keyer tests on your own machine: `cargo test -p hfnode keyer::` for t
 - **"PR 5"** of that design note: feed the keyer rig's sidetone monitor from the box's `SL` lines (its 10 ms level measurements) instead of the sound card; keyer area, with its own audit review. Until then the design refuses `rig = "keyer"` with `source = "box"` (§6).
 - **Unattended use** is not cleared. docs/keyer.md says to run in the foreground until the whole bring-up has passed, and then to take the safety audit's verdict for the setup and the control-operator rules for automatic CW before leaving the node on its own ([docs/keyer.md](../keyer.md), "Running it outside"; [16 Work left and known bugs](16-work-left-known-bugs.md)).
 - **The bands** need checking against the eCFR before anyone relies on them.
-- **A test-only fix for the band flake** of `a_key_closed_at_the_radio_just_before_a_piece_inhibits` ("Known bugs"). None is open; it would be a new keyer change, with its own audit review, and never a wider timeout or a lower scale.
+- **A test-only fix for the band flake** of `a_key_closed_at_the_radio_just_before_a_piece_inhibits` ("Known bugs"). A patch exists in the project files (`ci/stuck-key-band-flake.patch`, see [16 Work left and known bugs](16-work-left-known-bugs.md) FL1) but is not opened; it would be a new keyer change, with its own audit review, and never a wider timeout or a lower scale.
 - **Re-pinning rustos** in PR #31 after rustos PR #6 merges gives #31 a new head, which needs a fresh audit review and a new image hash before anything is flashed ([16 Work left and known bugs](16-work-left-known-bugs.md)).
 
 ## Sources

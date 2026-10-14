@@ -17,8 +17,8 @@
   <text x="40" y="230" font-size="14" fill="#111827">setup needs link, tune needs setup,</text>
   <text x="40" y="250" font-size="14" fill="#111827">cw needs tune, run needs done;</text>
   <text x="40" y="270" font-size="14" fill="#111827">more than 10 W needs stage keying;</text>
-  <text x="40" y="290" font-size="14" fill="#111827">run: max_key_seconds 55 or less, and long enough</text>
-  <text x="40" y="310" font-size="14" fill="#111827">for one character and the longest reply</text>
+  <text x="40" y="290" font-size="14" fill="#111827">run: max_key_seconds 55 or less, and enough for</text>
+  <text x="40" y="310" font-size="14" fill="#111827">one character; longest reply within 30 min</text>
   <rect x="524" y="215" width="172" height="80" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
   <text x="536" y="239" font-size="14" fill="#111827" font-weight="bold">Refused:</text>
   <text x="536" y="259" font-size="14" fill="#111827">no port is opened,</text>
