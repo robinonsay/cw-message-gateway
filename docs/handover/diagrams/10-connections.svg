@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1004" width="720" height="1004" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <rect x="0" y="0" width="720" height="1004" fill="#ffffff"/>
+  <title>How the three UV-K1 routes connect: the station safety layer drives either the Handheld rig over the radio's USB-C port (route A, parked) or the keyer rig and the keyer box on the K-plug (routes B and C); the radio's speaker comes back to the decoder and the monitor; config and the audit gate everything</title>
+  <defs>
+    <marker id="k10c-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="36" font-size="20" font-weight="bold">How the UV-K1 routes connect</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">One station layer over every route; only the rig under it changes.</text>
+
+  <!-- node loop and station safety layer -->
+  <rect x="40" y="80" width="640" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360" y="106" text-anchor="middle" font-weight="bold">Node loop and station safety layer (page 05)</text>
+  <text x="360" y="128" text-anchor="middle" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station&lt;R: Rig&gt;</tspan>: sets up and checks the radio before every</text>
+  <text x="360" y="148" text-anchor="middle" font-size="14">transmission; sends CW in pieces of at most 30 characters</text>
+
+  <!-- Rig trait calls -->
+  <line x1="145" y1="160" x2="145" y2="206" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="155" y="190" font-size="14">Rig trait calls</text>
+  <line x1="485" y1="160" x2="485" y2="206" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="495" y="190" font-size="14">Rig trait calls</text>
+
+  <!-- route A rig -->
+  <rect x="40" y="210" width="210" height="90" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="145" y="236" text-anchor="middle" font-weight="bold">Route A: Handheld</text>
+  <text x="145" y="258" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "handheld"</text>
+  <text x="145" y="280" text-anchor="middle" font-size="14">handheld.rs, link.rs</text>
+
+  <!-- routes B and C rig -->
+  <rect x="290" y="210" width="390" height="90" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="485" y="236" text-anchor="middle" font-weight="bold">Routes B, C: KeyerRig and monitor</text>
+  <text x="485" y="258" text-anchor="middle" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "keyer"</tspan> and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[keyer] output</tspan></text>
+  <text x="485" y="280" text-anchor="middle" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">"ptt"</tspan>, Mode::Mute (B); <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">"key"</tspan>, Mode::Sidetone (C)</text>
+
+  <!-- links to the firmware -->
+  <line x1="145" y1="304" x2="145" y2="346" stroke="#374151" stroke-width="2" marker-start="url(#k10c-arrow)" marker-end="url(#k10c-arrow)"/>
+  <text x="155" y="322" font-size="14">USB-C CDC,</text>
+  <text x="155" y="338" font-size="14">protocol v1</text>
+  <line x1="485" y1="304" x2="485" y2="346" stroke="#374151" stroke-width="2" marker-start="url(#k10c-arrow)" marker-end="url(#k10c-arrow)"/>
+  <text x="495" y="322" font-size="14">USB serial,</text>
+  <text x="495" y="338" font-size="14">keyer protocol 4</text>
+
+  <!-- route A firmware, inside the radio -->
+  <rect x="40" y="350" width="210" height="90" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="145" y="376" text-anchor="middle" font-weight="bold">UV-K1: NR7Y + hfnode</text>
+  <text x="145" y="398" text-anchor="middle" font-size="14">hfnode.c inside the radio</text>
+  <text x="145" y="420" text-anchor="middle" font-size="14" fill="#991b1b">Parked; flash NO-GO</text>
+
+  <!-- keyer box -->
+  <rect x="290" y="350" width="390" height="90" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="485" y="376" text-anchor="middle" font-weight="bold">Keyer box: Pico 2 (page 08)</text>
+  <text x="485" y="398" text-anchor="middle" font-size="14">audited firmware, build eef8c126</text>
+  <text x="485" y="420" text-anchor="middle" font-size="14">GP17 PTT + GP18 tone (B); GP16 key (C)</text>
+
+  <!-- box outputs to the radios -->
+  <line x1="382" y1="440" x2="382" y2="486" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="372" y="470" text-anchor="end" font-size="14">PTT and tone</text>
+  <line x1="587" y1="440" x2="587" y2="486" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="577" y="470" text-anchor="end" font-size="14">key, option C</text>
+
+  <!-- radios -->
+  <rect x="290" y="490" width="185" height="100" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="382" y="516" text-anchor="middle" font-weight="bold">Route B</text>
+  <text x="382" y="538" text-anchor="middle" font-size="14">stock UV-K1</text>
+  <text x="382" y="558" text-anchor="middle" font-size="14">K-plug PTT + mic</text>
+  <text x="382" y="578" text-anchor="middle" font-size="14">(MCW)</text>
+  <rect x="495" y="490" width="185" height="100" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="587" y="516" text-anchor="middle" font-weight="bold">Route C (Robin's)</text>
+  <text x="587" y="538" text-anchor="middle" font-size="14">UV-K1, NR7Y v1.3,</text>
+  <text x="587" y="558" text-anchor="middle" font-size="14">paddle rework</text>
+  <text x="587" y="578" text-anchor="middle" font-size="14">3.5 mm tip is the key</text>
+
+  <!-- speakers down to the audio input -->
+  <line x1="145" y1="440" x2="145" y2="636" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="155" y="564" font-size="14">speaker</text>
+  <line x1="382" y1="590" x2="382" y2="636" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="392" y="620" font-size="14">speaker</text>
+  <line x1="587" y1="590" x2="587" y2="636" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <text x="597" y="620" font-size="14">speaker</text>
+
+  <!-- audio input -->
+  <rect x="40" y="640" width="640" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360" y="664" text-anchor="middle" font-weight="bold">Audio in: the CW decoder and the monitor (page 04)</text>
+  <text x="360" y="686" text-anchor="middle" font-size="14">a sound card (A, B), or the Mac's built-in microphone on the bench (C)</text>
+  <text x="360" y="706" text-anchor="middle" font-size="14">Decoded text goes up to the node (left); the tone to the monitor (right)</text>
+
+  <!-- the audio's way back up -->
+  <path d="M40,680 H24 V120 H38" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+  <path d="M680,680 H696 V255 H682" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10c-arrow)"/>
+
+  <!-- later, not on main -->
+  <rect x="40" y="736" width="640" height="62" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="360" y="760" text-anchor="middle" font-size="14">Later, not on main (PR #31): route C's speaker into the keyer box's GP26,</text>
+  <text x="360" y="780" text-anchor="middle" font-size="14">the one-Pico image, in place of the sound card (page 11)</text>
+
+  <!-- over every route -->
+  <text x="40" y="830" font-weight="bold">Over every route</text>
+  <rect x="40" y="844" width="310" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="56" y="868" font-weight="bold">Config file (page 15)</text>
+  <text x="56" y="890" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[station] rig</text>
+  <text x="56" y="910" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[handheld]</tspan> (A)</text>
+  <text x="56" y="930" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[keyer] output, commissioned</tspan></text>
+  <rect x="370" y="844" width="310" height="104" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="386" y="868" font-weight="bold">Safety audit and bench</text>
+  <text x="386" y="890" font-size="14">gate every flash, every wiring</text>
+  <text x="386" y="910" font-size="14">change and every keyed stage</text>
+  <text x="386" y="930" font-size="14">(page 14); unattended: not cleared</text>
+
+  <!-- legend -->
+  <rect x="24" y="966" width="18" height="18" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="50" y="980" font-size="14">host</text>
+  <rect x="104" y="966" width="18" height="18" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="130" y="980" font-size="14">firmware</text>
+  <rect x="216" y="966" width="18" height="18" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="242" y="980" font-size="14">radio</text>
+  <rect x="302" y="966" width="18" height="18" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="328" y="980" font-size="14">safety gate</text>
+  <rect x="428" y="966" width="18" height="18" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="454" y="980" font-size="14">not on main yet</text>
+</svg>

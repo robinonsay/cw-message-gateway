@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1046" width="720" height="1046" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>One RP2350 on the keyer box: core 0 runs the keyer and owns USB, the watchdog and GP16-GP18; core 1 runs the decoder unprivileged behind its MPU; they meet only in lock-free rings and flags in shared SRAM; the ADC on GP26 fills a DMA ring that core 1 reads</title>
+  <defs>
+    <marker id="k11c-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1046" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">One Pico 2: keyer on core 0, decoder on core 1</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Draft PR #31 at bc5062ae, stacked on PR #30: not on main yet</text>
+
+  <!-- host -->
+  <rect x="200" y="78" width="320" height="56" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360" y="102" text-anchor="middle" font-weight="bold">hfnode on the host computer</text>
+  <text x="360" y="123" text-anchor="middle" font-size="14">keyer lines and RX lines</text>
+
+  <!-- chip boundary: not on main -->
+  <rect x="16" y="192" width="500" height="802" rx="10" fill="#ede9fe" fill-opacity="0.35" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="28" y="212" font-size="14" font-weight="bold" fill="#5b21b6">RP2350 (PR #31 image)</text>
+
+  <!-- USB arrow, both ways -->
+  <line x1="360" y1="136" x2="360" y2="218" stroke="#374151" stroke-width="2" marker-start="url(#k11c-arrow)" marker-end="url(#k11c-arrow)"/>
+  <text x="374" y="158" font-size="14">USB serial, the box's only port:</text>
+  <text x="374" y="176" font-size="14">keyer protocol 5</text>
+
+  <!-- core 0 -->
+  <rect x="32" y="220" width="468" height="170" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="48" y="246" font-weight="bold">Core 0: the keyer (privileged)</text>
+  <text x="48" y="269" font-size="14">Runs <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer_core::control::Control</tspan>, never waits</text>
+  <text x="48" y="290" font-size="14">Owns USB, the watchdog (500 ms), clocks, PWM</text>
+  <text x="48" y="311" font-size="14">Drives GP16 key, GP17 PTT, GP18 tone; reads GP19 (PTT line)</text>
+  <!-- safety watch inside core 0 -->
+  <rect x="44" y="322" width="444" height="56" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="56" y="344" font-size="14"><tspan font-weight="bold">Core1Watch:</tspan> fault flag set, or no heartbeat for 100 ms</text>
+  <text x="56" y="365" font-size="14">then key, PTT, tone open; trip CORE1; watchdog not fed</text>
+
+  <!-- radio key side -->
+  <rect x="540" y="230" width="164" height="154" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="552" y="254" font-weight="bold">Radio key side</text>
+  <text x="552" y="278" font-size="14">GP16 key out</text>
+  <text x="552" y="298" font-size="14">GP17 PTT out</text>
+  <text x="552" y="318" font-size="14">GP18 tone out</text>
+  <text x="552" y="338" font-size="14">GP19 PTT line in</text>
+  <text x="552" y="362" font-size="14" fill="#4b5563">page 08</text>
+  <line x1="502" y1="282" x2="538" y2="282" stroke="#374151" stroke-width="2" marker-start="url(#k11c-arrow)" marker-end="url(#k11c-arrow)"/>
+
+  <!-- arrows core 0 <-> LINK -->
+  <line x1="150" y1="390" x2="150" y2="444" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+  <text x="162" y="413" font-size="14">RX commands,</text>
+  <text x="162" y="431" font-size="14">epoch, keyed, test</text>
+  <line x1="330" y1="446" x2="330" y2="392" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+  <text x="342" y="422" font-size="14">lines, beat, fault</text>
+
+  <!-- shared memory -->
+  <rect x="32" y="448" width="468" height="166" rx="8" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="48" y="472" font-weight="bold">Shared SRAM: LINK, no locks</text>
+  <rect x="48" y="484" width="208" height="60" rx="6" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="60" y="507" font-size="14" font-weight="bold">to_core1: 512 B</text>
+  <text x="60" y="528" font-size="14">host's RX commands</text>
+  <rect x="276" y="484" width="208" height="60" rx="6" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="288" y="507" font-size="14" font-weight="bold">from_core1: 2 kB</text>
+  <text x="288" y="528" font-size="14">decoder lines, replies</text>
+  <text x="48" y="572" font-size="14"><tspan font-weight="bold">beat</tspan> (core 1, every pass), <tspan font-weight="bold">fault</tspan> (set by safe_state)</text>
+  <text x="48" y="596" font-size="14"><tspan font-weight="bold">epoch, keyed, test</tspan> (written by core 0)</text>
+
+  <!-- arrows LINK <-> core 1 -->
+  <line x1="150" y1="614" x2="150" y2="668" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+  <text x="162" y="637" font-size="14">commands,</text>
+  <text x="162" y="655" font-size="14">epoch, keyed, test</text>
+  <line x1="330" y1="670" x2="330" y2="616" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+  <text x="342" y="646" font-size="14">lines, beat, fault</text>
+
+  <!-- core 1 -->
+  <rect x="32" y="672" width="468" height="176" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="48" y="698" font-weight="bold">Core 1: the decoder (unprivileged)</text>
+  <text x="48" y="721" font-size="14">Runs <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decoder_core</tspan>'s Control, as the decoder box does</text>
+  <text x="48" y="742" font-size="14">MPU on, default map off, 7 regions:</text>
+  <text x="64" y="763" font-size="14">read, run: flash. read, write: own 64 kB stack,</text>
+  <text x="64" y="783" font-size="14">LINK, RING, ADC. read only: DMA ch 0, TIMER0</text>
+  <text x="48" y="804" font-size="14">FPU only (GPIO coprocessor off); MSPLIM on its stack</text>
+  <text x="48" y="828" font-size="14">No SIO, pins, pads, PWM, USB, watchdog, core 0 RAM</text>
+
+  <!-- ADC and DMA -->
+  <line x1="264" y1="890" x2="264" y2="852" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+  <text x="276" y="875" font-size="14">core 1 reads the ring</text>
+  <rect x="32" y="892" width="468" height="84" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="48" y="916" font-weight="bold">ADC on GP26 (pin 31), 32 kHz, DMA ch 0, RING</text>
+  <text x="48" y="938" font-size="14">16 kB ring in SRAM, set up by core 0 before core 1 starts</text>
+  <text x="48" y="960" font-size="14">ch 0 locked Secure Unprivileged: SECCFG reads 0b110</text>
+
+  <!-- radio audio -->
+  <rect x="540" y="892" width="164" height="84" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="552" y="916" font-weight="bold">Radio audio</text>
+  <text x="552" y="938" font-size="14">speaker or PHONES,</text>
+  <text x="552" y="958" font-size="14">C1 and 3 x 10 kΩ</text>
+  <line x1="538" y1="934" x2="504" y2="934" stroke="#374151" stroke-width="2" marker-end="url(#k11c-arrow)"/>
+
+  <!-- legend -->
+  <rect x="24" y="1012" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="48" y="1024" font-size="14">firmware</text>
+  <rect x="130" y="1012" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="154" y="1024" font-size="14">hardware</text>
+  <rect x="240" y="1012" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="264" y="1024" font-size="14">host</text>
+  <rect x="318" y="1012" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="342" y="1024" font-size="14">safety</text>
+  <rect x="406" y="1012" width="18" height="14" fill="#ede9fe" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="430" y="1024" font-size="14">not on main yet</text>
+</svg>

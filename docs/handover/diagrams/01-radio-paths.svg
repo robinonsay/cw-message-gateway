@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1394" width="720" height="1394" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Three panels: the IC-7300 on one USB cable; any CW radio keyed by the keyer box with its audio through a sound card; the UV-K1's routes B and C through the box, and the parked route A</title>
+  <defs>
+    <marker id="k01rp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1394" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">The three radio paths</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">What is wired between the host and each radio, and what keys the transmitter</text>
+  <!-- Panel 1: IC-7300 -->
+  <text x="24" y="100" font-weight="bold">1. ICOM IC-7300<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "ic7300"</tspan></text>
+  <path d="M24,110 L696,110" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="128" width="160" height="96" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="104" y="152" text-anchor="middle" font-weight="bold">hfnode</text>
+  <text x="104" y="174" text-anchor="middle" font-size="14">CI-V driver</text>
+  <text x="104" y="194" text-anchor="middle" font-size="14">and decoder</text>
+  <rect x="536" y="128" width="160" height="96" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="616" y="152" text-anchor="middle" font-weight="bold">IC-7300</text>
+  <text x="616" y="174" text-anchor="middle" font-size="14">its own keyer</text>
+  <text x="616" y="194" text-anchor="middle" font-size="14">keys the Morse</text>
+  <text x="360" y="158" text-anchor="middle" font-size="14" fill="#4b5563">CI-V on USB serial (address 0x94)</text>
+  <path d="M186,168 L534,168" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k01rp-arrow)" marker-end="url(#k01rp-arrow)"/>
+  <text x="360" y="198" text-anchor="middle" font-size="14" fill="#4b5563">receive audio from its USB codec</text>
+  <path d="M534,208 L186,208" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="360" y="244" text-anchor="middle" font-size="14" fill="#4b5563">one USB cable; CI-V 17 sends at most 30 characters</text>
+  <rect x="24" y="256" width="280" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="164" y="278" text-anchor="middle" font-size="14">read-only preflight</text>
+  <text x="164" y="297" text-anchor="middle" font-size="14">before any write</text>
+  <rect x="416" y="256" width="280" height="52" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="556" y="278" text-anchor="middle" font-size="14">its Time-Out Timer must read 3 min</text>
+  <text x="556" y="297" text-anchor="middle" font-size="14">(the audit: do not rely on it)</text>
+
+  <!-- Panel 2: any CW radio through the keyer box -->
+  <text x="24" y="348" font-weight="bold">2. Any CW radio<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "keyer", output = "key"</tspan></text>
+  <path d="M24,358 L696,358" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="376" width="160" height="244" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="36" y="402" font-weight="bold">hfnode</text>
+  <text x="36" y="424" font-size="14">keyer rig: sends</text>
+  <text x="36" y="442" font-size="14">text, checks the</text>
+  <text x="36" y="460" font-size="14">box replies</text>
+  <rect x="536" y="376" width="160" height="244" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="548" y="402" font-weight="bold">Any CW radio</text>
+  <text x="548" y="424" font-size="14">set up by hand</text>
+  <rect x="264" y="376" width="200" height="72" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="364" y="400" text-anchor="middle" font-weight="bold">Keyer box</text>
+  <text x="364" y="420" text-anchor="middle" font-size="14">Pico 2 on rustos;</text>
+  <text x="364" y="438" text-anchor="middle" font-size="14">times the Morse</text>
+  <text x="224" y="388" text-anchor="middle" font-size="14" fill="#4b5563">USB</text>
+  <text x="224" y="404" text-anchor="middle" font-size="14" fill="#4b5563">serial</text>
+  <path d="M186,412 L262,412" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k01rp-arrow)" marker-end="url(#k01rp-arrow)"/>
+  <path d="M364,450 L364,482" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="374" y="471" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#4b5563">GP16</text>
+  <rect x="264" y="484" width="200" height="56" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="507" text-anchor="middle" font-weight="bold">Key switch</text>
+  <text x="364" y="527" text-anchor="middle" font-size="14">PC817 or one transistor</text>
+  <text x="500" y="502" text-anchor="middle" font-size="14" fill="#4b5563">key line</text>
+  <path d="M466,512 L534,512" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="548" y="517" font-size="14">key jack</text>
+  <rect x="264" y="564" width="200" height="56" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="587" text-anchor="middle" font-weight="bold">USB sound card</text>
+  <text x="364" y="607" text-anchor="middle" font-size="14">mic or line input</text>
+  <text x="500" y="582" text-anchor="middle" font-size="14" fill="#4b5563">audio</text>
+  <path d="M534,592 L466,592" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="548" y="597" font-size="14">headphone jack</text>
+  <text x="224" y="568" text-anchor="middle" font-size="14" fill="#4b5563">USB</text>
+  <text x="224" y="584" text-anchor="middle" font-size="14" fill="#4b5563">audio</text>
+  <path d="M262,592 L186,592" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="36" y="578" font-size="14">decoder and</text>
+  <text x="36" y="596" font-size="14">sidetone monitor</text>
+
+  <!-- Panel 3: UV-K1 -->
+  <text x="24" y="660" font-weight="bold">3. Quansheng UV-K1<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563">routes B and C on the K-plug through the box; A parked</tspan></text>
+  <path d="M24,670 L696,670" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="264" y="738" font-size="14" font-weight="bold">Route C, NR7Y CW</text>
+  <rect x="264" y="748" width="200" height="56" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="771" text-anchor="middle" font-weight="bold">Key switch</text>
+  <text x="364" y="791" text-anchor="middle" font-size="14">PC817 or one transistor</text>
+  <text x="264" y="834" font-size="14" font-weight="bold">Route B, a stock radio</text>
+  <rect x="264" y="844" width="200" height="52" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="865" text-anchor="middle" font-weight="bold">PC817 #2</text>
+  <text x="364" y="884" text-anchor="middle" font-size="14">holds the PTT</text>
+  <rect x="264" y="908" width="200" height="52" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="929" text-anchor="middle" font-weight="bold">Tone filter</text>
+  <text x="364" y="948" text-anchor="middle" font-size="14">700 Hz MCW tone</text>
+  <rect x="264" y="972" width="200" height="52" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="993" text-anchor="middle" font-weight="bold">BAT85 diode</text>
+  <text x="364" y="1012" text-anchor="middle" font-size="14">PTT read-back</text>
+  <rect x="24" y="688" width="160" height="336" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="36" y="712" font-weight="bold">Keyer box</text>
+  <text x="36" y="732" font-size="14" fill="#4b5563">from hfnode by</text>
+  <text x="36" y="750" font-size="14" fill="#4b5563">USB serial, as in 2</text>
+  <text x="172" y="781" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GP16</text>
+  <path d="M186,776 L262,776" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <path d="M466,776 L534,776" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="172" y="875" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GP17</text>
+  <path d="M186,870 L262,870" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <path d="M466,870 L534,870" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="172" y="939" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GP18</text>
+  <path d="M186,934 L262,934" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <path d="M466,934 L534,934" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="172" y="1003" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GP19</text>
+  <path d="M262,998 L186,998" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <path d="M534,998 L466,998" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <rect x="264" y="1048" width="200" height="52" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="364" y="1069" text-anchor="middle" font-weight="bold">Speaker pad</text>
+  <text x="364" y="1088" text-anchor="middle" font-size="14">10 kΩ, 1 kΩ, 1 µF</text>
+  <rect x="24" y="1048" width="160" height="52" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="104" y="1069" text-anchor="middle" font-weight="bold">USB sound card</text>
+  <text x="104" y="1088" text-anchor="middle" font-size="14">to hfnode</text>
+  <path d="M534,1074 L466,1074" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <path d="M262,1074 L186,1074" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)"/>
+  <text x="24" y="1124" font-size="14" fill="#4b5563">Each switch returns to the 2.5 mm sleeve (ground).</text>
+  <text x="24" y="1142" font-size="14" fill="#4b5563">On an attended bench the Mac's built-in mic may listen.</text>
+  <text x="24" y="1176" font-size="14" font-weight="bold">Route A, parked</text>
+  <rect x="24" y="1186" width="160" height="56" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="104" y="1209" text-anchor="middle" font-weight="bold">hfnode</text>
+  <text x="104" y="1230" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "handheld"</text>
+  <text x="360" y="1204" text-anchor="middle" font-size="14" fill="#4b5563">USB-C, to custom firmware</text>
+  <path d="M186,1214 L534,1214" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)" stroke-dasharray="6 4"/>
+  <rect x="232" y="1226" width="272" height="30" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="368" y="1246" text-anchor="middle" font-size="14">never flashed: graded NO-GO</text>
+  <rect x="536" y="688" width="160" height="554" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="548" y="712" font-weight="bold">UV-K1</text>
+  <text x="548" y="730" font-size="14" fill="#4b5563">K-plug contacts</text>
+  <text x="548" y="781" font-size="14">3.5 mm tip:</text>
+  <text x="548" y="799" font-size="14">PTT read as key</text>
+  <text x="548" y="875" font-size="14">PTT contact</text>
+  <text x="548" y="939" font-size="14">mic contact</text>
+  <text x="548" y="1003" font-size="14">PTT contact</text>
+  <text x="548" y="1079" font-size="14">speaker</text>
+  <text x="548" y="1219" font-size="14">USB-C port</text>
+  <rect x="24" y="1266" width="672" height="76" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="1288" font-size="14">Required: a 4.7 kΩ pull-down to ground on GP16, and on GP17 when it is wired</text>
+  <text x="40" y="1308" font-size="14">(erratum RP2350-E9). Box pin LOW means the key is open. A Pico pin wired straight</text>
+  <text x="40" y="1328" font-size="14">to a key or PTT contact is graded NO-GO. Wiring drawings: pages 08 and 10.</text>
+  <rect x="24" y="1357" width="16" height="16" rx="3" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="48" y="1370" font-size="14">Host code</text>
+  <rect x="148" y="1357" width="16" height="16" rx="3" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="172" y="1370" font-size="14">Firmware</text>
+  <rect x="264" y="1357" width="16" height="16" rx="3" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="288" y="1370" font-size="14">Hardware</text>
+  <rect x="380" y="1357" width="16" height="16" rx="3" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="404" y="1370" font-size="14">Safety gate</text>
+  <path d="M504,1365 L544,1365" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k01rp-arrow)" stroke-dasharray="6 4"/>
+  <text x="554" y="1370" font-size="14">parked route</text>
+</svg>

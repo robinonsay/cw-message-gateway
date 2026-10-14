@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 2058" width="720" height="2058" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The TX path from a committed request through route::plan to iMessage, Google Voice or email, and the RX path from the mailbox or Messages' database through the reply filter into the inbox and out as an RX readout</title>
+  <defs>
+    <marker id="k06route-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="2058" fill="#ffffff"/>
+  <text x="24.0" y="36.0" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">Gateways: a TX goes out, replies come in</text>
+  <text x="24.0" y="60.0" text-anchor="start" font-size="14" fill="#4b5563">gateway/mod.rs and route.rs for TX; node.rs threads and inbox.rs for RX</text>
+  <rect x="16.0" y="80.0" width="688.0" height="968.0" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30.0" y="106.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">TX: one message, one route</text>
+  <rect x="160.0" y="124.0" width="400.0" height="64.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360.0" y="151.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">Session commits <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX MOM ...</tspan></tspan></text>
+  <text x="360.0" y="169.2" text-anchor="middle" font-size="14" fill="#111827">calls <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">send_message(dest, from_call, text)</tspan></text>
+  <path d="M360.0,188.0 L360.0,214.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="160.0" y="216.0" width="400.0" height="64.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360.0" y="243.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">route::plan</tspan>: the routes, in order</tspan></text>
+  <text x="360.0" y="261.2" text-anchor="middle" font-size="14" fill="#111827">reads <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">google_voice.json</tspan> on every TX</text>
+  <path d="M200.0,280.0 L200.0,308.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+
+  <!-- Route 1: iMessage -->
+  <rect x="30.0" y="310.0" width="230.0" height="100.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="337.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">1. iMessage?</tspan></text>
+  <text x="42.0" y="355.2" text-anchor="start" font-size="14" fill="#111827">an <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage</tspan> handle, and</text>
+  <text x="42.0" y="373.2" text-anchor="start" font-size="14" fill="#111827">Messages here is ready</text>
+  <path d="M260.0,360.0 L294.0,360.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="275.0" y="348.0" text-anchor="middle" font-size="14" fill="#4b5563">yes</text>
+  <rect x="296.0" y="310.0" width="200.0" height="100.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="308.0" y="337.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ImSender::send</tspan></tspan></text>
+  <text x="308.0" y="355.2" text-anchor="start" font-size="14" fill="#111827">first handle: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">osascript</tspan>,</text>
+  <text x="308.0" y="373.2" text-anchor="start" font-size="14" fill="#111827">then watch <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">chat.db</tspan></text>
+  <text x="308.0" y="391.2" text-anchor="start" font-size="14" fill="#111827">up to 30 s</text>
+  <path d="M496.0,360.0 L528.0,360.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="530.0" y="310.0" width="160.0" height="100.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="542.0" y="337.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Messages</tspan></text>
+  <text x="542.0" y="355.2" text-anchor="start" font-size="14" fill="#111827">on this Mac,</text>
+  <text x="542.0" y="373.2" text-anchor="start" font-size="14" fill="#111827">its Apple ID</text>
+  <text x="542.0" y="391.2" text-anchor="start" font-size="14" fill="#111827">→ the contact</text>
+  <path d="M396.0,410.0 L396.0,432.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="296.0" y="434.0" width="394.0" height="90.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="308.0" y="455.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT n</tspan> when Messages shows it sent</text>
+  <text x="308.0" y="473.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n GATEWAY</tspan> if its fate is unknown</text>
+  <text x="308.0" y="491.6" text-anchor="start" font-size="14" fill="#111827">certainly not sent: next route in the plan,</text>
+  <text x="308.0" y="509.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n GATEWAY</tspan> if none is left</text>
+
+  <!-- Route 2: Google Voice -->
+  <rect x="30.0" y="540.0" width="230.0" height="100.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="567.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">2. Google Voice?</tspan></text>
+  <text x="42.0" y="585.2" text-anchor="start" font-size="14" fill="#111827">a <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">phone</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[google_voice]</tspan>,</text>
+  <text x="42.0" y="603.2" text-anchor="start" font-size="14" fill="#111827">a mailer, and a learned</text>
+  <text x="42.0" y="621.2" text-anchor="start" font-size="14" fill="#111827">reply address</text>
+  <path d="M260.0,590.0 L294.0,590.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="275.0" y="578.0" text-anchor="middle" font-size="14" fill="#4b5563">yes</text>
+  <rect x="296.0" y="540.0" width="200.0" height="100.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="308.0" y="567.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Mailer::send_text</tspan></tspan></text>
+  <text x="308.0" y="585.2" text-anchor="start" font-size="14" fill="#111827">to the reply address:</text>
+  <text x="308.0" y="603.2" text-anchor="start" font-size="14" fill="#111827">the tagged text only,</text>
+  <text x="308.0" y="621.2" text-anchor="start" font-size="14" fill="#111827">no subject</text>
+  <path d="M496.0,590.0 L528.0,590.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="530.0" y="540.0" width="160.0" height="100.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="542.0" y="567.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">SMTP server</tspan></text>
+  <text x="542.0" y="585.2" text-anchor="start" font-size="14" fill="#111827">→ Google Voice</text>
+  <text x="542.0" y="603.2" text-anchor="start" font-size="14" fill="#111827">→ the contact's</text>
+  <text x="542.0" y="621.2" text-anchor="start" font-size="14" fill="#111827">phone</text>
+  <path d="M396.0,640.0 L396.0,662.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="296.0" y="664.0" width="394.0" height="54.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="308.0" y="685.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT n</tspan> when the mail server accepts it</text>
+  <text x="308.0" y="703.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n GATEWAY</tspan> on any SMTP error; no email retry</text>
+
+  <!-- Route 3: email -->
+  <rect x="30.0" y="752.0" width="230.0" height="112.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="779.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">3. Email?</tspan></text>
+  <text x="42.0" y="797.2" text-anchor="start" font-size="14" fill="#111827">no Google Voice route,</text>
+  <text x="42.0" y="815.2" text-anchor="start" font-size="14" fill="#111827">an <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">address</tspan> and a mailer;</text>
+  <text x="42.0" y="833.2" text-anchor="start" font-size="14" fill="#111827">never a carrier SMS</text>
+  <text x="42.0" y="851.2" text-anchor="start" font-size="14" fill="#111827">address with a <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">phone</tspan></text>
+  <path d="M260.0,808.0 L294.0,808.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="275.0" y="796.0" text-anchor="middle" font-size="14" fill="#4b5563">yes</text>
+  <rect x="296.0" y="752.0" width="200.0" height="112.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="308.0" y="779.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Mailer::send_as</tspan></tspan></text>
+  <text x="308.0" y="797.2" text-anchor="start" font-size="14" fill="#111827">subject <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">From W5XXX</tspan>,</text>
+  <text x="308.0" y="815.2" text-anchor="start" font-size="14" fill="#111827">the text, a signature</text>
+  <path d="M496.0,808.0 L528.0,808.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="530.0" y="752.0" width="160.0" height="112.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="542.0" y="779.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">SMTP server</tspan></text>
+  <text x="542.0" y="797.2" text-anchor="start" font-size="14" fill="#111827">→ the contact's</text>
+  <text x="542.0" y="815.2" text-anchor="start" font-size="14" fill="#111827">mailbox</text>
+  <path d="M396.0,864.0 L396.0,886.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="296.0" y="888.0" width="394.0" height="54.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="308.0" y="909.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SENT n</tspan> when the mail server accepts it</text>
+  <text x="308.0" y="927.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n GATEWAY</tspan> on any SMTP error</text>
+
+  <!-- The "no" chain and the elbow from a definite iMessage failure -->
+  <path d="M100.0,410.0 L100.0,538.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="108.0" y="452.0" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M296.0,488.0 L200.0,488.0 L200.0,538.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <path d="M100.0,640.0 L100.0,750.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="108.0" y="700.0" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M100.0,864.0 L100.0,906.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="110.0" y="890.0" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <rect x="30.0" y="908.0" width="230.0" height="56.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="145.0" y="930.9" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n NO ROUTE</tspan></text>
+  <text x="145.0" y="948.9" text-anchor="middle" font-size="14" fill="#111827">empty plan: nothing tried</text>
+  <text x="30.0" y="990.0" text-anchor="start" font-size="14" fill="#4b5563">Texts and iMessages begin with a tag, by default</text>
+  <text x="30.0" y="1010.0" text-anchor="start" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">W5XXX via HF radio, replies are read on air:</tspan></text>
+  <text x="30.0" y="1030.0" text-anchor="start" font-size="14" fill="#4b5563">An iMessage-only contact before Messages has been checked gets <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL n GATEWAY</tspan>.</text>
+
+  <!-- RX -->
+  <rect x="16.0" y="1068.0" width="688.0" height="924.0" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30.0" y="1094.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">RX: replies come in, and are screened before the air</text>
+  <rect x="30.0" y="1112.0" width="360.0" height="64.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="210.0" y="1139.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">Mail server: IMAP INBOX</tspan></text>
+  <text x="210.0" y="1157.2" text-anchor="middle" font-size="14" fill="#111827">email, carrier SMS, Google Voice texts</text>
+  <rect x="420.0" y="1112.0" width="270.0" height="64.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="555.0" y="1139.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">Messages' database</tspan></text>
+  <text x="555.0" y="1157.2" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">chat.db</tspan> on the Mac, read-only</text>
+  <path d="M210.0,1176.0 L210.0,1204.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <path d="M555.0,1176.0 L555.0,1204.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1206.0" width="360.0" height="116.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1233.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imap</tspan> thread</tspan></text>
+  <text x="42.0" y="1251.2" text-anchor="start" font-size="14" fill="#111827">every max(<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">poll_secs</tspan>, 30) s:</text>
+  <text x="42.0" y="1269.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">learn_gv</tspan>, then <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">poll_imap</tspan>; unread mail</text>
+  <text x="42.0" y="1287.2" text-anchor="start" font-size="14" fill="#111827">from contacts its server vouches for</text>
+  <text x="42.0" y="1305.2" text-anchor="start" font-size="14" fill="#111827">(carrier SMS: unless it reports a fail)</text>
+  <rect x="420.0" y="1206.0" width="270.0" height="116.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="432.0" y="1233.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage</tspan> thread</tspan></text>
+  <text x="432.0" y="1251.2" text-anchor="start" font-size="14" fill="#111827">every <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage.poll_secs</tspan> s:</text>
+  <text x="432.0" y="1269.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage::poll</tspan>; one-to-one</text>
+  <text x="432.0" y="1287.2" text-anchor="start" font-size="14" fill="#111827">only, inside a reply window</text>
+  <path d="M210.0,1322.0 L210.0,1360.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <path d="M555.0,1322.0 L555.0,1360.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <text x="218.0" y="1346.0" text-anchor="start" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inbox::add</tspan></text>
+  <text x="563.0" y="1346.0" text-anchor="start" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inbox::add</tspan></text>
+  <rect x="30.0" y="1362.0" width="660.0" height="64.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360.0" y="1389.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">inbox.json</tspan>: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Unscreened</tspan></tspan></text>
+  <text x="360.0" y="1407.2" text-anchor="middle" font-size="14" fill="#111827">saved before the mail is marked seen or the read cursor moves</text>
+  <path d="M240.0,1426.0 L240.0,1454.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1456.0" width="420.0" height="100.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1484.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">screen</tspan> thread: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">screen_inbox</tspan></tspan></text>
+  <text x="42.0" y="1502.2" text-anchor="start" font-size="14" fill="#111827">on a notice from a route, or every 60 s;</text>
+  <text x="42.0" y="1520.2" text-anchor="start" font-size="14" fill="#111827">filter not reached: held, tried again;</text>
+  <text x="42.0" y="1538.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">filter.enabled = false</tspan>: Ready as is</text>
+  <rect x="510.0" y="1456.0" width="180.0" height="100.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="600.0" y="1492.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">Claude or Ollama</tspan></text>
+  <text x="600.0" y="1510.2" text-anchor="middle" font-size="14" fill="#111827">one HTTP request</text>
+  <text x="600.0" y="1528.2" text-anchor="middle" font-size="14" fill="#111827">per message</text>
+  <path d="M450.0,1506.0 L508.0,1506.0" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k06route-arrow)" marker-end="url(#k06route-arrow)"/>
+  <text x="479.0" y="1491.0" text-anchor="middle" font-size="14" fill="#4b5563">verdict</text>
+  <path d="M240.0,1556.0 L240.0,1584.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1586.0" width="420.0" height="76.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1610.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">inbox.json</tspan>: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ready</tspan></tspan></text>
+  <text x="42.0" y="1628.2" text-anchor="start" font-size="14" fill="#111827">the text as sent, with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">REDACTED</tspan>,</text>
+  <text x="42.0" y="1646.2" text-anchor="start" font-size="14" fill="#111827">or <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MSG WITHHELD BY FILTER</tspan></text>
+  <path d="M450.0,1624.0 L470.0,1624.0" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="470.0" y="1586.0" width="220.0" height="130.0" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="482.0" y="1611.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The gate</tspan></text>
+  <text x="482.0" y="1629.2" text-anchor="start" font-size="14" fill="#111827">only <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ready</tspan> text is read</text>
+  <text x="482.0" y="1647.2" text-anchor="start" font-size="14" fill="#111827">out; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Unscreened</tspan> text is</text>
+  <text x="482.0" y="1665.2" text-anchor="start" font-size="14" fill="#111827">never keyed. With the</text>
+  <text x="482.0" y="1683.2" text-anchor="start" font-size="14" fill="#111827">filter off, text becomes</text>
+  <text x="482.0" y="1701.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ready</tspan> unscreened</text>
+  <path d="M240.0,1662.0 L240.0,1690.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1692.0" width="420.0" height="76.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1716.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Session <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RX</tspan></tspan></text>
+  <text x="42.0" y="1734.2" text-anchor="start" font-size="14" fill="#111827">read-back counts them: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 44 2 MSGS ?</tspan>;</text>
+  <text x="42.0" y="1752.2" text-anchor="start" font-size="14" fill="#111827">after <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK</tspan>, the readout</text>
+  <path d="M240.0,1768.0 L240.0,1796.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1798.0" width="420.0" height="64.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="240.0" y="1824.9" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NR 1 FM MOM SEE YOU SUNDAY ...</tspan></text>
+  <text x="240.0" y="1842.9" text-anchor="middle" font-size="14" fill="#111827">at most 5 messages, 26 chunks; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">n MORE</tspan></text>
+  <path d="M240.0,1862.0 L240.0,1890.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06route-arrow)"/>
+  <rect x="30.0" y="1892.0" width="420.0" height="82.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1919.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">mark_read</tspan>: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Read</tspan></tspan></text>
+  <text x="42.0" y="1937.2" text-anchor="start" font-size="14" fill="#111827">after the station keyed it;</text>
+  <text x="42.0" y="1955.2" text-anchor="start" font-size="14" fill="#111827">dropped 30 days after it arrived</text>
+
+  <!-- Legend -->
+  <text x="24.0" y="2018.0" text-anchor="start" font-size="14" fill="#111827" font-weight="bold">Legend</text>
+  <rect x="24" y="2030" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/>
+  <text x="50.0" y="2042.0" text-anchor="start" font-size="14" fill="#111827">host code, files</text>
+  <rect x="194" y="2030" width="18" height="14" fill="#f3f4f6" stroke="#374151"/>
+  <text x="220.0" y="2042.0" text-anchor="start" font-size="14" fill="#111827">external service</text>
+  <rect x="364" y="2030" width="18" height="14" rx="7" fill="#ffffff" stroke="#374151"/>
+  <text x="390.0" y="2042.0" text-anchor="start" font-size="14" fill="#111827">keyed on air</text>
+  <rect x="504" y="2030" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/>
+  <text x="530.0" y="2042.0" text-anchor="start" font-size="14" fill="#111827">gate</text>
+</svg>

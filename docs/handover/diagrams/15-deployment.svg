@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1740" width="720" height="1740" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>A running station: the supervisor that starts and stops hfnode on each operating system, what hfnode reads at start, the services it calls, its log and state directory, and the radio it drives over USB</title>
+  <defs>
+    <marker id="k15dep-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1740" fill="#ffffff"/>
+  <text x="24" y="36" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">A running station</text>
+  <text x="24" y="60" text-anchor="start" font-size="14" fill="#4b5563">Who starts hfnode, what it reads and writes, what it drives, where its log goes</text>
+  <rect x="16" y="80" width="688" height="534" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30" y="106" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Supervisor: one of three, by operating system</text>
+  <rect x="30" y="120" width="180" height="104" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42" y="156.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Linux, Pi</text>
+  <text x="42" y="178.0" text-anchor="start" font-size="14" fill="#111827">systemd,</text>
+  <text x="42" y="196.0" text-anchor="start" font-size="14" fill="#111827">at boot</text>
+  <rect x="222" y="120" width="468" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="234" y="147.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">deploy/hfnode.service</tspan></text>
+  <text x="234" y="169.0" text-anchor="start" font-size="14" fill="#111827">runs as user <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode</tspan>, groups <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">dialout</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">audio</tspan></text>
+  <text x="234" y="187.0" text-anchor="start" font-size="14" fill="#111827">stop: SIGTERM, then SIGKILL after <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TimeoutStopSec=20</tspan></text>
+  <text x="234" y="205.0" text-anchor="start" font-size="14" fill="#111827">after any exit: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ExecStopPost=-hfnode radio … rx</tspan></text>
+  <rect x="30" y="236" width="180" height="104" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42" y="272.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">macOS</text>
+  <text x="42" y="294.0" text-anchor="start" font-size="14" fill="#111827">Terminal at log-in,</text>
+  <text x="42" y="312.0" text-anchor="start" font-size="14" fill="#111827">or a launchd agent</text>
+  <rect x="222" y="236" width="468" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="234" y="263.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">deploy/hfnode-supervise.sh</tspan></text>
+  <text x="234" y="285.0" text-anchor="start" font-size="14" fill="#111827">started by <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode.command</tspan> or the launchd plist</text>
+  <text x="234" y="303.0" text-anchor="start" font-size="14" fill="#111827">stop: passes SIGTERM on, SIGKILL after 20 s</text>
+  <text x="234" y="321.0" text-anchor="start" font-size="14" fill="#111827">keeps the Mac awake with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">caffeinate</tspan></text>
+  <rect x="30" y="352" width="180" height="104" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42" y="388.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Windows</text>
+  <text x="42" y="410.0" text-anchor="start" font-size="14" fill="#111827">Task Scheduler,</text>
+  <text x="42" y="428.0" text-anchor="start" font-size="14" fill="#111827">at log-on</text>
+  <rect x="222" y="352" width="468" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="234" y="379.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">deploy/windows/hfnode-supervise.ps1</tspan></text>
+  <text x="234" y="401.0" text-anchor="start" font-size="14" fill="#111827">task added by <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">install-task.ps1</tspan>; stop with Ctrl-C</text>
+  <text x="234" y="419.0" text-anchor="start" font-size="14" fill="#111827">or <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">stop-hfnode.ps1</tspan>; no kill timer</text>
+  <text x="234" y="437.0" text-anchor="start" font-size="14" fill="#111827">closing the window skips the receive steps</text>
+  <rect x="30" y="468" width="324" height="136" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="42" y="511.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">All three (never loosen)</text>
+  <text x="42" y="533.0" text-anchor="start" font-size="14" fill="#111827">restart 30 s after a failure</text>
+  <text x="42" y="551.0" text-anchor="start" font-size="14" fill="#111827">give up after 3 starts in an hour</text>
+  <text x="42" y="569.0" text-anchor="start" font-size="14" fill="#111827">no restart after exit status 0</text>
+  <rect x="366" y="468" width="324" height="136" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="378" y="493.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">After each exit</text>
+  <text x="378" y="515.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode radio --config C rx</tspan></text>
+  <text x="378" y="533.0" text-anchor="start" font-size="14" fill="#111827">forces receive, or latches</text>
+  <text x="378" y="551.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan>; if the port will not</text>
+  <text x="378" y="569.0" text-anchor="start" font-size="14" fill="#111827">open, or rig = "handheld", it only</text>
+  <text x="378" y="587.0" text-anchor="start" font-size="14" fill="#111827">logs a failure</text>
+  <path d="M300,614 L300,716" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <path d="M420,716 L420,614" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <text x="290" y="652" text-anchor="end" font-size="14" fill="#111827">starts <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode run --config C</tspan></text>
+  <text x="290" y="672" text-anchor="end" font-size="14" fill="#111827">stop: SIGTERM, SIGINT, SIGHUP,</text>
+  <text x="290" y="690" text-anchor="end" font-size="14" fill="#111827">or Ctrl-C; on Windows also Ctrl-Break</text>
+  <text x="430" y="643" text-anchor="start" font-size="14" fill="#111827">exit status after a stop signal:</text>
+  <text x="430" y="661" text-anchor="start" font-size="14" fill="#111827">0 receive confirmed, 1 not,</text>
+  <text x="430" y="679" text-anchor="start" font-size="14" fill="#111827">130 no radio registered yet;</text>
+  <text x="430" y="697" text-anchor="start" font-size="14" fill="#111827">any other error also exits 1</text>
+  <rect x="16" y="716" width="200" height="150" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="748.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Read at start</text>
+  <text x="28" y="770.0" text-anchor="start" font-size="14" fill="#111827">config: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode.toml</tspan></text>
+  <text x="28" y="788.0" text-anchor="start" font-size="14" fill="#111827">key: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">auth.key_file</tspan></text>
+  <text x="28" y="806.0" text-anchor="start" font-size="14" fill="#111827">secrets: environment</text>
+  <text x="28" y="824.0" text-anchor="start" font-size="14" fill="#111827">variables the supervisor</text>
+  <text x="28" y="842.0" text-anchor="start" font-size="14" fill="#111827">loads from <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">env</tspan></text>
+  <rect x="256" y="716" width="208" height="150" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="268" y="748.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode run</tspan></text>
+  <text x="268" y="770.0" text-anchor="start" font-size="14" fill="#111827">1 load and check config</text>
+  <text x="268" y="788.0" text-anchor="start" font-size="14" fill="#111827">2 <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">state_dir</tspan> writable?</text>
+  <text x="268" y="806.0" text-anchor="start" font-size="14" fill="#111827">3 storm watch, alerts</text>
+  <text x="268" y="824.0" text-anchor="start" font-size="14" fill="#111827">4 open, check the radio</text>
+  <text x="268" y="842.0" text-anchor="start" font-size="14" fill="#111827">5 listen, decode, answer</text>
+  <rect x="504" y="716" width="200" height="150" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="516" y="748.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Services</text>
+  <text x="516" y="770.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[email]</tspan>: SMTP, IMAP</text>
+  <text x="516" y="788.0" text-anchor="start" font-size="14" fill="#111827">api.weather.gov:</text>
+  <text x="516" y="806.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[weather]</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[storm]</tspan></text>
+  <text x="516" y="824.0" text-anchor="start" font-size="14" fill="#111827">Claude API or Ollama</text>
+  <text x="516" y="842.0" text-anchor="start" font-size="14" fill="#111827">Messages (Mac only)</text>
+  <path d="M216,791.0 L256,791.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <path d="M464,791.0 L504,791.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <path d="M280,866 L280,926" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <text x="272" y="902" text-anchor="end" font-size="14" fill="#111827">stderr</text>
+  <path d="M440,866 L440,926" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k15dep-arrow)" marker-end="url(#k15dep-arrow)"/>
+  <text x="448" y="902" text-anchor="start" font-size="14" fill="#111827">reads and writes</text>
+  <rect x="16" y="926" width="288" height="176" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="28" y="953.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Log</text>
+  <text x="28" y="975.0" text-anchor="start" font-size="14" fill="#111827">stderr, level <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUST_LOG</tspan> (info)</text>
+  <text x="28" y="993.0" text-anchor="start" font-size="14" fill="#111827">Linux: the journal,</text>
+  <text x="28" y="1011.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">journalctl -u hfnode</tspan></text>
+  <text x="28" y="1029.0" text-anchor="start" font-size="14" fill="#111827">Mac: Terminal, or with launchd</text>
+  <text x="28" y="1047.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">~/Library/Logs/hfnode.log</tspan></text>
+  <text x="28" y="1065.0" text-anchor="start" font-size="14" fill="#111827">Windows: the console window;</text>
+  <text x="28" y="1083.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">supervise.log</tspan> has script lines</text>
+  <rect x="416" y="926" width="288" height="176" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="428" y="952" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">State directory</text>
+  <text x="428" y="974" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">state_dir</tspan> in the config;</text>
+  <text x="428" y="992" text-anchor="start" font-size="14" fill="#111827">checked writable before any</text>
+  <text x="428" y="1010" text-anchor="start" font-size="14" fill="#111827">command that can key</text>
+  <text x="428" y="1028" text-anchor="start" font-size="14" fill="#111827">Linux: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">/var/lib/hfnode</tspan></text>
+  <rect x="428" y="1036" width="264" height="54" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="440" y="1057.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">key-down</tspan>,</text>
+  <text x="440" y="1075.0" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer-sidetone</tspan> gate keying</text>
+  <path d="M360,866 L360,1162" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k15dep-arrow)" marker-end="url(#k15dep-arrow)"/>
+  <text x="372" y="1138" text-anchor="start" font-size="14" fill="#111827">USB: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.serial_port</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">audio.device</tspan></text>
+  <rect x="16" y="1162" width="688" height="474" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30" y="1188" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">The radio: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.rig</tspan> picks one</text>
+  <text x="30" y="1216" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "ic7300"</tspan>, the default</text>
+  <text x="256" y="1216" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "keyer"</tspan></text>
+  <text x="482" y="1216" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rig = "handheld"</tspan>, parked</text>
+  <rect x="30" y="1232" width="208" height="104" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="42" y="1259.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">ICOM IC-7300</text>
+  <text x="42" y="1281.0" text-anchor="start" font-size="14" fill="#111827">one USB cable:</text>
+  <text x="42" y="1299.0" text-anchor="start" font-size="14" fill="#111827">CI-V serial port</text>
+  <text x="42" y="1317.0" text-anchor="start" font-size="14" fill="#111827">and audio codec</text>
+  <rect x="30" y="1352" width="208" height="124" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="42" y="1389.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Preflight first</text>
+  <text x="42" y="1411.0" text-anchor="start" font-size="14" fill="#111827">read-only checks;</text>
+  <text x="42" y="1429.0" text-anchor="start" font-size="14" fill="#111827">nothing is written</text>
+  <text x="42" y="1447.0" text-anchor="start" font-size="14" fill="#111827">unless they pass</text>
+  <rect x="256" y="1232" width="208" height="104" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="268" y="1268.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Keyer box</text>
+  <text x="268" y="1290.0" text-anchor="start" font-size="14" fill="#111827">Pico 2, USB serial;</text>
+  <text x="268" y="1308.0" text-anchor="start" font-size="14" fill="#111827">closes the key line</text>
+  <path d="M300,1336 L300,1366" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <text x="312" y="1356" text-anchor="start" font-size="14" fill="#111827">key jack</text>
+  <rect x="256" y="1366" width="208" height="40" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="268" y="1390.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Any CW radio</text>
+  <path d="M300,1406 L300,1436" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k15dep-arrow)"/>
+  <text x="312" y="1426" text-anchor="start" font-size="14" fill="#111827">headphone audio</text>
+  <rect x="256" y="1436" width="208" height="40" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="268" y="1460.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">USB sound card</text>
+  <rect x="482" y="1232" width="208" height="104" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="494" y="1268.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">UV-K1 handheld</text>
+  <text x="494" y="1290.0" text-anchor="start" font-size="14" fill="#111827">custom CW firmware,</text>
+  <text x="494" y="1308.0" text-anchor="start" font-size="14" fill="#111827">not to be flashed</text>
+  <rect x="482" y="1352" width="208" height="124" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="494" y="1389.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio rx</tspan></text>
+  <text x="494" y="1411.0" text-anchor="start" font-size="14" fill="#111827">refuses this rig: the</text>
+  <text x="494" y="1429.0" text-anchor="start" font-size="14" fill="#111827">after-exit check only</text>
+  <text x="494" y="1447.0" text-anchor="start" font-size="14" fill="#111827">logs a failure</text>
+  <path d="M30,1492 L690,1492" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="30" y="1514" text-anchor="start" font-size="14" fill="#111827">For every rig</text>
+  <rect x="30" y="1524" width="316" height="98" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="1548.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode devices</tspan></text>
+  <text x="42" y="1570.0" text-anchor="start" font-size="14" fill="#111827">lists the serial ports and sound</text>
+  <text x="42" y="1588.0" text-anchor="start" font-size="14" fill="#111827">inputs to put in the config; marks</text>
+  <text x="42" y="1606.0" text-anchor="start" font-size="14" fill="#111827">the IC-7300, its codec, the keyer box</text>
+  <rect x="374" y="1524" width="316" height="98" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="386" y="1548.0" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Decoder on a Pico</text>
+  <text x="386" y="1570.0" text-anchor="start" font-size="14" fill="#111827">PRs #30, #31, not on main; its</text>
+  <text x="386" y="1588.0" text-anchor="start" font-size="14" fill="#111827">config waits on the planned</text>
+  <text x="386" y="1606.0" text-anchor="start" font-size="14" fill="#111827">PR 4 (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[receive] source = "box"</tspan>)</text>
+  <rect x="24" y="1662" width="28" height="18" rx="4" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="62" y="1676" text-anchor="start" font-size="14" fill="#111827">host code, its files</text>
+  <rect x="248" y="1662" width="28" height="18" rx="4" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="286" y="1676" text-anchor="start" font-size="14" fill="#111827">firmware</text>
+  <rect x="472" y="1662" width="28" height="18" rx="4" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="510" y="1676" text-anchor="start" font-size="14" fill="#111827">radio, hardware</text>
+  <rect x="24" y="1692" width="28" height="18" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="62" y="1706" text-anchor="start" font-size="14" fill="#111827">safety gate</text>
+  <rect x="248" y="1692" width="28" height="18" rx="4" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="286" y="1706" text-anchor="start" font-size="14" fill="#111827">OS, service, person</text>
+  <rect x="472" y="1692" width="28" height="18" rx="4" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="510" y="1706" text-anchor="start" font-size="14" fill="#111827">not on main</text>
+</svg>

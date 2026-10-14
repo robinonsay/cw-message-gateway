@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1788" width="720" height="1788" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The self-test closed loop: a scripted operator's CW reaches the real node as audio (IC-7300 runs) or through the keyed radio's headphone audio (keyer runs), the node drives a mock IC-7300 or a mock keyer box, the operator hears back what went on the air, and checks judge the run; badges F1 to F6 mark where scenarios inject faults</title>
+  <defs>
+    <marker id="k12l-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1788" fill="#ffffff"/>
+
+  <text x="24" y="36" font-size="20" font-weight="bold">Self-test: the closed loop</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">One scenario run of <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">selftest::run</tspan>. No radio, sound card or network.</text>
+
+  <!-- operator (person, played by test code) -->
+  <rect x="24" y="84" width="396" height="112" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="114" font-weight="bold">Scripted field operator (test code)</text>
+  <text x="40" y="142" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">selftest::Air runs Scenario.script</text>
+  <text x="40" y="168" font-size="14">keys, listens, repeats, answers OK, NO or AGN</text>
+  <circle cx="396" cy="108" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="396" y="113" text-anchor="middle" font-size="13" font-weight="bold">F5</text>
+
+  <!-- return lane: what went on the air, back to the operator -->
+  <path d="M560,1088 L696,1088 L696,136 L420,136" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="432" y="126" font-size="14">heard back (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyed_from</tspan>)</text>
+
+  <!-- keyer runs: the operator's audio goes into the keyed radio -->
+  <path d="M420,172 L656,172 L656,950 L560,950" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="432" y="164" font-size="14">keyer runs: CW to the radio</text>
+
+  <!-- IC-7300 runs: audio straight into the node -->
+  <line x1="120" y1="196" x2="120" y2="268" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="132" y="222" font-size="14">IC-7300 runs: CW audio into the audio queue</text>
+  <text x="132" y="242" font-size="14" fill="#4b5563">50 ms blocks, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cw::Keyer</tspan> + <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Noise</tspan>, paced</text>
+
+  <!-- node container -->
+  <rect x="24" y="268" width="552" height="340" rx="8" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="294" font-weight="bold">The node on its own thread</text>
+  <text x="40" y="316" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">node::run_with_clock</tspan> (real code, fake gateways)</text>
+  <circle cx="550" cy="292" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="550" y="297" text-anchor="middle" font-size="13" font-weight="bold">F6</text>
+
+  <rect x="48" y="330" width="240" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="168" y="356" text-anchor="middle" font-weight="bold">CW decoder</text>
+  <text x="168" y="378" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cw::Decoder</text>
+
+  <!-- keyer runs: the radio's headphone audio into the decoder -->
+  <path d="M560,900 L616,900 L616,360 L288,360" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="300" y="382" font-size="14">keyer runs: headphone audio</text>
+  <text x="300" y="400" font-size="14">from the radio, in real time</text>
+
+  <line x1="168" y1="390" x2="168" y2="424" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="180" y="412" font-size="14">text heard</text>
+
+  <rect x="48" y="424" width="240" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="168" y="450" text-anchor="middle" font-weight="bold">Session</text>
+  <text x="168" y="472" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">session::Session</text>
+
+  <!-- fake gateways -->
+  <rect x="330" y="424" width="230" height="88" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="445" y="450" text-anchor="middle" font-weight="bold">Fake gateways</text>
+  <text x="445" y="472" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FakeServices</text>
+  <text x="445" y="496" text-anchor="middle" font-size="14">send, inbox, weather</text>
+  <line x1="288" y1="454" x2="330" y2="454" stroke="#374151" stroke-width="2" marker-start="url(#k12l-arrow)" marker-end="url(#k12l-arrow)"/>
+
+  <line x1="168" y1="484" x2="168" y2="518" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="180" y="506" font-size="14">reply to key</text>
+
+  <rect x="48" y="518" width="240" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="168" y="544" text-anchor="middle" font-weight="bold">Station (safety layer)</text>
+  <text x="168" y="566" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station::Station</text>
+
+  <!-- station to the two radios -->
+  <line x1="168" y1="578" x2="168" y2="690" stroke="#374151" stroke-width="2" marker-start="url(#k12l-arrow)" marker-end="url(#k12l-arrow)"/>
+  <text x="180" y="644" font-size="14">CI-V commands, replies</text>
+  <text x="180" y="664" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TimeScaled&lt;Ic7300&gt;</text>
+
+  <path d="M288,548 L440,548 L440,690" fill="none" stroke="#374151" stroke-width="2" marker-start="url(#k12l-arrow)" marker-end="url(#k12l-arrow)"/>
+  <text x="452" y="644" font-size="14">keyer lines, replies</text>
+  <text x="452" y="664" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">KeyerRig</text>
+
+  <!-- mock IC-7300 -->
+  <rect x="24" y="690" width="276" height="120" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="150" y="718" text-anchor="middle" font-weight="bold">Mock IC-7300</text>
+  <text x="150" y="740" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">civ::mock::MockRadio</text>
+  <text x="150" y="762" text-anchor="middle" font-size="14">answers as the CI-V manual</text>
+  <text x="150" y="782" text-anchor="middle" font-size="14">says; keys, tunes, meters</text>
+  <circle cx="276" cy="714" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="276" y="719" text-anchor="middle" font-size="13" font-weight="bold">F1</text>
+  <circle cx="276" cy="748" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="276" y="753" text-anchor="middle" font-size="13" font-weight="bold">F2</text>
+  <circle cx="276" cy="782" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="276" y="787" text-anchor="middle" font-size="13" font-weight="bold">F3</text>
+
+  <!-- mock keyer box -->
+  <rect x="316" y="690" width="244" height="132" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="438" y="716" text-anchor="middle" font-weight="bold">Mock keyer box</text>
+  <text x="438" y="740" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer::mock::MockBox</text>
+  <text x="438" y="762" text-anchor="middle" font-size="14">runs <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer_core</tspan>, the</text>
+  <text x="438" y="784" text-anchor="middle" font-size="14">firmware's own code;</text>
+  <text x="438" y="806" text-anchor="middle" font-size="14">records runs, key-downs</text>
+  <circle cx="538" cy="708" r="13" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="538" y="713" text-anchor="middle" font-size="13" font-weight="bold">F4</text>
+
+  <line x1="420" y1="822" x2="420" y2="872" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="432" y="842" font-size="14">key line</text>
+  <text x="432" y="860" font-size="14">(PTT on <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer-ht-</tspan>)</text>
+
+  <!-- the radio the box keys -->
+  <rect x="348" y="872" width="212" height="120" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="454" y="898" text-anchor="middle" font-weight="bold">Radio it keys</text>
+  <text x="454" y="920" text-anchor="middle" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer::mock::MockRadio</text>
+  <text x="454" y="942" text-anchor="middle" font-size="14">operator's CW, band noise</text>
+  <text x="454" y="964" text-anchor="middle" font-size="14">out as headphone audio</text>
+
+  <!-- into the record -->
+  <line x1="162" y1="810" x2="162" y2="1040" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="174" y="884" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Report</text>
+  <line x1="330" y1="822" x2="330" y2="1040" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="320" y="944" text-anchor="end" font-size="14">runs, key-downs</text>
+  <line x1="454" y1="992" x2="454" y2="1040" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="466" y="1022" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">on_air</tspan> only if connected</text>
+
+  <rect x="24" y="1040" width="536" height="96" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="292" y="1068" text-anchor="middle" font-weight="bold">What went on the air (radio time)</text>
+  <text x="292" y="1090" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Keyed { text, sent, complete, on_air, .. }</text>
+  <text x="292" y="1112" text-anchor="middle" font-size="14">transmit periods, tunes, CI-V violations</text>
+
+  <!-- to the checks -->
+  <line x1="292" y1="1136" x2="292" y2="1190" stroke="#374151" stroke-width="2" marker-end="url(#k12l-arrow)"/>
+  <text x="304" y="1168" font-size="14">once the script ends</text>
+
+  <rect x="24" y="1190" width="536" height="310" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="1218" font-weight="bold">Checks: one <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Outcome</tspan> per run</text>
+  <text x="40" y="1250" font-size="14">setup, script, ended</text>
+  <text x="40" y="1272" font-size="14">keyed, station ID</text>
+  <text x="40" y="1294" font-size="14">gateway, last_seq</text>
+  <text x="40" y="1316" font-size="14">ci-v, settings</text>
+  <text x="40" y="1338" font-size="14">forced receive, alert</text>
+  <text x="40" y="1360" font-size="14">heard, self-decode</text>
+  <text x="40" y="1382" font-size="14">preflight, nothing written</text>
+  <text x="40" y="1402" font-size="14" fill="#4b5563">(refused runs only)</text>
+
+  <rect x="290" y="1232" width="254" height="100" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="417" y="1258" text-anchor="middle" font-weight="bold">safety</text>
+  <text x="417" y="1280" text-anchor="middle" font-size="14">key-down, transmit runs,</text>
+  <text x="417" y="1300" text-anchor="middle" font-size="14">overhang after keying,</text>
+  <text x="417" y="1320" text-anchor="middle" font-size="14">duty, left on receive</text>
+
+  <rect x="290" y="1344" width="254" height="56" rx="8" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="417" y="1368" text-anchor="middle" font-weight="bold">machine</text>
+  <text x="417" y="1390" text-anchor="middle" font-size="14">pause meter, 5 ms tick</text>
+
+  <text x="40" y="1440" font-size="14" font-weight="bold">PASS only if every check passes.</text>
+  <text x="40" y="1462" font-size="14">A failed machine check: run again, at most twice;</text>
+  <text x="40" y="1484" font-size="14">an IC-7300 run that passed every other check stands.</text>
+
+  <!-- legend -->
+  <text x="24" y="1540" font-size="14" font-weight="bold">Legend</text>
+  <rect x="24" y="1552" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="50" y="1564" font-size="14">host code (node and tests)</text>
+  <rect x="270" y="1552" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="296" y="1564" font-size="14">firmware code</text>
+  <rect x="430" y="1552" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="456" y="1564" font-size="14">mock hardware</text>
+  <rect x="24" y="1578" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="50" y="1590" font-size="14">safety check</text>
+  <rect x="160" y="1578" width="18" height="14" fill="#f3f4f6" stroke="#374151"/><text x="186" y="1590" font-size="14">operator and fakes</text>
+  <circle cx="358" cy="1585" r="10" fill="#ffffff" stroke="#374151" stroke-width="2"/><text x="376" y="1590" font-size="14">fault injection point</text>
+
+  <!-- fault key -->
+  <text x="24" y="1626" font-size="14" font-weight="bold">Where a scenario injects faults</text>
+  <text x="24" y="1650" font-size="14"><tspan font-weight="bold">F1</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Step::Inject</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RadioSetup.faults</tspan>: reply lost, late or NG; stuck TX; tuner hang</text>
+  <text x="24" y="1672" font-size="14"><tspan font-weight="bold">F2</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Step::SetSwr</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Fault::SwrAfter</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RadioSetup.swr</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">foldback</tspan>: bad antenna</text>
+  <text x="24" y="1694" font-size="14"><tspan font-weight="bold">F3</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Step::Panel</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">menu</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx_inhibit</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">dial_nudges</tspan>: someone at the radio</text>
+  <text x="24" y="1716" font-size="14"><tspan font-weight="bold">F4</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Step::Keyer</tspan>: key cable out, key stuck, box unplugged</text>
+  <text x="24" y="1738" font-size="14"><tspan font-weight="bold">F5</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Fist</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Step::MissNext</tspan>, a trailing <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">~</tspan>: speed, noise, jitter, QRM</text>
+  <text x="24" y="1760" font-size="14"><tspan font-weight="bold">F6</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">NodeSetup</tspan>: gateway down, no route, weather error, inhibit file at start, schedule</text>
+</svg>

@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1498" width="720" height="1498" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The state directory: every file hfnode keeps in state_dir, what it holds, which code writes and reads it, and which files gate transmitting</title>
+  <defs>
+    <marker id="k15state-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1498" fill="#ffffff"/>
+  <text x="24" y="36" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">The state directory</text>
+  <text x="24" y="60" text-anchor="start" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">state_dir</tspan> in the config: each file, what it holds, who writes and reads it</text>
+  <rect x="16" y="80" width="688" height="86" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="28" y="106" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Checked before anything is keyed</text>
+  <text x="28" y="128" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_state_dir</tspan> creates the directory if needed, then creates, writes, syncs and</text>
+  <text x="28" y="146" text-anchor="start" font-size="14" fill="#111827">removes <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.write-check-&lt;pid&gt;</tspan>, before any command that can key opens a port</text>
+  <text x="24" y="200" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Transmit gates</text>
+  <rect x="16" y="212" width="688" height="140" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="28" y="238" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan></text>
+  <text x="28" y="260" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">&lt;unix time&gt; &lt;reason&gt;</tspan>; anything at this name counts as set</text>
+  <text x="28" y="278" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inhibit::latch</tspan>, from the node, a stop signal, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio rx</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer rx</tspan>,</text>
+  <text x="28" y="296" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer linktest</tspan></text>
+  <text x="28" y="314" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station::new</tspan> in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">run</tspan> and every keying command; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio setup</tspan>; the alert</text>
+  <text x="28" y="332" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">effect:</tspan> nothing is keyed while it is there; only a person removes it</text>
+  <rect x="16" y="368" width="336" height="158" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="28" y="394" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">key-down</tspan></text>
+  <text x="28" y="416" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> a line per keying: when it</text>
+  <text x="28" y="434" text-anchor="start" font-size="14" fill="#111827">ended and carrier time, in ms</text>
+  <text x="28" y="452" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DutyLog::save</tspan>, via <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.tmp</tspan></text>
+  <text x="28" y="470" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DutyLog::load</tspan>, at start</text>
+  <text x="28" y="488" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">effect:</tspan> the duty-cycle wait outlasts</text>
+  <text x="28" y="506" text-anchor="start" font-size="14" fill="#111827">a restart</text>
+  <rect x="368" y="368" width="336" height="158" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="380" y="394" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer-sidetone</tspan></text>
+  <text x="380" y="416" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> the sidetone level, in dB</text>
+  <text x="380" y="434" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode keyer sidetone</tspan></text>
+  <text x="380" y="452" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">open_rig</tspan>, each keyer start</text>
+  <text x="380" y="470" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">effect:</tspan> a quiet sidetone held on is</text>
+  <text x="380" y="488" text-anchor="start" font-size="14" fill="#111827">not taken for band noise</text>
+  <text x="24" y="560" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Codes and requests</text>
+  <rect x="16" y="572" width="336" height="140" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="598" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">last_seq</tspan></text>
+  <text x="28" y="620" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> the last code number acted on</text>
+  <text x="28" y="638" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the session, before it acts</text>
+  <text x="28" y="656" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> node start, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode codes</tspan></text>
+  <text x="28" y="674" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">effect:</tspan> only higher codes are taken;</text>
+  <text x="28" y="692" text-anchor="start" font-size="14" fill="#111827">lose it and used codes work again</text>
+  <rect x="368" y="572" width="336" height="140" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="598" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">inbox.json</tspan></text>
+  <text x="380" y="620" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> replies: Unscreened, Ready, Read</text>
+  <text x="380" y="638" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the mail threads, the filter</text>
+  <text x="380" y="656" text-anchor="start" font-size="14" fill="#111827">thread and the session, via <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.tmp</tspan></text>
+  <text x="380" y="674" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">open_inbox</tspan> at node start; a</text>
+  <text x="380" y="692" text-anchor="start" font-size="14" fill="#111827">file that does not parse stops it</text>
+  <rect x="16" y="728" width="688" height="86" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="754" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">wx_last.json</tspan></text>
+  <text x="28" y="776" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> the grid square each field callsign last confirmed, so <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WX</tspan> alone means it</text>
+  <text x="28" y="794" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the session after a WX; <tspan font-weight="bold">reads:</tspan> node start; a bad file is logged and ignored</text>
+  <text x="24" y="848" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Logs, for people</text>
+  <rect x="16" y="860" width="336" height="140" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="886" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rx.log</tspan></text>
+  <text x="28" y="908" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">&lt;unix time&gt;,&lt;text&gt;</tspan> for</text>
+  <text x="28" y="926" text-anchor="start" font-size="14" fill="#111827">every message decoded</text>
+  <text x="28" y="944" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the node loop (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">log_rx</tspan>)</text>
+  <text x="28" y="962" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> people</text>
+  <rect x="368" y="860" width="336" height="140" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="886" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">health.csv</tspan></text>
+  <text x="380" y="908" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">&lt;unix time&gt;,&lt;event&gt;,&lt;value&gt;</tspan></text>
+  <text x="380" y="926" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the station (tune, SWR, faults)</text>
+  <text x="380" y="944" text-anchor="start" font-size="14" fill="#111827">and the storm watch</text>
+  <text x="380" y="962" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> people; on Windows open a copy,</text>
+  <text x="380" y="980" text-anchor="start" font-size="14" fill="#111827">since Excel locks the file</text>
+  <text x="24" y="1034" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Texting: only with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[google_voice]</tspan> or <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[imessage]</tspan></text>
+  <rect x="16" y="1046" width="336" height="122" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="1072" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">google_voice.json</tspan></text>
+  <text x="28" y="1094" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> contacts' reply addresses, how</text>
+  <text x="28" y="1112" text-anchor="start" font-size="14" fill="#111827">far the mailbox was scanned, last send</text>
+  <text x="28" y="1130" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the node, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">messages send</tspan></text>
+  <text x="28" y="1148" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> TX routing, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode codes</tspan></text>
+  <rect x="368" y="1046" width="336" height="122" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="1072" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage.json</tspan></text>
+  <text x="380" y="1094" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> how far Messages' <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">chat.db</tspan> has</text>
+  <text x="380" y="1112" text-anchor="start" font-size="14" fill="#111827">been read (one Mac's database)</text>
+  <text x="380" y="1130" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the node's iMessage reader</text>
+  <text x="380" y="1148" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">reads:</tspan> the same, at each poll</text>
+  <rect x="16" y="1184" width="688" height="86" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="1210" text-anchor="start" font-size="16" fill="#111827" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage_windows.json</tspan></text>
+  <text x="28" y="1232" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">holds:</tspan> each contact's reply window (replies are read only inside one), last 50 sends</text>
+  <text x="28" y="1250" text-anchor="start" font-size="14" fill="#111827"><tspan font-weight="bold">writes:</tspan> the node and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">messages send</tspan>; <tspan font-weight="bold">reads:</tspan> the iMessage reader</text>
+  <text x="24" y="1304" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Helper files</text>
+  <rect x="16" y="1316" width="688" height="116" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="28" y="1340" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">name.tmp</tspan>: the name with its extension swapped (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">inbox.json → inbox.tmp</tspan>,</text>
+  <text x="28" y="1358" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">last_seq → last_seq.tmp</tspan>); written, then renamed over the file</text>
+  <text x="28" y="1376" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">google_voice.lock</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">imessage_windows.lock</tspan>: empty files that stay;</text>
+  <text x="28" y="1394" text-anchor="start" font-size="14" fill="#111827">the node and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">messages send</tspan> lock them in turn while they write</text>
+  <text x="28" y="1412" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.write-check-&lt;pid&gt;</tspan>: the writable check at the top, removed at once</text>
+  <rect x="24" y="1458" width="28" height="18" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="62" y="1472" text-anchor="start" font-size="14" fill="#111827">gates transmitting</text>
+  <rect x="248" y="1458" width="28" height="18" rx="4" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="286" y="1472" text-anchor="start" font-size="14" fill="#111827">node state, host code's files</text>
+</svg>

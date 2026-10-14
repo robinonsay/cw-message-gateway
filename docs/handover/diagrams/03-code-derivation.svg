@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1394" width="720" height="1394" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>How one code is made from the key and the sequence number, and how the node checks a received line before it acts</title>
+  <defs>
+    <marker id="cd03-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1394" fill="#ffffff"/>
+
+  <text x="24" y="36" font-size="20" font-weight="bold">One code: how it is made, how it is checked</text>
+  <text x="24" y="58" font-size="14" fill="#4b5563">crates/auth. Example values (right) use the auth tests' key, never a real one.</text>
+
+  <!-- ===== Part 1: making a code ===== -->
+  <text x="24" y="94" font-size="16" font-weight="bold">1. Making the code for one line (hfnode codes)</text>
+
+  <!-- M1 key -->
+  <rect x="24" y="108" width="360" height="76" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="132" font-weight="bold">Secret key (auth.key_file)</text>
+  <text x="40" y="153" font-size="14">32 random bytes from hfnode keygen;</text>
+  <text x="40" y="172" font-size="14">16 or more accepted; stays on the node</text>
+  <text x="400" y="132" font-size="14" fill="#4b5563">example key:</text>
+  <text x="400" y="153" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">"test key, never use in the field"</text>
+
+  <!-- the key goes straight into HMAC, beside the sequence number -->
+  <path d="M36,184 V306" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+
+  <!-- M2 seq -->
+  <rect x="48" y="214" width="336" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="64" y="238" font-weight="bold">Sequence number seq (u64)</text>
+  <text x="64" y="261" font-size="14">as 8 bytes, most significant first</text>
+  <text x="400" y="238" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">seq = 42</text>
+  <text x="400" y="261" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">00 00 00 00 00 00 00 2a</text>
+
+  <line x1="204" y1="280" x2="204" y2="308" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+
+  <!-- M3 HMAC -->
+  <rect x="24" y="310" width="360" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="334" font-weight="bold">HMAC-SHA256(key, those 8 bytes)</text>
+  <text x="40" y="357" font-size="14">a 32-byte digest</text>
+  <text x="400" y="334" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">70fee2cd3e8c9df2 46b4c09a3e90ad1e</text>
+  <text x="400" y="355" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">c6241233e8f557ec ede20d57ef4b60a5</text>
+
+  <line x1="204" y1="376" x2="204" y2="404" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+
+  <!-- M4 n -->
+  <rect x="24" y="406" width="360" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="430" font-weight="bold">First 16 bytes as one number n</text>
+  <text x="40" y="453" font-size="14">128 bits, big-endian (u128); the rest unused</text>
+  <text x="400" y="430" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">n = 0x70fee2cd3e8c9df2</text>
+  <text x="447" y="451" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">46b4c09a3e90ad1e</text>
+
+  <line x1="204" y1="472" x2="204" y2="500" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+
+  <!-- M5 digits -->
+  <rect x="24" y="502" width="360" height="86" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="526" font-weight="bold">8 base-N digits, lowest first</text>
+  <text x="40" y="549" font-size="14">letter = alphabet[n mod N]; n = n div N</text>
+  <text x="40" y="570" font-size="14">N = 26 (A-Z), or 16-26 letters from [auth]</text>
+  <text x="400" y="526" font-size="14" fill="#4b5563">digits, then letters:</text>
+  <text x="412" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">12</text>
+  <text x="446" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">13</text>
+  <text x="480" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">16</text>
+  <text x="514" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">18</text>
+  <text x="548" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">15</text>
+  <text x="582" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">16</text>
+  <text x="616" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">11</text>
+  <text x="650" y="549" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">0</text>
+  <text x="412" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">M</text>
+  <text x="446" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">N</text>
+  <text x="480" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Q</text>
+  <text x="514" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">S</text>
+  <text x="548" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">P</text>
+  <text x="582" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Q</text>
+  <text x="616" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">L</text>
+  <text x="650" y="570" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">A</text>
+
+  <line x1="204" y1="588" x2="204" y2="616" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+
+  <!-- M6 paper sheet -->
+  <rect x="24" y="618" width="360" height="66" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="642" font-weight="bold">Printed on the paper sheet</text>
+  <text x="40" y="665" font-size="14">line number, code in two groups of four</text>
+  <text x="400" y="657" font-size="16" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">42  MNQS PQLA</text>
+
+  <!-- ===== Part 2: checking ===== -->
+  <text x="24" y="730" font-size="16" font-weight="bold">2. Checking a received line (Session, every open, OK, NO, AGN)</text>
+
+  <!-- C1 parse -->
+  <rect x="24" y="746" width="416" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="770" font-weight="bold">Parse: seq digits, code 8 letters</text>
+  <text x="40" y="793" font-size="14">split pieces rejoined (MNQS PQLA); nothing snapped</text>
+
+  <line x1="232" y1="812" x2="232" y2="840" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="252" y="831" font-size="14" fill="#4b5563">parsed</text>
+
+  <!-- C2 stale -->
+  <rect x="24" y="842" width="416" height="66" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="866" font-weight="bold">seq greater than last_seq?</text>
+  <text x="40" y="889" font-size="14">Verifier::check; no: Reject::Stale</text>
+
+  <line x1="232" y1="908" x2="232" y2="936" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="252" y="927" font-size="14" fill="#4b5563">yes</text>
+
+  <!-- C3 code -->
+  <rect x="24" y="938" width="416" height="66" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="962" font-weight="bold">code(seq) equal to what was heard?</text>
+  <text x="40" y="985" font-size="14">letters only, uppercased, constant time; no: BadCode</text>
+
+  <line x1="232" y1="1004" x2="232" y2="1032" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="252" y="1023" font-size="14" fill="#4b5563">yes</text>
+
+  <!-- C4 save -->
+  <rect x="24" y="1034" width="416" height="66" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="1058" font-weight="bold">SeqStore::save(seq) before acting</text>
+  <text x="40" y="1081" font-size="14">last_seq.tmp, fsync, rename, sync the directory</text>
+
+  <line x1="232" y1="1100" x2="232" y2="1128" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="252" y="1119" font-size="14" fill="#4b5563">on disk</text>
+
+  <!-- C5 act -->
+  <rect x="24" y="1130" width="416" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="1154" font-weight="bold">Verifier::commit(seq), then act</text>
+  <text x="40" y="1177" font-size="14">read-back, result, R NO, a repeat, or silence</text>
+
+  <!-- silence -->
+  <rect x="560" y="746" width="144" height="354" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="632" y="900" text-anchor="middle" font-weight="bold">Silence</text>
+  <text x="632" y="924" text-anchor="middle" font-size="14">no reply;</text>
+  <text x="632" y="944" text-anchor="middle" font-size="14">the line is</text>
+  <text x="632" y="964" text-anchor="middle" font-size="14">not used</text>
+
+  <line x1="440" y1="779" x2="556" y2="779" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="456" y="771" font-size="14" fill="#4b5563">parse error</text>
+  <line x1="440" y1="875" x2="556" y2="875" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="456" y="867" font-size="14" fill="#4b5563">no</text>
+  <line x1="440" y1="971" x2="556" y2="971" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="456" y="963" font-size="14" fill="#4b5563">no</text>
+  <line x1="440" y1="1067" x2="556" y2="1067" stroke="#374151" stroke-width="2" marker-end="url(#cd03-arrow)"/>
+  <text x="456" y="1059" font-size="14" fill="#4b5563">write fails</text>
+
+  <!-- footnote -->
+  <text x="24" y="1228" font-size="14" fill="#4b5563">An exact repeat of the pending open, the last OK, or the last NO or AGN is matched</text>
+  <text x="24" y="1247" font-size="14" fill="#4b5563">with check_code_only instead: no seq test and no save; it only repeats a reply.</text>
+  <text x="24" y="1272" font-size="14" fill="#4b5563">An OK also needs an open pending on a lower line; without one it gets silence</text>
+  <text x="24" y="1291" font-size="14" fill="#4b5563">before these checks, and its line is not used.</text>
+  <text x="24" y="1316" font-size="14" fill="#4b5563">A NO with nothing pending, or an AGN with nothing to repeat, is saved</text>
+  <text x="24" y="1335" font-size="14" fill="#4b5563">(its line is used) and then gets silence.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1360" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/>
+  <text x="48" y="1372" font-size="14">host code</text>
+  <rect x="150" y="1360" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/>
+  <text x="174" y="1372" font-size="14">gate, and silence when it fails</text>
+  <rect x="420" y="1360" width="18" height="14" fill="#f3f4f6" stroke="#374151"/>
+  <text x="444" y="1372" font-size="14">paper sheet (field side)</text>
+</svg>

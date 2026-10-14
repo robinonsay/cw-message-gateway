@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 954" width="720" height="954" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <rect x="0" y="0" width="720" height="954" fill="#ffffff"/>
+  <title>The route A firmware's run state machine: NONE, STARTING, KEYING and STOPPING, with the guards that move between them: OK CW at the first key-down, ERR CW REFUSED after 300 ms, halts on mode change, the 60 s run limit or 2000 ms without a valid line, STOP, and the 500 ms grace and 1000 ms watch after a stop that starve the watchdog if the transmitter stays on</title>
+  <defs>
+    <marker id="k10f-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="36" font-size="20" font-weight="bold">Route A firmware: the run states (parked)</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hf_run_limits</tspan> checks them once per pass of NR7Y's main loop.</text>
+
+  <!-- initial state -->
+  <circle cx="360" cy="84" r="7" fill="#374151"/>
+  <line x1="360" y1="91" x2="360" y2="110" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+
+  <!-- states -->
+  <rect x="250" y="114" width="220" height="60" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="360" y="140" text-anchor="middle" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUN_NONE</text>
+  <text x="360" y="161" text-anchor="middle" font-size="14">no run</text>
+
+  <rect x="40" y="294" width="240" height="70" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="160" y="322" text-anchor="middle" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUN_STARTING</text>
+  <text x="160" y="345" text-anchor="middle" font-size="14">accepted, no reply yet</text>
+
+  <rect x="440" y="294" width="240" height="70" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="560" y="322" text-anchor="middle" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUN_KEYING</text>
+  <text x="560" y="345" text-anchor="middle" font-size="14">keying the text</text>
+
+  <rect x="250" y="604" width="220" height="70" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="360" y="632" text-anchor="middle" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUN_STOPPING</text>
+  <text x="360" y="655" text-anchor="middle" font-size="14">transmitter watched</text>
+
+  <!-- NONE to STARTING -->
+  <path d="M250,154 H160 V290" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="170" y="204" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">CW</tspan> accepted</text>
+  <text x="170" y="222" font-size="14">(<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hf_cw</tspan>'s checks</text>
+  <text x="170" y="240" font-size="14">pass); run armed</text>
+
+  <!-- STARTING to KEYING -->
+  <line x1="280" y1="329" x2="436" y2="329" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="358" y="302" text-anchor="middle" font-size="14">first key-down:</text>
+  <text x="358" y="320" text-anchor="middle" font-size="14">reply <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK CW</tspan></text>
+
+  <!-- KEYING to NONE -->
+  <path d="M560,294 V154 H474" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="550" y="204" text-anchor="end" font-size="14">text out and</text>
+  <text x="550" y="222" text-anchor="end" font-size="14">transmitter off</text>
+  <text x="550" y="244" text-anchor="end" font-size="14" fill="#4b5563">5+ passes with no</text>
+  <text x="550" y="262" text-anchor="end" font-size="14" fill="#4b5563">BK4819 TX: latch</text>
+  <text x="550" y="280" text-anchor="end" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ERR CW CHECK</text>
+
+  <!-- halts to STOPPING -->
+  <path d="M160,364 V639 H246" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="150" y="484" text-anchor="end" font-size="14">halt</text>
+  <path d="M560,364 V639 H474" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="570" y="484" font-size="14">halt</text>
+
+  <!-- what halts a run -->
+  <rect x="180" y="396" width="360" height="180" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="194" y="420" font-size="14" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hf_halt</tspan>, from STARTING or KEYING:</text>
+  <text x="194" y="442" font-size="14">• a <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STOP</tspan> arrives</text>
+  <text x="194" y="462" font-size="14">• the mode leaves CW</text>
+  <text x="194" y="482" font-size="14">• the run reaches 60 s</text>
+  <text x="194" y="502" font-size="14">• no valid line for 2000 ms</text>
+  <text x="194" y="522" font-size="14">• STARTING only: no key-down in 300 ms</text>
+  <text x="194" y="546" font-size="14" fill="#4b5563">A starting run is answered <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ERR CW</tspan></text>
+  <text x="194" y="564" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STOP</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MODE</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TX</tspan> or <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">REFUSED</tspan>.</text>
+
+  <!-- NONE to STOPPING, by the left margin -->
+  <path d="M250,128 H24 V659 H246" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="34" y="684" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STOP</tspan> while a CW</text>
+  <text x="34" y="702" font-size="14">transmitter is on,</text>
+  <text x="34" y="720" font-size="14">outside a run</text>
+
+  <!-- STOPPING to NONE, by the right margin -->
+  <path d="M470,659 H696 V128 H474" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="482" y="684" font-size="14">transmitter off, and</text>
+  <text x="482" y="702" font-size="14">1000 ms since the</text>
+  <text x="482" y="720" font-size="14">first stop</text>
+
+  <!-- STOPPING self-loop -->
+  <path d="M330,674 V698 H390 V678" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k10f-arrow)"/>
+  <text x="360" y="738" text-anchor="middle" font-size="14">transmitter on: stop it again;</text>
+  <text x="360" y="756" text-anchor="middle" font-size="14">from 500 ms on, starve the watchdog</text>
+
+  <!-- watchdog -->
+  <rect x="24" y="780" width="672" height="124" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="36" y="804" font-weight="bold">The watchdog (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">HFNODE_WatchdogTick</tspan>, every 10 ms)</text>
+  <text x="36" y="826" font-size="14">Feeds the IWDG unless starved, or unless a run is armed (STARTING, KEYING or</text>
+  <text x="36" y="846" font-size="14">STOPPING) and the main loop's heartbeat is 1000 ms old. IWDG: 2048 counts of</text>
+  <text x="36" y="866" font-size="14">the LSI / 32, about 2 s. Starved is never cleared: a radio that failed to stop</text>
+  <text x="36" y="886" font-size="14">resets, even if it then goes off. A hard fault stops the tick, so it resets too.</text>
+
+  <!-- legend -->
+  <rect x="24" y="922" width="18" height="18" rx="5" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="50" y="936" font-size="14">firmware state</text>
+  <rect x="174" y="922" width="18" height="18" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="200" y="936" font-size="14">events that halt</text>
+  <rect x="334" y="922" width="18" height="18" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="360" y="936" font-size="14">safety limit</text>
+  <circle cx="478" cy="931" r="7" fill="#374151"/>
+  <text x="492" y="936" font-size="14">initial state</text>
+</svg>

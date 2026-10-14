@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1854" width="720" height="1854" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The transmit-inhibit latch: the events that set it, including a tx-inhibited file found at start-up, what latching writes and does (the file, the radio's own inhibit, the owner's email), and how a person releases it with the node stopped, using the rig's own read-only check</title>
+  <defs>
+    <marker id="k05latch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1854" fill="#ffffff"/>
+  <text x="24" y="36" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">The transmit-inhibit latch</text>
+  <text x="24" y="60" text-anchor="start" font-size="14" fill="#4b5563">station.rs <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inhibit</tspan>: set by any one event below, cleared only by hand</text>
+  <rect x="16" y="84" width="688" height="638" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30" y="110" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Any one of these sets it</text>
+  <rect x="30" y="128" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="156.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Receive not confirmed</tspan></text>
+  <text x="42" y="174.8" text-anchor="start" font-size="14" fill="#111827">after any forced receive: a failed</text>
+  <text x="42" y="193" text-anchor="start" font-size="14" fill="#111827">piece, check or tune, the watchdog,</text>
+  <text x="42" y="211.2" text-anchor="start" font-size="14" fill="#111827">a dropped <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station</tspan></text>
+  <text x="42" y="229.4" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">force_receive_latching</tspan></text>
+  <rect x="366" y="128" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="378" y="156.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Status cannot be trusted</tspan></text>
+  <text x="378" y="174.8" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">1C 00</tspan> reads receive while the</text>
+  <text x="378" y="193" text-anchor="start" font-size="14" fill="#111827">Po meter shows output</text>
+  <text x="378" y="211.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">watch_piece</tspan></text>
+  <rect x="30" y="276" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="304.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The tuner will not stop</tspan></text>
+  <text x="42" y="322.8" text-anchor="start" font-size="14" fill="#111827">after a failed tune, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">1C 01</tspan> still</text>
+  <text x="42" y="341" text-anchor="start" font-size="14" fill="#111827">reads 02, or cannot be read, at</text>
+  <text x="42" y="359.2" text-anchor="start" font-size="14" fill="#111827">the tune's 20 s limit</text>
+  <text x="42" y="377.4" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">confirm_tuner_stopped</tspan></text>
+  <rect x="366" y="276" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="378" y="304.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Second fault in a row</tspan></text>
+  <text x="378" y="322.8" text-anchor="start" font-size="14" fill="#111827">high SWR, no output, too much output,</text>
+  <text x="378" y="341" text-anchor="start" font-size="14" fill="#111827">not heard, stuck, no tuner match, a</text>
+  <text x="378" y="359.2" text-anchor="start" font-size="14" fill="#111827">failed tune or failed keying; no whole</text>
+  <text x="378" y="377.4" text-anchor="start" font-size="14" fill="#111827">transmission between them</text>
+  <text x="378" y="395.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">fault</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAULTS_TO_LATCH = 2</tspan></text>
+  <rect x="30" y="424" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="452.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Watchdog cannot reach it</tspan></text>
+  <text x="42" y="470.8" text-anchor="start" font-size="14" fill="#111827">keying over its limit, and another</text>
+  <text x="42" y="489" text-anchor="start" font-size="14" fill="#111827">call has held the radio 10 s</text>
+  <text x="42" y="507.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">spawn_watchdog</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio_wait</tspan></text>
+  <rect x="366" y="424" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="378" y="452.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">On transmit, nothing keying</tspan></text>
+  <text x="378" y="470.8" text-anchor="start" font-size="14" fill="#111827">IC-7300: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">1C 00</tspan> reads transmit</text>
+  <text x="378" y="489" text-anchor="start" font-size="14" fill="#111827">twice while idle (read every 1 s);</text>
+  <text x="378" y="507.2" text-anchor="start" font-size="14" fill="#111827">keyer box: a key held at the radio,</text>
+  <text x="378" y="525.4" text-anchor="start" font-size="14" fill="#111827">if the forced receive then fails</text>
+  <text x="378" y="543.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">spawn_watchdog</tspan></text>
+  <rect x="30" y="572" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="600.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">A stop that cannot confirm</tspan></text>
+  <text x="42" y="618.8" text-anchor="start" font-size="14" fill="#111827">stop signal, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio rx</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer rx</tspan>:</text>
+  <text x="42" y="637" text-anchor="start" font-size="14" fill="#111827">receive not confirmed, or the</text>
+  <text x="42" y="655.2" text-anchor="start" font-size="14" fill="#111827">radio not reached within 10 s</text>
+  <text x="42" y="673.4" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">stop_radio</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">radio_rx</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">bench::rx</tspan></text>
+  <rect x="366" y="572" width="324" height="136" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="378" y="600.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Found at start-up</tspan></text>
+  <text x="378" y="618.8" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan> is in state_dir, or</text>
+  <text x="378" y="637" text-anchor="start" font-size="14" fill="#111827">cannot be checked (permissions);</text>
+  <text x="378" y="655.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inhibit::new</tspan> sets the flag from it,</text>
+  <text x="378" y="673.4" text-anchor="start" font-size="14" fill="#111827">and the file is left as it is</text>
+  <text x="378" y="691.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">inhibit_on_disk</tspan></text>
+  <path d="M360,722 L360,752" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="80" y="754" width="560" height="84" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="360" y="783.6" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inhibit</tspan>: one atomic flag, never cleared in code</text>
+  <text x="360" y="801.8" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">latch(why)</tspan> sets it and acts, the first time only;</text>
+  <text x="360" y="820" text-anchor="middle" font-size="14" fill="#111827">at start-up <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Inhibit::new</tspan> sets it from the file, writing nothing</text>
+  <path d="M360,838 L360,868" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="16" y="870" width="688" height="310" rx="10" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="30" y="896" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">What latching writes and does</text>
+  <rect x="30" y="914" width="324" height="120" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42" y="942.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The file</tspan></text>
+  <text x="42" y="960.8" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">state_dir/tx-inhibited</tspan>, one line:</text>
+  <text x="42" y="979" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">&lt;unix time&gt; &lt;reason&gt;</tspan>; read only</text>
+  <text x="42" y="997.2" text-anchor="start" font-size="14" fill="#111827">when a node or command starts</text>
+  <text x="42" y="1015.4" text-anchor="start" font-size="14" fill="#111827">(not rewritten when found at start-up)</text>
+  <rect x="366" y="914" width="324" height="120" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="378" y="942.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The radio refuses too</tspan></text>
+  <text x="378" y="960.8" text-anchor="start" font-size="14" fill="#111827">IC-7300: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">16 47 00</tspan> break-in off,</text>
+  <text x="378" y="979" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">16 66 01</tspan> TX Inhibit on, now or when</text>
+  <text x="378" y="997.2" text-anchor="start" font-size="14" fill="#111827">the watchdog next has the radio;</text>
+  <text x="378" y="1015.4" text-anchor="start" font-size="14" fill="#111827">keyer box, handheld: no such switch</text>
+  <rect x="30" y="1046" width="324" height="120" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42" y="1074.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The owner is emailed</tspan></text>
+  <text x="42" y="1092.8" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[email] alert_to</tspan>, from the alert</text>
+  <text x="42" y="1111" text-anchor="start" font-size="14" fill="#111827">thread; tries again after 1, 5 and</text>
+  <text x="42" y="1129.2" text-anchor="start" font-size="14" fill="#111827">15 min; without it, only logged</text>
+  <text x="42" y="1147.4" text-anchor="start" font-size="14" fill="#111827">(at start-up: "node restarted")</text>
+  <rect x="366" y="1046" width="324" height="120" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="378" y="1074.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">The node goes on</tspan></text>
+  <text x="378" y="1092.8" text-anchor="start" font-size="14" fill="#111827">decoding, but tunes and keys nothing;</text>
+  <text x="378" y="1111" text-anchor="start" font-size="14" fill="#111827">the watchdog forces receive again if</text>
+  <text x="378" y="1129.2" text-anchor="start" font-size="14" fill="#111827">the radio transmits, emails once more</text>
+  <text x="24" y="1222" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Released by hand, with the node stopped</text>
+  <rect x="40" y="1236" width="640" height="44" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="54" y="1263.8" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">1.</tspan> Stop the node (Ctrl-C, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">systemctl stop</tspan>, or the stop script)</text>
+  <path d="M360,1280 L360,1304" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="40" y="1306" width="640" height="98" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="54" y="1333.5" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">2.</tspan> Check the radio by hand; the rig's read-only check must pass:</text>
+  <text x="54" y="1351.7" text-anchor="start" font-size="14" fill="#111827">IC-7300: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode radio --config C check</tspan></text>
+  <text x="54" y="1369.9" text-anchor="start" font-size="14" fill="#111827">keyer box: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode keyer --config C check</tspan></text>
+  <text x="54" y="1388.1" text-anchor="start" font-size="14" fill="#111827">handheld: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode handheld --config C check</tspan></text>
+  <path d="M360,1404 L360,1428" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="40" y="1430" width="640" height="44" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="54" y="1457.8" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">3.</tspan> Read the reason, then delete <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan></text>
+  <path d="M360,1474 L360,1498" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="40" y="1500" width="640" height="80" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="54" y="1527.6" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">4.</tspan> IC-7300: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode radio --config C setup</tspan> turns TX Inhibit off,</text>
+  <text x="54" y="1545.8" text-anchor="start" font-size="14" fill="#111827">only once no <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan> is left in state_dir or the standard</text>
+  <text x="54" y="1564" text-anchor="start" font-size="14" fill="#111827">state directories</text>
+  <path d="M360,1580 L360,1604" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05latch-arrow)"/>
+  <rect x="40" y="1606" width="640" height="44" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="54" y="1633.8" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">5.</tspan> Start the node: it reads no file, so it may transmit</text>
+  <rect x="24" y="1680" width="672" height="98" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="36" y="1706.7" text-anchor="start" font-size="14" fill="#111827">Deleting the file while the node runs changes nothing: the latch is in memory too,</text>
+  <text x="36" y="1724.9" text-anchor="start" font-size="14" fill="#111827">and the file is read only when a process starts. Known bug: the alert email gives</text>
+  <text x="36" y="1743.1" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode radio ... check</tspan> for every rig, and on the keyer box and the handheld that</text>
+  <text x="36" y="1761.3" text-anchor="start" font-size="14" fill="#111827">command refuses; use the rig's own check from step 2.</text>
+  <text x="24" y="1808" text-anchor="start" font-size="14" fill="#111827" font-weight="bold">Legend</text>
+  <rect x="24" y="1820" width="18" height="14" rx="0" fill="#dbeafe" stroke="#1e40af" stroke-width="1"/>
+  <text x="50" y="1832" text-anchor="start" font-size="14" fill="#111827">host code, files</text>
+  <rect x="200" y="1820" width="18" height="14" rx="0" fill="#fee2e2" stroke="#991b1b" stroke-width="1"/>
+  <text x="226" y="1832" text-anchor="start" font-size="14" fill="#111827">the latch</text>
+  <rect x="340" y="1820" width="18" height="14" rx="0" fill="#fef3c7" stroke="#92400e" stroke-width="1"/>
+  <text x="366" y="1832" text-anchor="start" font-size="14" fill="#111827">radio</text>
+  <rect x="460" y="1820" width="18" height="14" rx="0" fill="#f3f4f6" stroke="#374151" stroke-width="1"/>
+  <text x="486" y="1832" text-anchor="start" font-size="14" fill="#111827">person, email</text>
+</svg>

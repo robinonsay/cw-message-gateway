@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1214" width="720" height="1214" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>hfnode's keyer side on main: the station drives KeyerRig, which sends commands to the box and reads its replies through Link and the serial port, tells the monitor about each run, and hears the radio through the sound card and the sidetone monitor; gates before opening, the mock in tests</title>
+  <defs>
+    <marker id="k09a-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1214" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">hfnode's keyer side, on main</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">The node keys through the box, reads its replies, and checks the radio by ear</text>
+
+  <!-- Row A: station and gates -->
+  <rect x="24" y="80" width="320" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="184" y="104" text-anchor="middle" font-weight="bold">Station (station.rs)</text>
+  <text x="184" y="126" text-anchor="middle" font-size="14">keys pieces, forces receive,</text>
+  <text x="184" y="146" text-anchor="middle" font-size="14">looks for a held key every 250 ms,</text>
+  <text x="184" y="166" text-anchor="middle" font-size="14">its own duty share (power_watts)</text>
+
+  <rect x="376" y="80" width="320" height="104" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="536" y="104" text-anchor="middle" font-weight="bold">Gates before opening</text>
+  <text x="536" y="126" text-anchor="middle" font-size="14">[keyer] stage, PTT cable on record,</text>
+  <text x="536" y="146" text-anchor="middle" font-size="14">state_dir writable, port name,</text>
+  <text x="536" y="166" text-anchor="middle" font-size="14">HELLO limits, build</text>
+
+  <line x1="262" y1="186" x2="262" y2="212" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="246" y="205" text-anchor="end" font-size="14" fill="#4b5563">Rig calls</text>
+  <line x1="458" y1="186" x2="458" y2="212" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="474" y="205" font-size="14" fill="#4b5563">refuse to open</text>
+
+  <!-- Row B: KeyerRig -->
+  <rect x="180" y="214" width="360" height="120" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="360" y="238" text-anchor="middle" font-weight="bold">KeyerRig (keyer/rig.rs)</text>
+  <text x="360" y="260" text-anchor="middle" font-size="14">send_cw, stop_cw, is_transmitting,</text>
+  <text x="360" y="280" text-anchor="middle" font-size="14">keying_confirmed, held_key, rest_needed</text>
+  <text x="360" y="300" text-anchor="middle" font-size="14">keep-alive: STATUS every 250 ms of a run</text>
+  <text x="360" y="320" text-anchor="middle" font-size="14">fault and replug latches, duty window</text>
+
+  <!-- KeyerRig to Link and Monitor -->
+  <line x1="252" y1="336" x2="252" y2="392" stroke="#374151" stroke-width="2" marker-start="url(#k09a-arrow)" marker-end="url(#k09a-arrow)"/>
+  <text x="242" y="369" text-anchor="end" font-size="14" fill="#4b5563">Command / Reply</text>
+  <line x1="420" y1="336" x2="420" y2="392" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="410" y="352" text-anchor="end" font-size="13" fill="#4b5563">run_started,</text>
+  <text x="410" y="368" text-anchor="end" font-size="13" fill="#4b5563">ptt_started,</text>
+  <text x="410" y="384" text-anchor="end" font-size="13" fill="#4b5563">key_opened</text>
+  <line x1="520" y1="392" x2="520" y2="336" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="530" y="360" font-size="13" fill="#4b5563">Judge, KeyState,</text>
+  <text x="530" y="376" font-size="13" fill="#4b5563">Band</text>
+
+  <!-- Row C: link and monitor -->
+  <rect x="24" y="394" width="300" height="120" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="174" y="418" text-anchor="middle" font-weight="bold">Link (keyer/link.rs)</text>
+  <text x="174" y="440" text-anchor="middle" font-size="14">one command at a time, ids 01-FF</text>
+  <text x="174" y="460" text-anchor="middle" font-size="14">300 ms reply wait; up to 3 tries</text>
+  <text x="174" y="480" text-anchor="middle" font-size="14">only for HELLO, STATUS, STOP,</text>
+  <text x="174" y="500" text-anchor="middle" font-size="14">TEST ARM; CW, MCW, tests once</text>
+
+  <rect x="396" y="394" width="300" height="120" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="546" y="418" text-anchor="middle" font-weight="bold">Monitor (keyer/monitor.rs)</text>
+  <text x="546" y="440" text-anchor="middle" font-size="14">10 ms slices at the sidetone pitch</text>
+  <text x="546" y="460" text-anchor="middle" font-size="14">(a handheld: the receive noise)</text>
+  <text x="546" y="480" text-anchor="middle" font-size="14">judge, key_state, band, quieted</text>
+
+  <line x1="174" y1="516" x2="174" y2="568" stroke="#374151" stroke-width="2" marker-start="url(#k09a-arrow)" marker-end="url(#k09a-arrow)"/>
+  <line x1="546" y1="568" x2="546" y2="516" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="530" y="547" text-anchor="end" font-size="14" fill="#4b5563">push(at, samples)</text>
+
+  <!-- Row D: serial transport and capture -->
+  <rect x="24" y="570" width="300" height="100" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="174" y="594" text-anchor="middle" font-weight="bold">SerialTransport (same file)</text>
+  <text x="174" y="616" text-anchor="middle" font-size="14">opens only a USB port named</text>
+  <text x="174" y="636" text-anchor="middle" font-size="14">PICO2-KEYER, DTR and RTS low;</text>
+  <text x="174" y="656" text-anchor="middle" font-size="14">after a loss, reopens: name only</text>
+
+  <rect x="396" y="570" width="300" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="546" y="594" text-anchor="middle" font-weight="bold">audio::Capture tap</text>
+  <text x="546" y="616" text-anchor="middle" font-size="14">every block as it is captured,</text>
+  <text x="546" y="636" text-anchor="middle" font-size="14">then on to the CW decoder</text>
+
+  <!-- Row E: sound card -->
+  <rect x="396" y="690" width="300" height="50" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="546" y="720" text-anchor="middle" font-weight="bold">Sound card</text>
+  <line x1="546" y1="690" x2="546" y2="652" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+
+  <line x1="174" y1="672" x2="174" y2="778" stroke="#374151" stroke-width="2" marker-start="url(#k09a-arrow)" marker-end="url(#k09a-arrow)"/>
+  <text x="190" y="700" font-size="14" fill="#4b5563">USB serial, both ways:</text>
+  <text x="190" y="720" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">&lt;id&gt; &lt;body&gt;*&lt;cs&gt;</text>
+  <text x="190" y="740" font-size="14" fill="#4b5563">commands down,</text>
+  <text x="190" y="760" font-size="14" fill="#4b5563">OK or ERR replies up</text>
+
+  <!-- Row F: box and radio -->
+  <rect x="24" y="780" width="300" height="110" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="174" y="804" text-anchor="middle" font-weight="bold">Keyer box (Pico 2)</text>
+  <text x="174" y="826" text-anchor="middle" font-size="14">times the Morse, own limits</text>
+  <text x="174" y="846" text-anchor="middle" font-size="14">stops a run after 2 s without a line</text>
+  <text x="174" y="866" text-anchor="middle" font-size="14">firmware: page 08</text>
+
+  <rect x="396" y="780" width="300" height="110" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="546" y="804" text-anchor="middle" font-weight="bold">Radio</text>
+  <text x="546" y="826" text-anchor="middle" font-size="14">key jack in, sidetone out</text>
+  <text x="546" y="846" text-anchor="middle" font-size="14">a handheld: PTT and MCW tone in,</text>
+  <text x="546" y="866" text-anchor="middle" font-size="14">receive noise out (output = "ptt")</text>
+
+  <line x1="326" y1="835" x2="394" y2="835" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="360" y="825" text-anchor="middle" font-size="13" fill="#4b5563">key line</text>
+  <text x="360" y="853" text-anchor="middle" font-size="13" fill="#4b5563">or PTT</text>
+  <text x="360" y="869" text-anchor="middle" font-size="13" fill="#4b5563">and tone</text>
+  <line x1="546" y1="780" x2="546" y2="742" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+  <text x="530" y="766" text-anchor="end" font-size="14" fill="#4b5563">radio audio</text>
+
+  <!-- Row G: PR #31 and the operator -->
+  <rect x="24" y="920" width="300" height="80" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="174" y="944" text-anchor="middle" font-weight="bold">PR #31 (draft, not on main)</text>
+  <text x="174" y="966" text-anchor="middle" font-size="14">protocol 5: decoder on core 1,</text>
+  <text x="174" y="986" text-anchor="middle" font-size="14">hfnode keyer core1test (page 11)</text>
+
+  <rect x="396" y="920" width="300" height="80" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="546" y="944" text-anchor="middle" font-weight="bold">Operator at the radio</text>
+  <text x="546" y="966" text-anchor="middle" font-size="14">stops a run by hand: key plug</text>
+  <text x="546" y="986" text-anchor="middle" font-size="14">out first, Ctrl-C last</text>
+  <line x1="546" y1="920" x2="546" y2="892" stroke="#374151" stroke-width="2" marker-end="url(#k09a-arrow)"/>
+
+  <!-- Row H: tests -->
+  <rect x="24" y="1030" width="672" height="110" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="1056" font-weight="bold">In tests and the selftest (keyer/mock.rs, testbench.rs)</text>
+  <text x="40" y="1080" font-size="14">MockBox: keyer_core's own Keyer behind a fake serial port</text>
+  <text x="40" y="1102" font-size="14">MockRadio: keys from the box's outputs, feeds Monitor.push</text>
+  <text x="40" y="1124" font-size="14">Together they replace the serial port, box, radio and sound card.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1166" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="50" y="1178" font-size="14">host code</text>
+  <rect x="250" y="1166" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="276" y="1178" font-size="14">firmware</text>
+  <rect x="470" y="1166" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="496" y="1178" font-size="14">radio and hardware</text>
+  <rect x="24" y="1192" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="50" y="1204" font-size="14">safety gate</text>
+  <rect x="250" y="1192" width="18" height="14" fill="#f3f4f6" stroke="#374151"/><text x="276" y="1204" font-size="14">person</text>
+  <rect x="470" y="1192" width="18" height="14" fill="#ede9fe" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="496" y="1204" font-size="14">not on main yet</text>
+</svg>

@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1100" width="720" height="1100" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The sidetone monitor's check of one run on a time axis: what the box keyed, the sidetone heard at the best lag found in 0 to 500 ms, the 10 ms slices scored, the 85 percent and 10 dB rules, and the steady-tone refusal at 1 s and inhibit at 30 s</title>
+  <defs>
+    <marker id="k09m-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1100" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Sidetone monitor: judging one run</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">"TEST" at 20 wpm (dot 60 ms) on radio time; thresholds from keyer/monitor.rs</text>
+  <text x="24" y="112" font-size="14" font-weight="bold">1 Box keys</text>
+  <text x="24" y="128" font-size="14" fill="#4b5563">the CW it was sent</text>
+  <rect x="246.7" y="104" width="39.5" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <rect x="325.6" y="104" width="13.1" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <rect x="378.2" y="104" width="13.1" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <rect x="404.5" y="104" width="13.1" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <rect x="430.8" y="104" width="13.2" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <rect x="483.4" y="104" width="39.4" height="20" fill="#dcfce7" stroke="#166534" stroke-width="1.5"/>
+  <text x="266.4" y="99" text-anchor="middle" font-size="14" fill="#4b5563">T</text>
+  <text x="332.2" y="99" text-anchor="middle" font-size="14" fill="#4b5563">E</text>
+  <text x="411.1" y="99" text-anchor="middle" font-size="14" fill="#4b5563">S</text>
+  <text x="503.1" y="99" text-anchor="middle" font-size="14" fill="#4b5563">T</text>
+  <text x="530.9" y="119" font-size="14" fill="#4b5563">Morse ends at 1.26 s</text>
+  <line x1="246.7" y1="102" x2="246.7" y2="274" stroke="#374151" stroke-width="1" stroke-dasharray="3 3"/>
+  <path d="M246.7,136 L246.7,144 L356.3,144 L356.3,136" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="364.3" y="142" font-size="14" fill="#111827">lag searched 0 to 500 ms in 10 ms steps</text>
+  <text x="364.3" y="159" font-size="14" fill="#4b5563">(the best fit here: 90 ms)</text>
+  <text x="24" y="188" font-size="14" font-weight="bold">2 Heard</text>
+  <text x="24" y="204" font-size="14" fill="#4b5563">level at the pitch,</text>
+  <text x="24" y="220" font-size="14" fill="#4b5563">per 10 ms slice</text>
+  <line x1="170.0" y1="184.0" x2="696.0" y2="184.0" stroke="#374151" stroke-opacity="0.4" stroke-width="1" stroke-dasharray="5 4"/>
+  <text x="162" y="189.0" text-anchor="end" font-size="14" fill="#4b5563">tone</text>
+  <line x1="170.0" y1="219.0" x2="696.0" y2="219.0" stroke="#374151" stroke-opacity="0.4" stroke-width="1" stroke-dasharray="5 4"/>
+  <text x="162" y="224.0" text-anchor="end" font-size="14" fill="#4b5563">mid</text>
+  <line x1="170.0" y1="254.0" x2="696.0" y2="254.0" stroke="#374151" stroke-opacity="0.4" stroke-width="1" stroke-dasharray="5 4"/>
+  <text x="162" y="259.0" text-anchor="end" font-size="14" fill="#4b5563">gap</text>
+  <polyline points="170.0,238.9 172.2,238.9 172.2,236.8 174.4,236.8 174.4,239.0 176.6,239.0 176.6,235.6 178.8,235.6 178.8,238.1 181.0,238.1 181.0,237.9 183.2,237.9 183.2,238.6 185.3,238.6 185.3,237.2 187.5,237.2 187.5,236.5 189.7,236.5 189.7,237.2 191.9,237.2 191.9,240.0 194.1,240.0 194.1,236.0 196.3,236.0 196.3,236.8 198.5,236.8 198.5,238.9 200.7,238.9 200.7,239.7 202.9,239.7 202.9,240.9 205.1,240.9 205.1,239.8 207.3,239.8 207.3,237.8 209.5,237.8 209.5,238.2 211.6,238.2 211.6,238.8 213.8,238.8 213.8,236.5 216.0,236.5 216.0,239.2 218.2,239.2 218.2,239.3 220.4,239.3 220.4,240.9 222.6,240.9 222.6,237.0 224.8,237.0 224.8,237.7 227.0,237.7 227.0,239.3 229.2,239.3 229.2,239.4 231.4,239.4 231.4,236.0 233.6,236.0 233.6,235.1 235.8,235.1 235.8,239.7 237.9,239.7 237.9,235.2 240.1,235.2 240.1,238.6 242.3,238.6 242.3,236.5 244.5,236.5 244.5,238.3 246.7,238.3 246.7,238.1 248.9,238.1 248.9,237.4 251.1,237.4 251.1,236.1 253.3,236.1 253.3,238.9 255.5,238.9 255.5,239.3 257.7,239.3 257.7,236.8 259.9,236.8 259.9,240.8 262.1,240.8 262.1,240.0 264.2,240.0 264.2,237.3 266.4,237.3 266.4,184.4 268.6,184.4 268.6,183.3 270.8,183.3 270.8,184.2 273.0,184.2 273.0,184.1 275.2,184.1 275.2,184.4 277.4,184.4 277.4,184.8 279.6,184.8 279.6,183.8 281.8,183.8 281.8,184.7 284.0,184.7 284.0,184.2 286.2,184.2 286.2,183.0 288.4,183.0 288.4,183.7 290.5,183.7 290.5,183.2 292.7,183.2 292.7,184.1 294.9,184.1 294.9,183.7 297.1,183.7 297.1,183.3 299.3,183.3 299.3,184.6 301.5,184.6 301.5,183.1 303.7,183.1 303.7,183.2 305.9,183.2 305.9,252.2 308.1,252.2 308.1,256.4 310.3,256.4 310.3,254.3 312.5,254.3 312.5,253.9 314.7,253.9 314.7,253.3 316.8,253.3 316.8,251.6 319.0,251.6 319.0,253.7 321.2,253.7 321.2,252.9 323.4,252.9 323.4,253.3 325.6,253.3 325.6,251.7 327.8,251.7 327.8,256.7 330.0,256.7 330.0,255.8 332.2,255.8 332.2,253.6 334.4,253.6 334.4,254.4 336.6,254.4 336.6,251.1 338.8,251.1 338.8,256.8 341.0,256.8 341.0,252.0 343.1,252.0 343.1,253.1 345.3,253.1 345.3,184.5 347.5,184.5 347.5,184.4 349.7,184.4 349.7,184.7 351.9,184.7 351.9,183.4 354.1,183.4 354.1,184.4 356.3,184.4 356.3,183.1 358.5,183.1 358.5,256.9 360.7,256.9 360.7,251.2 362.9,251.2 362.9,252.0 365.1,252.0 365.1,257.0 367.3,257.0 367.3,255.1 369.4,255.1 369.4,251.2 371.6,251.2 371.6,252.4 373.8,252.4 373.8,254.8 376.0,254.8 376.0,251.9 378.2,251.9 378.2,256.5 380.4,256.5 380.4,253.6 382.6,253.6 382.6,256.2 384.8,256.2 384.8,254.0 387.0,254.0 387.0,252.0 389.2,252.0 389.2,255.7 391.4,255.7 391.4,251.0 393.6,251.0 393.6,255.8 395.7,255.8 395.7,252.8 397.9,252.8 397.9,183.3 400.1,183.3 400.1,183.4 402.3,183.4 402.3,183.9 404.5,183.9 404.5,183.5 406.7,183.5 406.7,184.5 408.9,184.5 408.9,184.4 411.1,184.4 411.1,252.7 413.3,252.7 413.3,252.3 415.5,252.3 415.5,255.0 417.7,255.0 417.7,254.6 419.9,254.6 419.9,256.3 422.0,256.3 422.0,252.3 424.2,252.3 424.2,183.3 426.4,183.3 426.4,184.1 428.6,184.1 428.6,185.0 430.8,185.0 430.8,183.9 433.0,183.9 433.0,183.8 435.2,183.8 435.2,183.1 437.4,183.1 437.4,252.7 439.6,252.7 439.6,255.4 441.8,255.4 441.8,252.3 444.0,252.3 444.0,253.1 446.2,253.1 446.2,253.5 448.3,253.5 448.3,253.3 450.5,253.3 450.5,184.6 452.7,184.6 452.7,184.8 454.9,184.8 454.9,184.3 457.1,184.3 457.1,184.0 459.3,184.0 459.3,184.1 461.5,184.1 461.5,184.2 463.7,184.2 463.7,255.5 465.9,255.5 465.9,256.4 468.1,256.4 468.1,253.4 470.3,253.4 470.3,253.1 472.5,253.1 472.5,251.3 474.6,251.3 474.6,253.6 476.8,253.6 476.8,253.7 479.0,253.7 479.0,252.0 481.2,252.0 481.2,254.9 483.4,254.9 483.4,256.5 485.6,256.5 485.6,255.7 487.8,255.7 487.8,256.7 490.0,256.7 490.0,256.5 492.2,256.5 492.2,256.6 494.4,256.6 494.4,255.0 496.6,255.0 496.6,254.0 498.8,254.0 498.8,254.8 500.9,254.8 500.9,256.8 503.1,256.8 503.1,183.1 505.3,183.1 505.3,183.1 507.5,183.1 507.5,183.6 509.7,183.6 509.7,184.2 511.9,184.2 511.9,184.3 514.1,184.3 514.1,183.2 516.3,183.2 516.3,184.2 518.5,184.2 518.5,184.2 520.7,184.2 520.7,184.4 522.9,184.4 522.9,184.8 525.1,184.8 525.1,184.6 527.2,184.6 527.2,183.6 529.4,183.6 529.4,183.2 531.6,183.2 531.6,184.5 533.8,184.5 533.8,184.8 536.0,184.8 536.0,184.2 538.2,184.2 538.2,184.8 540.4,184.8 540.4,183.0 542.6,183.0 542.6,255.5 544.8,255.5 544.8,254.8 547.0,254.8 547.0,256.1 549.2,256.1 549.2,253.0 551.4,253.0 551.4,255.8 553.5,255.8 553.5,252.5 555.7,252.5 555.7,251.1 557.9,251.1 557.9,256.4 560.1,256.4 560.1,255.1 562.3,255.1 562.3,255.9 564.5,255.9 564.5,251.7 566.7,251.7 566.7,251.3 568.9,251.3 568.9,251.2 571.1,251.2 571.1,252.6 573.3,252.6 573.3,254.8 575.5,254.8 575.5,251.5 577.7,251.5 577.7,253.7 579.8,253.7 579.8,256.5 582.0,256.5 582.0,252.5 584.2,252.5 584.2,251.3 586.4,251.3 586.4,251.7 588.6,251.7 588.6,255.6 590.8,255.6 590.8,256.6 593.0,256.6 593.0,255.9 595.2,255.9 595.2,253.8 597.4,253.8 597.4,252.7 599.6,252.7 599.6,255.6 601.8,255.6 601.8,251.9 604.0,251.9 604.0,256.1 606.1,256.1 606.1,256.8 608.3,256.8 608.3,253.2 610.5,253.2 610.5,255.4 612.7,255.4 612.7,253.4 614.9,253.4 614.9,255.6 617.1,255.6 617.1,255.1 619.3,255.1 619.3,253.6 621.5,253.6 621.5,251.6 623.7,251.6 623.7,256.4 625.9,256.4 625.9,256.1 628.1,256.1 628.1,252.7 630.3,252.7 630.3,252.3 632.4,252.3 632.4,255.8 634.6,255.8 634.6,253.4 636.8,253.4 636.8,254.8 639.0,254.8 639.0,251.8 641.2,251.8 641.2,256.6 643.4,256.6 643.4,251.8 645.6,251.8 645.6,251.6 647.8,251.6 647.8,255.4 650.0,255.4 650.0,252.9 652.2,252.9 652.2,256.2 654.4,256.2 654.4,253.9 656.6,253.9 656.6,252.8 658.7,252.8 658.7,251.9 660.9,251.9 660.9,255.4 663.1,255.4 663.1,253.2 665.3,253.2 665.3,252.9 667.5,252.9 667.5,255.0 669.7,255.0 669.7,251.1 671.9,251.1 671.9,256.2 674.1,256.2 674.1,240.4 676.3,240.4 676.3,238.7 678.5,238.7 678.5,235.8 680.7,235.8 680.7,239.7 682.9,239.7 682.9,236.2 685.0,236.2 685.0,236.7 687.2,236.7 687.2,240.0 689.4,240.0 689.4,240.4 691.6,240.4 691.6,239.4 693.8,239.4 693.8,238.6 696.0,238.6 696.0,237.4" fill="none" stroke="#92400e" stroke-width="1.5"/>
+  <line x1="170.0" y1="274" x2="696.0" y2="274" stroke="#374151" stroke-width="1.5"/>
+  <line x1="246.7" y1="274" x2="246.7" y2="279" stroke="#374151" stroke-width="1.5"/>
+  <text x="246.7" y="293" text-anchor="middle" font-size="14" fill="#4b5563">0 s</text>
+  <line x1="356.3" y1="274" x2="356.3" y2="279" stroke="#374151" stroke-width="1.5"/>
+  <text x="356.3" y="293" text-anchor="middle" font-size="14" fill="#4b5563">0.5</text>
+  <line x1="465.9" y1="274" x2="465.9" y2="279" stroke="#374151" stroke-width="1.5"/>
+  <text x="465.9" y="293" text-anchor="middle" font-size="14" fill="#4b5563">1.0</text>
+  <line x1="575.5" y1="274" x2="575.5" y2="279" stroke="#374151" stroke-width="1.5"/>
+  <text x="575.5" y="293" text-anchor="middle" font-size="14" fill="#4b5563">1.5</text>
+  <line x1="685.0" y1="274" x2="685.0" y2="279" stroke="#374151" stroke-width="1.5"/>
+  <text x="24" y="314" font-size="14" font-weight="bold">3 Scored</text>
+  <text x="24" y="330" font-size="14" fill="#4b5563">at the best lag</text>
+  <rect x="211.6" y="304" width="52.2" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <rect x="269.1" y="304" width="34.2" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="308.5" y="304" width="34.2" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <rect x="348.0" y="304" width="7.9" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="361.1" y="304" width="34.2" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <rect x="400.6" y="304" width="7.9" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="413.7" y="304" width="7.9" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <rect x="426.9" y="304" width="7.9" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="440.0" y="304" width="7.9" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <rect x="453.2" y="304" width="7.9" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="466.3" y="304" width="34.2" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <rect x="505.8" y="304" width="34.2" height="22" fill="#4b5563" stroke="#374151" stroke-width="1"/>
+  <rect x="545.2" y="304" width="36.8" height="22" fill="#ffffff" stroke="#374151" stroke-width="1.5"/>
+  <line x1="671.9" y1="136" x2="671.9" y2="326" stroke="#991b1b" stroke-width="2" stroke-dasharray="5 4"/>
+  <text x="696" y="348" text-anchor="end" font-size="14" fill="#991b1b">judged once the audio reaches 1.94 s</text>
+  <text x="696" y="364" text-anchor="end" font-size="14" fill="#4b5563">(end + post 0.18 s + 0.5 s longest lag)</text>
+  <rect x="24" y="373" width="18" height="13" fill="#ffffff" stroke="#374151" stroke-width="1.5" stroke-dasharray="3 2"/><text x="48" y="384" font-size="14">before: 0.25 s, scored apart</text>
+  <rect x="270" y="373" width="18" height="13" fill="#4b5563" stroke="#374151"/><text x="294" y="384" font-size="14">key-down</text>
+  <rect x="24" y="395" width="18" height="13" fill="#ffffff" stroke="#374151" stroke-width="1.5"/><text x="48" y="406" font-size="14">key-up: gaps and 3 dots after (0.18 s here; at most 0.3 s)</text>
+  <text x="24" y="428" font-size="14" fill="#4b5563">Spaces between the outlined bars: 12 ms either side of every expected key change, left out.</text>
+  <rect x="24" y="446" width="672" height="192" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="472" font-weight="bold">Heard only if all of these hold, at one lag</text>
+  <text x="40" y="496" font-size="14">1. at least 3 key-down slices and 3 key-up slices</text>
+  <text x="40" y="517" font-size="14">2. median tone minus median gap: 10 dB or more</text>
+  <text x="40" y="538" font-size="14">3. 85% of key-down slices at or over mid = (tone + gap) / 2</text>
+  <text x="40" y="559" font-size="14">4. 85% of key-up slices under mid</text>
+  <text x="40" y="580" font-size="14">5. 85% of the slices before the run more than 10 dB under the tone</text>
+  <text x="56" y="599" font-size="14">(passes if there are none)</text>
+  <text x="40" y="624" font-size="14" fill="#4b5563">Not heard: the station stops and keys nothing until its next window.</text>
+  <text x="24" y="676" font-weight="bold">4 A steady tone at the pitch, not from one of the node's runs</text>
+  <text x="162" y="705" text-anchor="end" font-size="14" fill="#4b5563">steady tone</text>
+  <rect x="170.0" y="692" width="510.0" height="18" fill="#fef3c7" stroke="#92400e" stroke-width="1.5"/>
+  <line x1="170.0" y1="722" x2="680.0" y2="722" stroke="#374151" stroke-width="1.5"/>
+  <line x1="170.0" y1="722" x2="170.0" y2="727" stroke="#374151" stroke-width="1.5"/>
+  <text x="164" y="727" text-anchor="end" font-size="14" fill="#4b5563">0 s</text>
+  <line x1="324.5" y1="722" x2="324.5" y2="727" stroke="#374151" stroke-width="1.5"/>
+  <text x="324.5" y="741" text-anchor="middle" font-size="14" fill="#4b5563">10</text>
+  <line x1="479.1" y1="722" x2="479.1" y2="727" stroke="#374151" stroke-width="1.5"/>
+  <text x="479.1" y="741" text-anchor="middle" font-size="14" fill="#4b5563">20</text>
+  <line x1="633.6" y1="722" x2="633.6" y2="727" stroke="#374151" stroke-width="1.5"/>
+  <line x1="185.5" y1="686" x2="185.5" y2="752" stroke="#991b1b" stroke-width="2"/>
+  <line x1="633.6" y1="686" x2="633.6" y2="752" stroke="#991b1b" stroke-width="2"/>
+  <text x="191.5" y="768" font-size="14" fill="#991b1b">1 s: send_cw refuses to key over it (90% of the last 1 s)</text>
+  <text x="627.6" y="790" font-size="14" fill="#991b1b" text-anchor="end">30 s: KeyState::Held, a fault that stays (95% of 30 s)</text>
+  <text x="24" y="816" font-size="14" fill="#4b5563">Steady slice: within 1.5 dB of the one before, 60% or more of its power at the pitch, and over</text>
+  <text x="24" y="833" font-size="14" fill="#4b5563">a floor: min_level_dbfs + 10 dB at 1 s; at 30 s, the sidetone heard less 10 dB once it is known.</text>
+  <rect x="24" y="856" width="672" height="186" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="882" font-weight="bold">5 After the box opens its key (key_state)</text>
+  <text x="40" y="906" font-size="14">Open: 50 ms of slices under the release level, from open + lag + 12 ms</text>
+  <text x="56" y="925" font-size="14" fill="#4b5563">release level: mid, once the run was heard (lag as judged); otherwise the band</text>
+  <text x="56" y="942" font-size="14" fill="#4b5563">before the run + 10 dB, at most the known sidetone - 10 dB (lag taken as 0.5 s)</text>
+  <text x="40" y="964" font-size="14">Unsure: the audio does not reach 0.5 s past that point yet</text>
+  <text x="40" y="985" font-size="14">Held: 0.5 s of audio since then, with the tone in 90% of its slices</text>
+  <text x="40" y="1006" font-size="14">Otherwise, after 0.5 s: Open</text>
+  <text x="40" y="1027" font-size="14">Then Held: a 1 s steady tone within 10 s, before 0.5 s of quiet was ever seen</text>
+  <rect x="24" y="1062" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="50" y="1074" font-size="14">box keying</text>
+  <rect x="170" y="1062" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="196" y="1074" font-size="14">radio audio heard</text>
+  <rect x="360" y="1062" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="386" y="1074" font-size="14">verdict rule (gate)</text>
+</svg>

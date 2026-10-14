@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1996" width="720" height="1996" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Flowchart of hfnode run: the start-up gates in run, run_node and serve, then a loop over audio blocks with window starts, listening holds, idle checks, decoding, the session, the retune decision and the transmission, and the two ways it stops</title>
+  <defs>
+    <marker id="k05loop-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1996" fill="#ffffff"/>
+  <text x="24" y="36" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">The node loop (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode run</tspan>)</text>
+  <text x="24" y="60" text-anchor="start" font-size="14" fill="#4b5563">Start-up in main.rs, then node::run takes one audio block at a time</text>
+  <text x="24" y="98" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Start-up: run, run_node, serve (main.rs)</text>
+  <rect x="32" y="110" width="380" height="62" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="222" y="137.7" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_state_dir</tspan>: refuse to start unless</text>
+  <text x="222" y="155.9" text-anchor="middle" font-size="14" fill="#111827">the state directory can keep <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">tx-inhibited</tspan></text>
+  <path d="M222,172 L222,192" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="194" width="380" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="221.7" text-anchor="middle" font-size="16" fill="#111827">Storm watch and alert threads start;</text>
+  <text x="222" y="239.9" text-anchor="middle" font-size="14" fill="#111827">session and mail services built</text>
+  <path d="M222,256 L222,276" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="278" width="380" height="98" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="222" y="305.5" text-anchor="middle" font-size="16" fill="#111827">Open the radio for <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">run</tspan> (a gate)</text>
+  <text x="222" y="323.7" text-anchor="middle" font-size="14" fill="#111827">IC-7300: stage <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">done</tspan>, read-only preflight</text>
+  <text x="222" y="341.9" text-anchor="middle" font-size="14" fill="#111827">keyer box: stage, PTT cable, audio first</text>
+  <text x="222" y="360.1" text-anchor="middle" font-size="14" fill="#111827">handheld: its stage</text>
+  <path d="M222,376 L222,396" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="398" width="380" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="423.5" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">serve</tspan>: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">spawn_inbound</tspan> (mail and text threads)</text>
+  <text x="222" y="444.3" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station::new</tspan>: the watchdog thread starts</text>
+  <text x="222" y="462.5" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">guard_station</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">notify_inhibit</tspan> (owner alerts)</text>
+  <path d="M222,478 L222,498" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="500" width="380" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="527.7" text-anchor="middle" font-size="16" fill="#111827">Wait up to 60 s for the first storm check;</text>
+  <text x="222" y="545.9" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">configure</tspan>, then read back (IC-7300, handheld)</text>
+  <path d="M222,562 L222,582" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="584" width="380" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="611.8" text-anchor="middle" font-size="16" fill="#111827">Start the audio capture, call <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">node::run</tspan></text>
+  <text x="24" y="664" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">The loop (node.rs)</text>
+  <path d="M222,628 L222,676" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="678" width="380" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="705.8" text-anchor="middle" font-size="16" fill="#111827">Next audio block (warn after 5 s with none)</text>
+  <path d="M222,722 L222,746" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,780 50,748 394,748 412,780 394,812 50,812" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="775.4" text-anchor="middle" font-size="16" fill="#111827">Captured while keying or tuning,</text>
+  <text x="222" y="796.2" text-anchor="middle" font-size="16" fill="#111827">or in the 250 ms recovery after?</text>
+  <rect x="452" y="758" width="236" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="785" text-anchor="middle" font-size="14" fill="#111827">Drop the block</text>
+  <path d="M412,780 L450,780" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="768" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <path d="M688,780 L704,780" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="236" y="829" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M222,812 L222,836" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,870 50,838 394,838 412,870 394,902 50,902" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="865.4" text-anchor="middle" font-size="16" fill="#111827">A window starts? First block, or</text>
+  <text x="222" y="886.2" text-anchor="middle" font-size="16" fill="#111827">the schedule opens a new one</text>
+  <rect x="452" y="830" width="236" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="856.8" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">open_window</tspan>: set up, check,</text>
+  <text x="570" y="875" text-anchor="middle" font-size="14" fill="#111827">tune; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DE &lt;call&gt;</tspan> if it matched;</text>
+  <text x="570" y="893.2" text-anchor="middle" font-size="14" fill="#111827">fresh decoder</text>
+  <path d="M412,870 L450,870" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="858" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <path d="M688,870 L704,870" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="236" y="919" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M222,902 L222,926" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,970 50,928 394,928 412,970 394,1012 50,1012" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="957.6" text-anchor="middle" font-size="16" fill="#111827">Listening? In a window, or past its end</text>
+  <text x="222" y="975.8" text-anchor="middle" font-size="14" fill="#111827">while a message is still coming in, an OK</text>
+  <text x="222" y="994" text-anchor="middle" font-size="14" fill="#111827">or NO is pending, or it could key a result</text>
+  <rect x="452" y="939" width="236" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="965.9" text-anchor="middle" font-size="14" fill="#111827">Flush; log any text to</text>
+  <text x="570" y="984.1" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rx.log</tspan>; window closed</text>
+  <path d="M412,970 L450,970" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="958" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M688,970 L704,970" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="236" y="1029" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <path d="M222,1012 L222,1036" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,1070 50,1038 394,1038 412,1070 394,1102 50,1102" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1065.4" text-anchor="middle" font-size="16" fill="#111827">Idle, and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_minutes</tspan> (10)</text>
+  <text x="222" y="1086.2" text-anchor="middle" font-size="16" fill="#111827">since the radio was last set up?</text>
+  <rect x="452" y="1039" width="236" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="1065.9" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.check()</tspan>: settings</text>
+  <text x="570" y="1084.1" text-anchor="middle" font-size="14" fill="#111827">again, read back; keys nothing</text>
+  <path d="M412,1070 L450,1070" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="1058" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <text x="236" y="1119" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M222,1102 L222,1126" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <path d="M570,1101 L570,1150 L414,1150" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="1128" width="380" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1155.8" text-anchor="middle" font-size="16" fill="#111827">Decode the block (cw decoder)</text>
+  <path d="M222,1172 L222,1196" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,1230 50,1198 394,1198 412,1230 394,1262 50,1262" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1226.7" text-anchor="middle" font-size="16" fill="#111827">End of message? 3 s of quiet, or quiet</text>
+  <text x="222" y="1244.9" text-anchor="middle" font-size="14" fill="#111827">after an over (K, KN or (, AR or +, SK)</text>
+  <path d="M412,1230 L704,1230" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="420" y="1218" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <text x="236" y="1279" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <path d="M222,1262 L222,1286" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="1288" width="380" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1315.8" text-anchor="middle" font-size="16" fill="#111827">Log to <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rx.log</tspan>; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">session.handle(text)</tspan></text>
+  <path d="M222,1332 L222,1356" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,1390 50,1358 394,1358 412,1390 394,1422 50,1422" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1385.4" text-anchor="middle" font-size="16" fill="#111827">A reply to key, prepared</text>
+  <text x="222" y="1406.2" text-anchor="middle" font-size="16" fill="#111827">within 90 s (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">LATE_REPLY</tspan>)?</text>
+  <rect x="452" y="1368" width="236" height="44" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="1395" text-anchor="middle" font-size="14" fill="#111827">Silent, or late: log only</text>
+  <path d="M412,1390 L450,1390" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="1378" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M688,1390 L704,1390" fill="none" stroke="#374151" stroke-width="2"/>
+  <text x="236" y="1439" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <path d="M222,1422 L222,1446" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <polygon points="32,1480 50,1448 394,1448 412,1480 394,1512 50,1512" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1475.4" text-anchor="middle" font-size="16" fill="#111827">Last tune failed or skipped, or</text>
+  <text x="222" y="1496.2" text-anchor="middle" font-size="16" fill="#111827">older than <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">retune_minutes</tspan> (60)?</text>
+  <rect x="452" y="1447" width="236" height="66" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="570" y="1466.8" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.start_window()</tspan>:</text>
+  <text x="570" y="1485" text-anchor="middle" font-size="14" fill="#111827">tune now; the reply</text>
+  <text x="570" y="1503.2" text-anchor="middle" font-size="14" fill="#111827">identifies the tune</text>
+  <path d="M412,1480 L450,1480" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="420" y="1468" text-anchor="start" font-size="14" fill="#4b5563">yes</text>
+  <text x="236" y="1529" text-anchor="start" font-size="14" fill="#4b5563">no</text>
+  <path d="M222,1512 L222,1536" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <path d="M570,1513 L570,1578 L414,1578" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="1538" width="380" height="80" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1565.6" text-anchor="middle" font-size="16" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.transmit(reply)</tspan></text>
+  <text x="222" y="1583.8" text-anchor="middle" font-size="14" fill="#111827">(see the station figure); inbound messages</text>
+  <text x="222" y="1602" text-anchor="middle" font-size="14" fill="#111827">it carries are marked read only if it went out</text>
+  <path d="M222,1618 L222,1642" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <rect x="32" y="1644" width="380" height="62" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="222" y="1671.7" text-anchor="middle" font-size="16" fill="#111827">Drop audio from the transmission</text>
+  <text x="222" y="1689.9" text-anchor="middle" font-size="14" fill="#111827">and 250 ms after; relearn levels, keep speed</text>
+  <path d="M412,1675 L704,1675" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M704,1675 L704,700 L414,700" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k05loop-arrow)"/>
+  <text x="696" y="690" text-anchor="end" font-size="14" fill="#4b5563">next block</text>
+  <text x="24" y="1756" text-anchor="start" font-size="16" fill="#111827" font-weight="bold">Stopping: a stop signal (any time), or node::run returning</text>
+  <rect x="24" y="1770" width="326" height="100" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="187" y="1798.5" text-anchor="middle" font-size="16" fill="#111827">Stop signal: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">stop_guarded</tspan></text>
+  <text x="187" y="1816.7" text-anchor="middle" font-size="14" fill="#111827">Ctrl-C, SIGTERM, SIGHUP: take the radio</text>
+  <text x="187" y="1834.9" text-anchor="middle" font-size="14" fill="#111827">within 10 s, force receive, else latch;</text>
+  <text x="187" y="1853.1" text-anchor="middle" font-size="14" fill="#111827">exit 0, 1, or 130 with no radio</text>
+  <rect x="370" y="1770" width="326" height="100" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="533" y="1798.5" text-anchor="middle" font-size="16" fill="#111827">Audio ends, or an error</text>
+  <text x="533" y="1816.7" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">node::run</tspan> returns; dropping the</text>
+  <text x="533" y="1834.9" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station</tspan> forces receive (latches if</text>
+  <text x="533" y="1853.1" text-anchor="middle" font-size="14" fill="#111827">not confirmed); alerts get 30 s</text>
+  <text x="24" y="1904" text-anchor="start" font-size="14" fill="#111827" font-weight="bold">Legend</text>
+  <rect x="24" y="1916" width="18" height="14" rx="0" fill="#dbeafe" stroke="#1e40af" stroke-width="1"/>
+  <text x="50" y="1928" text-anchor="start" font-size="14" fill="#111827">host code: a step</text>
+  <polygon points="210,1923 215,1916 225,1916 230,1923 225,1930 215,1930" fill="#dbeafe" stroke="#1e40af"/>
+  <text x="236" y="1928" text-anchor="start" font-size="14" fill="#111827">a decision</text>
+  <rect x="390" y="1916" width="18" height="14" rx="0" fill="#fee2e2" stroke="#991b1b" stroke-width="1"/>
+  <text x="416" y="1928" text-anchor="start" font-size="14" fill="#111827">safety gate or stop path</text>
+  <text x="24" y="1954" text-anchor="start" font-size="14" fill="#4b5563">Numbers in parentheses are config defaults: check_minutes, retune_minutes,</text>
+  <text x="24" y="1974" text-anchor="start" font-size="14" fill="#4b5563">and end_of_message_ms (3 s).</text>
+</svg>

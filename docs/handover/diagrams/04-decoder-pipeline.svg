@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 2260" width="720" height="2260" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The decoder's processing chain: per sample, sanitize, mix to baseband and low-pass three times; once per millisecond tick, magnitude, envelope smoothing, settling, the key decision with hysteresis and squelch, level tracking, debounce into runs, the noise-texture and stale-level checks that relearn the levels, and the word-gap check; per word, speed learning by 2-means and classification into dits, dahs and characters</title>
+  <defs><marker id="d04p-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#374151"/></marker></defs>
+  <rect x="0" y="0" width="720" height="2260" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Inside cw::Decoder: from samples to letters</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">All blue: cw crate code. Numbers at the defaults: 8000 Hz, bandwidth 150 Hz,</text>
+  <text x="24" y="76" font-size="14" fill="#4b5563">5 to 35 WPM. "dit" is the learned dit length in ms; lengths are counted in ticks.</text>
+  <text x="24" y="92" font-size="14" fill="#4b5563">A1 to A11 at the right of each box name its algorithm section on page 04.</text>
+  <rect x="40" y="112" width="620" height="66" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="142" font-weight="bold">Audio in (full scale = 1.0)</text>
+  <text x="52" y="168" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">push(&amp;samples)  or  push_with(&amp;samples, on_event)</text>
+  <text x="24" y="208" font-size="14" font-weight="bold" fill="#4b5563">PER SAMPLE</text>
+  <line x1="300" y1="178" x2="300" y2="220" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="220" width="620" height="66" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="250" font-weight="bold">Sanitize</text>
+  <text x="648" y="250" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A1</text>
+  <text x="52" y="276" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">NaN or infinite -&gt; 0;  anything else clamped to [-4.0, 4.0]</text>
+  <line x1="300" y1="286" x2="300" y2="312" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="312" width="620" height="106" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="342" font-weight="bold">Mix the pitch down to 0 Hz</text>
+  <text x="648" y="342" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A1</text>
+  <text x="52" y="368" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">phase += 2·pi·pitch_hz / sample_rate,  wrapped to [0, 2·pi)</text>
+  <text x="52" y="388" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">i = x·cos(phase)        q = -x·sin(phase)</text>
+  <text x="52" y="408" font-size="14" fill="#4b5563">state: phase, phase_step</text>
+  <line x1="300" y1="418" x2="300" y2="444" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="444" width="620" height="106" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="474" font-weight="bold">Low-pass: three one-pole stages each on I and Q</text>
+  <text x="648" y="474" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A1</text>
+  <text x="52" y="500" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">y += alpha·(x - y)    alpha = 1 - exp(-2·pi·fc / sample_rate)</text>
+  <text x="52" y="520" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">fc = bandwidth_hz / 2 = 75 Hz</text>
+  <text x="52" y="540" font-size="14" fill="#4b5563">state: i_lp[3], q_lp[3], alpha.  All three: -3 dB about 38 Hz either side.</text>
+  <line x1="300" y1="550" x2="300" y2="604" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <text x="312" y="574" font-size="14" fill="#4b5563">every samples_per_tick = sample_rate / 1000 samples</text>
+  <text x="312" y="592" font-size="14" fill="#4b5563">(8 at 8000 Hz): run one tick</text>
+  <text x="24" y="574" font-size="14" font-weight="bold" fill="#4b5563">EVERY TICK</text>
+  <text x="24" y="592" font-size="13" fill="#4b5563">1 tick = about 1 ms</text>
+  <rect x="40" y="604" width="620" height="106" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="634" font-weight="bold">Detect and smooth</text>
+  <text x="648" y="634" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A2</text>
+  <text x="52" y="660" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">mag = 2·sqrt(i² + q²)                  (the tone's amplitude)</text>
+  <text x="52" y="680" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">env += (mag - env) / tau    tau = clamp(0.12·dit_ms, 2, 12)</text>
+  <text x="52" y="700" font-size="14" fill="#4b5563">state: env</text>
+  <line x1="300" y1="710" x2="300" y2="736" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="736" width="620" height="126" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="766" font-weight="bold">Settle: SETTLE_TICKS = 100 ticks</text>
+  <text x="648" y="766" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A3</text>
+  <text x="52" y="792" font-size="14">At the start, after reset_levels (each send) and after a relearn: learn</text>
+  <text x="52" y="812" font-size="14">floor and dev only, hold peak = floor, make no key decision. Tick ends.</text>
+  <text x="52" y="832" font-size="14">After a relearn only env at or below its running mean teaches the floor.</text>
+  <text x="52" y="852" font-size="14" fill="#4b5563">state: ticks_seen, relearn_mean</text>
+  <line x1="300" y1="862" x2="300" y2="888" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="888" width="620" height="166" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="918" font-weight="bold">Key decision: hysteresis and squelch</text>
+  <text x="648" y="918" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A4</text>
+  <text x="52" y="944" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">gate = max(floor + 4·dev, min_level)</text>
+  <text x="52" y="964" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">span = max(peak - floor, 0)</text>
+  <text x="52" y="984" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">was off: on if       env &gt; max(floor + 0.5·span, gate)</text>
+  <text x="52" y="1004" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">was on:  stays on if env &gt; max(floor + 0.35·span,</text>
+  <text x="52" y="1024" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">                               floor + 0.6·(gate - floor))</text>
+  <text x="52" y="1044" font-size="14" fill="#4b5563">squelch_sigmas = 4, min_level = 0.001 (-60 dBFS).  state: raw_on</text>
+  <line x1="300" y1="1054" x2="300" y2="1080" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="1080" width="620" height="146" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="1110" font-weight="bold">Track the levels</text>
+  <text x="648" y="1110" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A5</text>
+  <text x="52" y="1136" font-size="14">Tone this tick: peak follows env at 0.2 if rising, 0.01 if falling.</text>
+  <text x="52" y="1156" font-size="14">Key up for over 0.6 dit: floor follows env at 0.02 if falling, 0.002</text>
+  <text x="52" y="1176" font-size="14">if rising; dev follows |env - floor| at 0.005, clipped at 4·dev +</text>
+  <text x="52" y="1196" font-size="14">min_level; peak relaxes towards the floor at 0.0005.</text>
+  <text x="52" y="1216" font-size="14" fill="#4b5563">state: floor, dev, peak</text>
+  <line x1="300" y1="1226" x2="300" y2="1252" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="1252" width="620" height="146" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="1282" font-weight="bold">Debounce into runs</text>
+  <text x="648" y="1282" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A6</text>
+  <text x="52" y="1308" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">glitch = clamp(0.3·dit_ms, 0.4·min_dit, 40)   min_dit = 34.3 ms</text>
+  <text x="52" y="1328" font-size="14">A flip must last glitch ticks; a shorter one joins the run around it.</text>
+  <text x="52" y="1348" font-size="14">Each finished run goes into the word as (is_mark, ms). A space of</text>
+  <text x="52" y="1368" font-size="14">2 dits or more also moves char_gap_ms 20% of the way to its length.</text>
+  <text x="52" y="1388" font-size="14" fill="#4b5563">state: on, run_ticks, candidate_ticks, word (512 runs max without std)</text>
+  <line x1="300" y1="1398" x2="300" y2="1424" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="1424" width="390" height="146" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="1454" font-weight="bold">Guards against a stale floor</text>
+  <text x="418" y="1454" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A7, A8</text>
+  <text x="52" y="1480" font-size="14">Texture: with the key down, edges of</text>
+  <text x="52" y="1500" font-size="14">glitch + 20 ticks left out, after 60 ticks:</text>
+  <text x="52" y="1520" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">std(mag) / mean(mag) &gt; NOISE_CV = 0.4</text>
+  <text x="52" y="1540" font-size="14">Stale: key not up for a real gap (2·min_dit</text>
+  <text x="52" y="1560" font-size="14">= 68.6 ms) for more than stale_ms = 1694 ms</text>
+  <rect x="480" y="1424" width="180" height="146" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="492" y="1454" font-weight="bold">Relearn levels</text>
+  <text x="648" y="1454" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A8</text>
+  <text x="492" y="1480" font-size="14">Drop runs since the</text>
+  <text x="492" y="1500" font-size="14">last real gap; decode</text>
+  <text x="492" y="1520" font-size="14">any left (WordGap);</text>
+  <text x="492" y="1540" font-size="14">floor = env; then</text>
+  <text x="492" y="1560" font-size="14">settle again (A3).</text>
+  <line x1="430" y1="1482" x2="480" y2="1482" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <text x="455" y="1474" text-anchor="middle" font-size="13" fill="#4b5563">trips</text>
+  <path d="M660,1544 H696 V776 H662" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <text x="689" y="1414" text-anchor="end" font-size="13" fill="#4b5563">settle again (A3)</text>
+  <line x1="240" y1="1570" x2="240" y2="1596" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <text x="252" y="1590" font-size="13" fill="#4b5563">neither trips</text>
+  <rect x="40" y="1596" width="390" height="166" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="1626" font-weight="bold">Word gap</text>
+  <text x="418" y="1626" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A9</text>
+  <text x="52" y="1652" font-size="14">Key up for word_gap_threshold or longer,</text>
+  <text x="52" y="1672" font-size="14">with runs in the word:</text>
+  <text x="52" y="1692" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">clamp(1.6·char_gap_ms, 5·dit, 6.5·dit)</text>
+  <text x="52" y="1712" font-size="14">400 ms at the start. Ends the word,</text>
+  <text x="52" y="1732" font-size="14">then emits WordGap.</text>
+  <text x="52" y="1752" font-size="14" fill="#4b5563">dit: with this word's marks once it has 3</text>
+  <rect x="480" y="1596" width="180" height="106" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="492" y="1626" font-weight="bold">flush()</text>
+  <text x="492" y="1652" font-size="14">or flush_with():</text>
+  <text x="492" y="1672" font-size="14">ends the word now</text>
+  <text x="492" y="1692" font-size="14">without a WordGap.</text>
+  <line x1="240" y1="1762" x2="240" y2="1806" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <path d="M570,1702 V1786 H360 V1806" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <text x="24" y="1786" font-size="14" font-weight="bold" fill="#4b5563">WHEN A WORD ENDS</text>
+  <rect x="40" y="1806" width="620" height="186" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="1836" font-weight="bold">Learn the speed: learn_speed, estimate_dit</text>
+  <text x="648" y="1836" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A10</text>
+  <text x="52" y="1862" font-size="14">Only words of 3 or more marks whose upper median is at least</text>
+  <text x="52" y="1882" font-size="14">0.6·min_dit (20.6 ms). Each mark joins a 24-mark history (MARK_HISTORY).</text>
+  <text x="52" y="1902" font-size="14">History longest / shortest &gt; 1.8: 2-means on ln(length), at most 8 rounds,</text>
+  <text x="52" y="1922" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">dit = (exp(S) + exp(L) / 3) / 2,  clamped to [34.3, 240] ms</text>
+  <text x="52" y="1942" font-size="14">where S and L are the mean ln(length) of the short and long clusters.</text>
+  <text x="52" y="1962" font-size="14">Otherwise: dit = 0.7·dit + 0.3·(newest mark, a third of it if &gt;= 2 dits).</text>
+  <text x="52" y="1982" font-size="14" fill="#4b5563">state: dit_ms (starts at 80 ms = 15 WPM), marks</text>
+  <line x1="300" y1="1992" x2="300" y2="2018" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="2018" width="620" height="86" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="2048" font-weight="bold">Classify and look up</text>
+  <text x="648" y="2048" font-size="14" font-weight="bold" fill="#4b5563" text-anchor="end">A11</text>
+  <text x="52" y="2074" font-size="14">Mark shorter than 2 dits is ".", otherwise "-".</text>
+  <text x="52" y="2094" font-size="14">A space of 2 dits or more ends the character: decode_pattern(pattern).</text>
+  <line x1="300" y1="2104" x2="300" y2="2130" stroke="#374151" stroke-width="2" marker-end="url(#d04p-arrow)"/>
+  <rect x="40" y="2130" width="620" height="106" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="52" y="2160" font-weight="bold">Events out, in order</text>
+  <text x="52" y="2186" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">Char(c)    Unknown(pattern)    WordGap</text>
+  <text x="52" y="2206" font-size="14">With std: push and flush return Vec&lt;DecodeEvent&gt;.</text>
+  <text x="52" y="2226" font-size="14">Without std: push_with and flush_with call on_event with each Event.</text>
+</svg>

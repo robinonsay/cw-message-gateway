@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1290" width="720" height="1290" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The session state machine: Idle, Pending and Result held, with every transition labelled by the decoded line, its guard and the reply keyed</title>
+  <defs>
+    <marker id="st03-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1290" fill="#ffffff"/>
+
+  <text x="24" y="36" font-size="20" font-weight="bold">Session state machine (session.rs)</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Arrow labels: decoded line, its guard / what the node does and keys.</text>
+  <text x="24" y="80" font-size="14" fill="#4b5563">"fresh" = sequence number above last_seq. "save" = write last_seq first.</text>
+
+  <!-- the save gate -->
+  <rect x="520" y="100" width="184" height="130" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="532" y="124" font-size="14" font-weight="bold">save (fresh lines)</text>
+  <text x="532" y="142" font-size="14">last_seq on disk before</text>
+  <text x="532" y="160" font-size="14">the reply or action.</text>
+  <text x="532" y="178" font-size="14">Write fails: silence,</text>
+  <text x="532" y="196" font-size="14">nothing done.</text>
+  <text x="532" y="214" font-size="14">Repeats never save.</text>
+
+  <!-- initial state -->
+  <circle cx="380" cy="110" r="8" fill="#374151"/>
+  <line x1="380" y1="118" x2="380" y2="138" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+
+  <!-- Idle -->
+  <rect x="260" y="140" width="240" height="80" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="173" text-anchor="middle" font-size="16" font-weight="bold">Idle</text>
+  <text x="380" y="198" text-anchor="middle" font-size="14" fill="#4b5563">nothing pending</text>
+
+  <!-- Pending -->
+  <rect x="260" y="440" width="240" height="112" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="478" text-anchor="middle" font-size="16" font-weight="bold">Pending</text>
+  <text x="380" y="504" text-anchor="middle" font-size="14" fill="#4b5563">read-back keyed,</text>
+  <text x="380" y="526" text-anchor="middle" font-size="14" fill="#4b5563">waiting for OK or NO</text>
+
+  <!-- Result held -->
+  <rect x="260" y="800" width="240" height="96" rx="16" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="380" y="832" text-anchor="middle" font-size="16" font-weight="bold">Result held</text>
+  <text x="380" y="856" text-anchor="middle" font-size="14" fill="#4b5563">result keyed, kept for</text>
+  <text x="380" y="876" text-anchor="middle" font-size="14" fill="#4b5563">a repeated OK</text>
+
+  <!-- A: Idle -> Pending (open) -->
+  <line x1="310" y1="220" x2="310" y2="436" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="320" y="300" font-size="14">open, line fresh,</text>
+  <text x="320" y="318" font-size="14">code ok</text>
+  <text x="320" y="336" font-size="14">/ save; key the</text>
+  <text x="320" y="354" font-size="14">read-back</text>
+
+  <!-- B: Pending -> Idle (NO, timeout) -->
+  <line x1="450" y1="440" x2="450" y2="224" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="462" y="276" font-size="14">NO, line fresh,</text>
+  <text x="462" y="294" font-size="14">code ok</text>
+  <text x="462" y="312" font-size="14">/ save; key R NO</text>
+  <text x="462" y="342" font-size="14">or pending_timeout</text>
+  <text x="462" y="360" font-size="14">(default 600 s) after</text>
+  <text x="462" y="378" font-size="14">the open was heard / dropped</text>
+
+  <!-- Pending self loop: three transitions -->
+  <path d="M500,460 C552,460 552,532 504,532" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="556" y="452" font-size="14" font-weight="bold">stays Pending:</text>
+  <text x="556" y="474" font-size="14">1. same open again</text>
+  <text x="572" y="492" font-size="14">/ same read-back;</text>
+  <text x="572" y="510" font-size="14">no save, timer</text>
+  <text x="572" y="528" font-size="14">not restarted</text>
+  <text x="556" y="554" font-size="14">2. open, line fresh,</text>
+  <text x="572" y="572" font-size="14">code ok / save;</text>
+  <text x="572" y="590" font-size="14">new read-back,</text>
+  <text x="572" y="608" font-size="14">replaces it</text>
+  <text x="556" y="634" font-size="14">3. other open, line</text>
+  <text x="572" y="652" font-size="14">at or below it</text>
+  <text x="572" y="670" font-size="14">/ silence</text>
+
+  <!-- C: Pending -> Result held (OK) -->
+  <line x1="310" y1="552" x2="310" y2="796" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="320" y="640" font-size="14">OK, line above</text>
+  <text x="320" y="658" font-size="14">the open's, fresh,</text>
+  <text x="320" y="676" font-size="14">code ok</text>
+  <text x="320" y="694" font-size="14">/ save; act once;</text>
+  <text x="320" y="712" font-size="14">key the result</text>
+
+  <!-- D: Result held -> Pending (open) -->
+  <line x1="450" y1="800" x2="450" y2="556" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="462" y="726" font-size="14">open, line fresh,</text>
+  <text x="462" y="744" font-size="14">code ok / save;</text>
+  <text x="462" y="762" font-size="14">key the read-back</text>
+  <text x="462" y="780" font-size="14">(ends the repeats)</text>
+
+  <!-- Result held self loop -->
+  <path d="M500,818 C548,818 548,878 504,878" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="556" y="814" font-size="14">same OK again</text>
+  <text x="556" y="832" font-size="14">(line and code),</text>
+  <text x="556" y="850" font-size="14">fewer than 3</text>
+  <text x="556" y="868" font-size="14">repeats, within</text>
+  <text x="556" y="886" font-size="14">again_window of</text>
+  <text x="556" y="904" font-size="14">the commit / same</text>
+  <text x="556" y="922" font-size="14">result, not acted</text>
+  <text x="556" y="940" font-size="14">on again</text>
+
+  <!-- E: Result held -> Idle (repeats over) -->
+  <polyline points="260,856 40,856 40,180 256,180" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#st03-arrow)"/>
+  <text x="52" y="560" font-size="14">same OK after</text>
+  <text x="52" y="578" font-size="14">again_window,</text>
+  <text x="52" y="596" font-size="14">or after 3</text>
+  <text x="52" y="614" font-size="14">repeats</text>
+  <text x="52" y="632" font-size="14">/ silence;</text>
+  <text x="52" y="650" font-size="14">result dropped</text>
+
+  <!-- rules for every state -->
+  <rect x="24" y="966" width="672" height="266" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="994" font-size="16" font-weight="bold">In every state (the state does not change)</text>
+  <text x="40" y="1020" font-size="14">• Unparsed, wrong code, line at or below last_seq (not an exact repeat), or</text>
+  <text x="54" y="1038" font-size="14">the save fails: silence, and the line is not used.</text>
+  <text x="40" y="1064" font-size="14">• AGN line code [letter], line fresh, code ok: save; key the last reply again, or</text>
+  <text x="54" y="1082" font-size="14">the chunk asked for. Silence if nothing was keyed yet, if that reply's</text>
+  <text x="54" y="1100" font-size="14">line was heard more than again_window ago, or it has no such chunk.</text>
+  <text x="54" y="1118" font-size="14">The line is used either way.</text>
+  <text x="40" y="1144" font-size="14">• The same NO or AGN again (line, code, letter): the same answer, free, up to 3</text>
+  <text x="54" y="1162" font-size="14">times, within again_window of the first, while its line is still last_seq.</text>
+  <text x="40" y="1188" font-size="14">• NO, line fresh, nothing pending: save (the line is used); silence.</text>
+  <text x="40" y="1214" font-size="14">• OK, nothing pending: silence; the line is not used.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1252" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/>
+  <text x="48" y="1264" font-size="14">state (host code)</text>
+  <rect x="200" y="1252" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/>
+  <text x="224" y="1264" font-size="14">gate</text>
+  <rect x="290" y="1252" width="18" height="14" fill="#ffffff" stroke="#374151"/>
+  <text x="314" y="1264" font-size="14">notes</text>
+</svg>

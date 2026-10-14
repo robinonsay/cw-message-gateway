@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1236" width="720" height="1236" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Every subsystem as a box, grouped by host code, firmware, hardware and process, each labelled with the handover page that documents it</title>
+  <rect x="0" y="0" width="720" height="1236" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Subsystem map: where to read next</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">One box per subsystem; the number on it is the handover page that covers it</text>
+  <text x="24" y="100" font-weight="bold">Host code<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563">the hfnode program, Rust, crates/</tspan></text>
+  <path d="M24,110 L696,110" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="124" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="38" y="149" font-weight="bold">Field protocol, codes</text>
+  <text x="38" y="170" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">protocol, auth, session.rs</text>
+  <rect x="300" y="138" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="320" y="160" text-anchor="middle" font-weight="bold">03</text>
+  <rect x="368" y="124" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="382" y="149" font-weight="bold">CW decoder and audio</text>
+  <text x="382" y="170" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">crates/cw, audio.rs</text>
+  <rect x="644" y="138" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="664" y="160" text-anchor="middle" font-weight="bold">04</text>
+  <rect x="24" y="196" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="38" y="221" font-weight="bold">Node loop and station</text>
+  <text x="38" y="242" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">node.rs, station.rs</text>
+  <rect x="300" y="210" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="320" y="232" text-anchor="middle" font-weight="bold">05</text>
+  <rect x="368" y="196" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="382" y="221" font-weight="bold">Gateways and messages</text>
+  <text x="382" y="242" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">gateway/, inbox.rs</text>
+  <rect x="644" y="210" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="664" y="232" text-anchor="middle" font-weight="bold">06</text>
+  <rect x="24" y="268" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="38" y="293" font-weight="bold">CI-V and the IC-7300</text>
+  <text x="38" y="314" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">crates/civ</text>
+  <rect x="300" y="282" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="320" y="304" text-anchor="middle" font-weight="bold">07</text>
+  <rect x="368" y="268" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="382" y="293" font-weight="bold">Keyer box, host side</text>
+  <text x="382" y="314" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode/src/keyer/</text>
+  <rect x="644" y="282" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="664" y="304" text-anchor="middle" font-weight="bold">09</text>
+  <rect x="24" y="340" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="38" y="365" font-weight="bold">Handheld rig (parked)</text>
+  <text x="38" y="386" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">handheld.rs, handheld/</text>
+  <rect x="300" y="354" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="320" y="376" text-anchor="middle" font-weight="bold">10</text>
+  <rect x="368" y="340" width="328" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="382" y="365" font-weight="bold">Config, CLI, deployment</text>
+  <text x="382" y="386" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">config.rs, main.rs, deploy/</text>
+  <rect x="644" y="354" width="40" height="32" rx="6" fill="#ffffff" stroke="#1e40af" stroke-width="2"/>
+  <text x="664" y="376" text-anchor="middle" font-weight="bold">15</text>
+  <text x="24" y="440" font-weight="bold">Firmware<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563">runs on a Pico 2 or in the radio</tspan></text>
+  <path d="M24,450 L696,450" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="464" width="328" height="60" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="38" y="489" font-weight="bold">Shared keyer rules</text>
+  <text x="38" y="510" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">crates/keyer-core</text>
+  <rect x="300" y="478" width="40" height="32" rx="6" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="320" y="500" text-anchor="middle" font-weight="bold">08</text>
+  <rect x="368" y="464" width="328" height="60" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="382" y="489" font-weight="bold">Keyer box firmware</text>
+  <text x="382" y="510" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/pico2-keyer</text>
+  <rect x="644" y="478" width="40" height="32" rx="6" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="664" y="500" text-anchor="middle" font-weight="bold">08</text>
+  <rect x="24" y="536" width="328" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="38" y="561" font-weight="bold">Decoder box, PR #30</text>
+  <text x="38" y="582" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decoder-core, pico2-decoder</text>
+  <rect x="300" y="550" width="40" height="32" rx="6" fill="#ffffff" stroke="#5b21b6" stroke-width="2"/>
+  <text x="320" y="572" text-anchor="middle" font-weight="bold">11</text>
+  <rect x="368" y="536" width="328" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="382" y="561" font-weight="bold">One-Pico image, PR #31</text>
+  <text x="382" y="582" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer/src/core1.rs</text>
+  <rect x="644" y="550" width="40" height="32" rx="6" fill="#ffffff" stroke="#5b21b6" stroke-width="2"/>
+  <text x="664" y="572" text-anchor="middle" font-weight="bold">11</text>
+  <rect x="24" y="608" width="328" height="60" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="38" y="633" font-weight="bold">UV-K1 firmware (parked)</text>
+  <text x="38" y="654" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/uv-k1</text>
+  <rect x="300" y="622" width="40" height="32" rx="6" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="320" y="644" text-anchor="middle" font-weight="bold">10</text>
+  <rect x="368" y="608" width="328" height="60" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="382" y="633" font-weight="bold">rustos runtime</text>
+  <text x="382" y="654" font-size="14" fill="#4b5563">own repository and handover set</text>
+  <text x="24" y="708" font-weight="bold">Hardware<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563">what the code drives</tspan></text>
+  <path d="M24,718 L696,718" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="732" width="328" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="38" y="757" font-weight="bold">ICOM IC-7300</text>
+  <text x="38" y="778" font-size="14" fill="#4b5563">HF radio, CI-V and audio on USB</text>
+  <rect x="300" y="746" width="40" height="32" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="2"/>
+  <text x="320" y="768" text-anchor="middle" font-weight="bold">07</text>
+  <rect x="368" y="732" width="328" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="382" y="757" font-weight="bold">Keyer box board and case</text>
+  <text x="382" y="778" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hardware/keyer-box</text>
+  <rect x="644" y="746" width="40" height="32" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="2"/>
+  <text x="664" y="768" text-anchor="middle" font-weight="bold">08</text>
+  <rect x="24" y="804" width="328" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="38" y="829" font-weight="bold">Any CW radio, sound card</text>
+  <text x="38" y="850" font-size="14" fill="#4b5563">key jack and headphone jack</text>
+  <rect x="300" y="818" width="40" height="32" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="2"/>
+  <text x="320" y="840" text-anchor="middle" font-weight="bold">09</text>
+  <rect x="368" y="804" width="328" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="382" y="829" font-weight="bold">Quansheng UV-K1</text>
+  <text x="382" y="850" font-size="14" fill="#4b5563">2 m handheld, K-plug</text>
+  <rect x="644" y="818" width="40" height="32" rx="6" fill="#ffffff" stroke="#92400e" stroke-width="2"/>
+  <text x="664" y="840" text-anchor="middle" font-weight="bold">10</text>
+  <text x="24" y="904" font-weight="bold">Process and reference<tspan dx="10" font-weight="normal" font-size="14" fill="#4b5563">how to build, test and stay safe</tspan></text>
+  <path d="M24,914 L696,914" fill="none" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="928" width="328" height="60" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="38" y="953" font-weight="bold">Workspace, build, CI</text>
+  <text x="38" y="974" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.github/workflows/ci.yml</text>
+  <rect x="300" y="942" width="40" height="32" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="320" y="964" text-anchor="middle" font-weight="bold">02</text>
+  <rect x="368" y="928" width="328" height="60" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="382" y="953" font-weight="bold">Testing</text>
+  <text x="382" y="974" font-size="14" fill="#4b5563">self-test, mocks, sweeps</text>
+  <rect x="644" y="942" width="40" height="32" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="664" y="964" text-anchor="middle" font-weight="bold">12</text>
+  <rect x="24" y="1000" width="328" height="60" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="38" y="1025" font-weight="bold">Safety rules</text>
+  <text x="38" y="1046" font-size="14" fill="#4b5563">every limit; never loosen</text>
+  <rect x="300" y="1014" width="40" height="32" rx="6" fill="#ffffff" stroke="#991b1b" stroke-width="2"/>
+  <text x="320" y="1036" text-anchor="middle" font-weight="bold">13</text>
+  <rect x="368" y="1000" width="328" height="60" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="382" y="1025" font-weight="bold">Audit, bench, flashing</text>
+  <text x="382" y="1046" font-size="14" fill="#4b5563">project files audit/, bench/</text>
+  <rect x="644" y="1014" width="40" height="32" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="664" y="1036" text-anchor="middle" font-weight="bold">14</text>
+  <rect x="24" y="1072" width="328" height="60" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="38" y="1097" font-weight="bold">Work left, known bugs</text>
+  <text x="38" y="1118" font-size="14" fill="#4b5563">what is not done yet</text>
+  <rect x="300" y="1086" width="40" height="32" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="320" y="1108" text-anchor="middle" font-weight="bold">16</text>
+  <rect x="368" y="1072" width="328" height="60" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="382" y="1097" font-weight="bold">Glossary</text>
+  <text x="382" y="1118" font-size="14" fill="#4b5563">radio and embedded terms</text>
+  <rect x="644" y="1086" width="40" height="32" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="664" y="1108" text-anchor="middle" font-weight="bold">17</text>
+  <rect x="24" y="1168" width="16" height="16" rx="3" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="48" y="1181" font-size="14">Host code</text>
+  <rect x="160" y="1168" width="16" height="16" rx="3" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="184" y="1181" font-size="14">Firmware</text>
+  <rect x="286" y="1168" width="16" height="16" rx="3" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="310" y="1181" font-size="14">Hardware</text>
+  <rect x="412" y="1168" width="16" height="16" rx="3" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="436" y="1181" font-size="14">Process or reference</text>
+  <rect x="24" y="1196" width="16" height="16" rx="3" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="48" y="1209" font-size="14">Safety</text>
+  <rect x="160" y="1196" width="16" height="16" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="184" y="1209" font-size="14">Open pull request, not on main</text>
+  <rect x="412" y="1190" width="34" height="26" rx="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="429" y="1208" text-anchor="middle" font-size="14" font-weight="bold">07</text>
+  <text x="456" y="1209" font-size="14">handover page number</text>
+</svg>
