@@ -1,5 +1,6 @@
 //! The keyer rig on the mock box and radio, under a station: for tests.
 
+use super::link::Transport;
 use super::mock::{Clock, MockBox, MockRadio, RadioSettings};
 use super::monitor::{self, Monitor};
 use super::rig::{KeyerRig, Settings};
@@ -9,10 +10,11 @@ use crate::station::{
     duty_for_power, po_limit, Station, StationConfig, DUTY_WINDOW, ID_INTERVAL, INHIBIT_FILE,
     MAX_TRANSMISSION,
 };
+use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Radio time runs this much faster than real time. Not faster: the box's link
 /// timeout (2 s) is then 0.4 s of real time, and a test machine busy with other
@@ -58,11 +60,50 @@ pub fn tx(segments: &[&str]) -> Transmission {
     }
 }
 
+/// Run with each line the node writes to the box, on the node's thread and before
+/// the box takes it: for a test that has something happen at a given point in what
+/// the node does, not at a time that a busy machine can leave far behind it.
+pub type BeforeLine = Arc<Mutex<Option<Box<dyn FnMut(&str) + Send>>>>;
+
+/// The box's transport, running [`BeforeLine`] first.
+struct Hooked {
+    inner: Box<dyn Transport>,
+    before: BeforeLine,
+}
+
+impl Transport for Hooked {
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        if let Some(f) = self
+            .before
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            f(line);
+        }
+        self.inner.write_line(line)
+    }
+
+    fn read_line(&mut self, deadline: Instant) -> io::Result<Option<String>> {
+        self.inner.read_line(deadline)
+    }
+
+    fn clear_input(&mut self) -> io::Result<()> {
+        self.inner.clear_input()
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
 pub struct Bench {
     pub station: Station<KeyerRig>,
     pub keyer_box: MockBox,
     pub radio: MockRadio,
     pub dir: tempfile::TempDir,
+    /// Nothing until a test sets it.
+    pub before_line: BeforeLine,
 }
 
 impl Bench {
@@ -138,8 +179,12 @@ pub fn bench_with(
     tweak(&mut rs);
     let radio = MockRadio::start(rs, keyer_box.clone(), monitor.clone(), None, None);
     before_open(&keyer_box);
+    let before_line = BeforeLine::default();
     let rig = KeyerRig::open(
-        keyer_box.transport(),
+        Box::new(Hooked {
+            inner: keyer_box.transport(),
+            before: before_line.clone(),
+        }),
         monitor,
         Settings {
             frequency_hz,
@@ -164,5 +209,6 @@ pub fn bench_with(
         keyer_box,
         radio,
         dir,
+        before_line,
     }
 }

@@ -29,6 +29,26 @@ fn run(name: &str) -> Outcome {
         "no pause meter:\n{}",
         out.render()
     );
+    // The operator records the silence before each over it took for cut short, and
+    // no other: a keyer run's disk excuse depends on them.
+    let cuts = &out.facts.cut_silences;
+    let noted = out
+        .transcript
+        .iter()
+        .filter(|l| l.contains("NODE  ") && l.contains("(cut short"))
+        .count();
+    assert!(
+        cuts.len() == noted && cuts.iter().all(|(from, at)| at > from),
+        "{cuts:?}:\n{}",
+        out.render()
+    );
+    if s.expect
+        .keyed
+        .iter()
+        .any(|o| matches!(o, selftest::Over::Cut(_)))
+    {
+        assert!(!cuts.is_empty(), "no cut recorded:\n{}", out.render());
+    }
     out
 }
 

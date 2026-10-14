@@ -9,7 +9,11 @@
 //! They run at most [`selftest::KEYER_MAX_SCALE`] times real time, or
 //! `HFNODE_E2E_SCALE` if lower. A run the machine paused the test in for longer
 //! than the scenario's timing allows is not judged and runs again (its `machine`
-//! check, `selftest::run`).
+//! check, `selftest::run`). So is one in which the disk meter timed a write held
+//! up for 5 s of radio time or more in the silence before every over the operator
+//! took for cut short (the node writes its duty file between two pieces), if the
+//! run failed only checks of how the exchange went and the node neither forced
+//! receive nor inhibited, nor was expected to.
 
 use hfnode::selftest;
 
@@ -27,6 +31,19 @@ fn run(name: &str) {
     assert!(
         out.checks.iter().any(|c| c.name == "machine"),
         "no pause meter:\n{}",
+        out.render()
+    );
+    // The operator records the silence before each over it took for cut short, and
+    // no other: the disk excuse depends on them.
+    let cuts = &out.facts.cut_silences;
+    let noted = out
+        .transcript
+        .iter()
+        .filter(|l| l.contains("NODE  ") && l.contains("(cut short"))
+        .count();
+    assert!(
+        cuts.len() == noted && cuts.iter().all(|(from, at)| at > from),
+        "{cuts:?}:\n{}",
         out.render()
     );
 }

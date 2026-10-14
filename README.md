@@ -203,9 +203,14 @@ sidetone included, goes to the node in real time; they run after the others, at 
 5x real time. A machine that stops the test process for 1 s of radio time or more
 (0.2 s at 5x; a busy CI runner does) breaks their timing as a host stopping for that
 long would on the air, so such a run is not judged: it runs again, at most twice,
-and the result lists it. The IC-7300's scenarios do the same for a stop longer than
-the slack their safety check leaves the station to unkey a radio left on transmit
-(0.5 s of radio time and 20 ms: 45 ms at 20x):
+and the result lists it. So is a keyer run in which every over the operator took
+for cut short came while the disk held up a write for 5 s of radio time or more
+(1 s at 5x) in the silence before it (the node writes its duty file between two
+pieces), if the run failed nothing but how the exchange went and the node neither
+forced receive nor inhibited, nor was expected to. The IC-7300's
+scenarios do the same for a stop longer than the slack their safety check leaves
+the station to unkey a radio left on transmit (0.5 s of radio time and 20 ms: 45 ms
+at 20x):
 
 ```sh
 hfnode selftest                          # all scenarios, PASS/FAIL table; exit code 1 on failure

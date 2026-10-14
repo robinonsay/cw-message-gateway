@@ -422,7 +422,9 @@ pub struct Outcome {
     /// What happened, beyond the checks.
     pub facts: Facts,
     /// Earlier runs of the scenario that were not judged, and why: the machine
-    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]).
+    /// paused for longer than its timing allows (see [`any_radio::PAUSE_LIMIT`]),
+    /// or, in a keyer run, held up a write in the silence before an over the
+    /// operator took for cut short ([`any_radio::disk_write_check`]).
     pub not_judged: Vec<String>,
 }
 
@@ -448,6 +450,11 @@ pub struct Facts {
     pub extra_transmissions: u32,
     /// Why the script stopped early, if it did.
     pub script_failures: Vec<String>,
+    /// The node's overs the operator took for cut short (they stopped for
+    /// [`CUT_AFTER`] before their `DE <call> K`), each as the silence before it:
+    /// when the node was last heard and when the operator gave up, in radio time
+    /// on the radio's clock (the keyer box's, in a keyer scenario).
+    pub cut_silences: Vec<(f64, f64)>,
 }
 
 impl Outcome {
@@ -471,7 +478,7 @@ impl Outcome {
         if !self.not_judged.is_empty() {
             let _ = write!(
                 s,
-                " (after {} run(s) not judged: the machine paused)",
+                " (after {} run(s) not judged: the machine held the test up)",
                 self.not_judged.len()
             );
         }
@@ -793,6 +800,15 @@ impl AirRadio {
         }
     }
 
+    /// Radio time on the radio's clock (the keyer box's, for any radio), in
+    /// seconds: what the disk meter times its writes by.
+    fn radio_secs(&self) -> f64 {
+        match self {
+            Self::Ic7300(r) => r.now().as_secs_f64(),
+            Self::Keyer(k) => k.now(),
+        }
+    }
+
     fn tunes(&self) -> u32 {
         match self {
             Self::Ic7300(r) => r.tunes(),
@@ -846,6 +862,8 @@ struct Air {
     restarts: u32,
     /// Transmissions in exchanges beyond the first open and the first `OK`.
     extra: u32,
+    /// The node's overs taken for cut short, as [`Facts::cut_silences`].
+    cut_silences: Vec<(f64, f64)>,
     /// The node tunes when it starts listening (not if it starts with transmitting
     /// inhibited): the operator waits for that before calling.
     tune_at_start: bool,
@@ -1065,11 +1083,14 @@ impl Air {
     fn listen(&mut self) -> Result<Heard, String> {
         let mut since = self.secs();
         let mut last_sound: Option<f32> = None;
+        // When the node was last heard, on the radio's clock.
+        let mut last_sound_radio = 0.0;
         loop {
             self.tick()?;
             let now = self.secs();
             if self.radio.audible() {
                 last_sound = Some(now);
+                last_sound_radio = self.radio.radio_secs();
                 continue;
             }
             let pieces: Vec<_> = self
@@ -1106,6 +1127,8 @@ impl Air {
                     self.note(format!("NODE  {text}"));
                     return Ok(Heard::Over(text));
                 }
+                self.cut_silences
+                    .push((last_sound_radio, self.radio.radio_secs()));
                 if text.is_empty() {
                     self.note("NODE  (cut short before the first character)");
                 } else {
@@ -1565,13 +1588,18 @@ fn check(name: &'static str, pass: bool, detail: impl Into<String>) -> Check {
 type Finished<R> = (anyhow::Result<()>, Station<R>, Session, FakeServices);
 
 /// Times a scenario runs again after a run its `machine` check failed (the machine
-/// paused the test for longer than the scenario's timing allows). A failure of
-/// that check on the last of them stands: the machine could not run the scenario.
+/// paused the test for longer than the scenario's timing allows, or in a keyer run
+/// held up a write long enough to cut the node's over short). A failure of that
+/// check on the last of them stands: the machine could not run the scenario.
 const NOT_JUDGED_RERUNS: usize = 2;
 
 /// Run one scenario at `scale` times real time. A run the machine paused in for
 /// longer than the scenario's timing allows is not judged, pass or fail: it runs
-/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it.
+/// again, up to [`NOT_JUDGED_RERUNS`] times, and the outcome lists it. So is a
+/// keyer run in which the disk held up a write long enough to explain every over
+/// the operator took for cut short, if the run failed only checks of how the
+/// exchange went and the node neither forced receive nor inhibited, nor was
+/// expected to ([`any_radio::disk_write_check`]).
 pub fn run(s: &Scenario, scale: f32) -> Outcome {
     judged(|| run_once(s, scale))
 }
@@ -1904,6 +1932,7 @@ fn air(s: &Scenario, radio: AirRadio, tx: Option<BlockSender>, book: CodeBook, s
         wrong_read_backs: 0,
         restarts: 0,
         extra: 0,
+        cut_silences: Vec::new(),
         tune_at_start,
         first_try: false,
         tunes_noted: 0,
@@ -1929,6 +1958,7 @@ fn operate<R: Rig + 'static>(
         restarts: air.restarts,
         extra_transmissions: air.extra,
         script_failures: failures.clone(),
+        cut_silences: std::mem::take(&mut air.cut_silences),
         ..Facts::default()
     };
     out.checks.push(check(
@@ -5266,6 +5296,295 @@ mod tests {
         assert!(!any_radio::machine_check(ms(350), 10.0, 5.0).pass);
         assert!(any_radio::machine_check(ms(999), 10.0, 1.0).pass);
         assert!(!any_radio::machine_check(ms(1001), 10.0, 1.0).pass);
+    }
+
+    #[test]
+    fn a_keyer_run_cut_short_while_the_disk_held_a_write_up_is_run_again() {
+        use any_radio::{DiskWrite, DiskWrites};
+        let ms = Duration::from_millis;
+        let expect = |name: &str| scenario(name).unwrap().expect;
+        let (rx_long, stuck_key) = (expect("keyer-rx-long"), expect("keyer-stuck-key"));
+        // A write the disk held up for `took` (real time) at 5x, from radio time
+        // `from`.
+        let write = |took: Duration, from: f64| DiskWrite {
+            took,
+            from,
+            to: from + took.as_secs_f64() * 5.0,
+        };
+        // A keyer run at 5x with these checks besides `machine`, whose process
+        // paused for `pause` at most, in which the operator took overs for cut
+        // short after these silences (radio time), and the disk meter timed these
+        // slow writes; `node` is what the scenario expects, the STOPs the node sent
+        // and whether it ended inhibited.
+        let run_full = |checks: &[(&'static str, bool)],
+                        cuts: &[(f64, f64)],
+                        slow: &[DiskWrite],
+                        node: (&Expect, usize, bool),
+                        pause: Duration| {
+            let mut out = outcome_with(checks);
+            out.facts.cut_silences = cuts.to_vec();
+            out.checks.push(any_radio::machine_check(pause, 160.0, 5.0));
+            let writes = DiskWrites {
+                longest: slow
+                    .iter()
+                    .copied()
+                    .max_by_key(|w| w.took)
+                    .or(Some(write(ms(5), 50.0))),
+                slow: slow.to_vec(),
+            };
+            let (e, stops, inhibited) = node;
+            any_radio::disk_write_check(&mut out, &writes, 5.0, e, stops, inhibited);
+            out
+        };
+        let run = |checks: &[(&'static str, bool)], cuts: &[(f64, f64)], slow: &[DiskWrite]| {
+            run_full(checks, cuts, slow, (&rx_long, 0, false), ms(10))
+        };
+        let machine = |out: &Outcome| {
+            out.checks
+                .iter()
+                .find(|c| c.name == "machine")
+                .cloned()
+                .unwrap()
+        };
+        let cut_short = [("script", false), ("keyed", true)];
+        let passed = [("script", true), ("keyed", true)];
+        // The node last heard at 100 s, the operator giving up at 108 s: what
+        // failed keyer-rx-long on a Windows runner, a write held up for a second
+        // or more between two pieces, from 101 s to 107 s.
+        let silence = [(100.0, 108.05)];
+        let held = [write(ms(1200), 101.0)];
+        let m = machine(&run(&cut_short, &silence, &held));
+        assert!(
+            !m.pass && m.detail.contains("says nothing about the node"),
+            "{}",
+            m.detail
+        );
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            match runs {
+                1 => run(&cut_short, &silence, &held),
+                _ => run(&passed, &[], &[]),
+            }
+        });
+        assert_eq!(runs, 2);
+        assert!(out.passed(), "{}", out.render());
+        assert!(
+            out.not_judged[0].contains("failed script"),
+            "{:?}",
+            out.not_judged
+        );
+        // A write under way since before the node fell silent; one that began
+        // just in time to hold up the node's duty-file write (within the node's
+        // 3 s between two pieces and a tick of the meter's, 0.5 s); one that ended
+        // just late enough that the node could not then key in time.
+        for slow in [
+            write(ms(3000), 99.0),
+            write(ms(1200), 103.4),
+            write(ms(1200), 99.1),
+        ] {
+            assert!(
+                !machine(&run(&cut_short, &silence, &[slow])).pass,
+                "{slow:?}"
+            );
+        }
+        // Two overs cut short, each with a write as long in the silence before it.
+        let later = (120.0, 128.05);
+        let both = [held[0], write(ms(1200), 121.0)];
+        let m = machine(&run(&cut_short, &[silence[0], later], &both));
+        assert!(!m.pass && m.detail.contains("1 more over"), "{}", m.detail);
+        // But one the node fell silent before with no write held up, first or
+        // later, stands: the node may have stopped on its own.
+        for cuts in [[(20.0, 28.1), silence[0]], [silence[0], later]] {
+            let m = machine(&run(&cut_short, &cuts, &held));
+            assert!(
+                m.pass && m.detail.contains("no write held up that long"),
+                "{cuts:?}: {}",
+                m.detail
+            );
+        }
+
+        // A write held up for less than 1 s (5 s of radio time: the operator's 8 s
+        // less the node's 3 s between two pieces) cannot stretch the gap past the
+        // operator's patience, so the failure stands, though it fell where a longer
+        // write would have been excused.
+        assert!(!machine(&run(&cut_short, &silence, &[write(ms(1000), 101.0)])).pass);
+        for (took, from) in [(ms(999), 101.0), (ms(950), 101.0), (ms(500), 103.0)] {
+            let w = write(took, from);
+            assert!(any_radio::cut_short_by(&w, silence[0], 5.0), "{w:?}");
+            let m = machine(&run(&cut_short, &silence, &[w]));
+            assert!(m.pass, "{took:?}: {}", m.detail);
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                run(&cut_short, &silence, &[w])
+            });
+            assert_eq!(runs, 1, "{took:?}");
+            assert!(!out.passed(), "{took:?}");
+        }
+
+        // A write that was not under way in the silence before the cut, began after
+        // the node would have written its duty file, or ended early enough for the
+        // node to key its next piece in time cannot have made the operator give up:
+        // the failure stands, and so it does with no write timed.
+        for slow in [
+            write(ms(1200), 0.0),
+            write(ms(1200), 90.0),
+            write(ms(1200), 99.0),
+            write(ms(1200), 103.6),
+            write(ms(3000), 106.0),
+            write(ms(1200), 108.1),
+            write(ms(1200), 130.0),
+        ] {
+            let m = machine(&run(&cut_short, &silence, &[slow]));
+            assert!(
+                m.pass && m.detail.contains("no write held up that long"),
+                "{slow:?}: {}",
+                m.detail
+            );
+        }
+        let mut out = outcome_with(&cut_short);
+        out.facts.cut_silences = silence.to_vec();
+        out.checks
+            .push(any_radio::machine_check(ms(10), 160.0, 5.0));
+        any_radio::disk_write_check(&mut out, &DiskWrites::default(), 5.0, &rx_long, 0, false);
+        let m = machine(&out);
+        assert!(
+            m.pass && m.detail.contains("no write to the disk timed"),
+            "{}",
+            m.detail
+        );
+
+        // However slow the disk, a failure stands if no over was cut short, or if a
+        // check of the node's own conduct failed too.
+        for (checks, cuts) in [
+            (&cut_short[..], &[][..]),
+            (
+                &[("script", false), ("forced receive", false)][..],
+                &silence[..],
+            ),
+            (&[("script", true), ("safety", false)][..], &silence[..]),
+            (&[("script", false), ("ended", false)][..], &silence[..]),
+            (&[("script", false), ("alert", false)][..], &silence[..]),
+            (
+                &[("script", false), ("station ID", false)][..],
+                &silence[..],
+            ),
+            (
+                &[("script", false), ("self-decode", false)][..],
+                &silence[..],
+            ),
+        ] {
+            let m = machine(&run(checks, cuts, &held));
+            assert!(m.pass, "{checks:?}: {}", m.detail);
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                run(checks, cuts, &held)
+            });
+            assert_eq!(runs, 1, "{checks:?}");
+            assert!(!out.passed(), "{checks:?}");
+        }
+
+        // In a scenario that expects the node to force receive or inhibit (a stuck
+        // key: the node must key nothing after it inhibits), or a run in which it
+        // did, only what the node does counts: no slow write excuses the run.
+        let ht_stuck_ptt = expect("keyer-ht-stuck-ptt");
+        let cable_out = expect("keyer-cable-out");
+        let inhibits = Expect {
+            inhibited: true,
+            ..rx_long.clone()
+        };
+        for node in [
+            (&stuck_key, 0, false),
+            (&ht_stuck_ptt, 0, false),
+            (&cable_out, 0, false),
+            (&inhibits, 0, false),
+            (&rx_long, 1, false),
+            (&rx_long, 0, true),
+        ] {
+            let m = machine(&run_full(&cut_short, &silence, &held, node, ms(10)));
+            assert!(
+                m.pass && m.detail.contains("expects a fault or the node met one"),
+                "{}",
+                m.detail
+            );
+            let mut runs = 0;
+            let out = judged(|| {
+                runs += 1;
+                run_full(&cut_short, &silence, &held, node, ms(10))
+            });
+            assert_eq!(runs, 1);
+            assert!(!out.passed());
+        }
+
+        // A run that passed every other check stands, however slow the disk.
+        let m = machine(&run(&passed, &silence, &held));
+        assert!(
+            m.pass && m.detail.contains("every other check"),
+            "{}",
+            m.detail
+        );
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            run(&passed, &silence, &held)
+        });
+        assert_eq!(runs, 1);
+        assert!(out.passed());
+
+        // A run the machine paused in is not judged whatever the disk did: the
+        // disk adds its measurement and never makes the check pass.
+        for slow in [&[][..], &held[..], &[write(ms(1200), 0.0)][..]] {
+            for checks in [&cut_short[..], &[("script", true), ("safety", false)][..]] {
+                let m = machine(&run_full(
+                    checks,
+                    &silence,
+                    slow,
+                    (&rx_long, 0, false),
+                    ms(300),
+                ));
+                assert!(
+                    !m.pass && m.detail.contains("longest write to the disk"),
+                    "{checks:?} {slow:?}: {}",
+                    m.detail
+                );
+            }
+        }
+
+        // A disk that keeps holding writes up fails the scenario: two runs not
+        // judged at most, and the third stands.
+        let mut runs = 0;
+        let out = judged(|| {
+            runs += 1;
+            run(&cut_short, &silence, &held)
+        });
+        assert_eq!(runs, 3);
+        assert_eq!(out.not_judged.len(), 2);
+        assert!(!out.passed());
+    }
+
+    #[test]
+    fn the_disk_meter_times_each_write_inside_the_radio_time_it_records() {
+        let dir = Scratch::new("disk-meter").unwrap();
+        // A machine busy enough to hold the meter's thread up for a whole try times
+        // nothing: try again.
+        let (writes, end) = (0..20)
+            .find_map(|_| {
+                let clock = crate::keyer::mock::Clock::new(5.0);
+                let meter = any_radio::DiskMeter::start(&dir.0, clock);
+                thread::sleep(Duration::from_millis(350));
+                let writes = meter.writes();
+                let end = clock.secs();
+                writes.longest.is_some().then_some((writes, end))
+            })
+            .expect("no write timed in 20 tries");
+        for w in writes.slow.iter().chain(writes.longest.iter()) {
+            // The first write a tick (100 ms, 0.5 s of radio time) after the meter
+            // starts, each timed inside the radio time it records.
+            assert!(w.from >= 0.5 && w.from <= w.to && w.to <= end, "{w:?}");
+            assert!(w.took.as_secs_f64() * 5.0 <= w.to - w.from + 1e-9, "{w:?}");
+        }
     }
 
     #[test]

@@ -29,6 +29,36 @@
 //! and the scenario fails through no fault of the node. Each run measures the
 //! longest pause (its `machine` check); a run with a pause of [`PAUSE_LIMIT`] of
 //! radio time or more is not judged, and [`super::run`] runs it again.
+//!
+//! **A busy disk.** The node writes its state (the duty file after every piece it
+//! keys) on the thread that keys, so a write the machine's disk holds up holds up
+//! the node's next piece as long, while the rest of the process runs on and the
+//! pause meter sees nothing. The node is silent for up to [`PIECE_GAP`] between two
+//! pieces anyway, so at 5x a write held up for a second (5 s of radio time) or more
+//! can stretch that past [`CUT_AFTER`]: the field operator takes the over for cut
+//! short and answers it while the node is still sending. Two failures of
+//! `keyer-rx-long` on a Windows runner fit this. Freezing the disk part-way through
+//! its readout does it too: for 6 s, the operator hears only the readout's end; for
+//! 3 s, the node keys over the operator's answer and forces receive.
+//!
+//! Each run times a small write to its scratch directory every [`DISK_TICK`]
+//! ([`DiskMeter`]) and keeps the slow ones with when they were under way, and the
+//! operator records when the node fell silent before each over it took for cut
+//! short. The disk makes a run not judged, as a pause does, only if:
+//! - every over the operator took for cut short came while a write was held up for
+//!   [`DISK_LIMIT`] of radio time or more, one that began by the time the node
+//!   would have written its duty file and ended late enough that a node held up
+//!   behind it may not have keyed again in time ([`cut_short_by`]);
+//! - the run failed only checks of how the exchange went ([`DISK_EXCUSES`]);
+//! - the node neither forced receive nor inhibited, nor was expected to
+//!   ([`disk_fault`]).
+//!
+//! The disk excuses no other run, passed or failed: a slow write cannot make a run
+//! pass, and a slow disk is just where a node that writes at the wrong moment fails
+//! a safety check, forces receive, alerts, hangs or keys after an inhibit (the
+//! station once timed its duty-file write as keying, which locked it out on a
+//! Windows runner only), so a slow disk never excuses those failures. (A pause of
+//! [`PAUSE_LIMIT`] or more still makes any run not judged, as above.)
 
 use super::*;
 use crate::keyer::bench::{monitor_settings, rig_settings};
@@ -159,6 +189,249 @@ impl Drop for PauseMeter {
     }
 }
 
+/// How often the disk meter writes (real time). A write to a disk nothing holds up
+/// takes a few milliseconds.
+const DISK_TICK: Duration = Duration::from_millis(100);
+
+/// The longest the node is silent between two pieces of an over with nothing
+/// holding it up (radio time): it waits to hear the piece end in the sidetone,
+/// judges it, writes its duty file and checks the band before it keys the next.
+/// At most 2.7 s in `keyer-rx-long` on an idle machine.
+const PIECE_GAP: f32 = 3.0;
+
+/// The shortest hold-up of the node's duty-file write (radio time) that stretches
+/// the gap between two pieces past the operator's patience ([`CUT_AFTER`]): 5 s,
+/// 1 s of real time at 5x.
+const DISK_LIMIT: f32 = CUT_AFTER - PIECE_GAP;
+
+/// The disk meter keeps every write held up for this long or more (real time),
+/// with when it was under way.
+const DISK_KEEP: Duration = Duration::from_millis(50);
+
+/// A write the disk meter timed: how long it took (real time), and the radio time
+/// it started and ended.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DiskWrite {
+    pub took: Duration,
+    pub from: f64,
+    pub to: f64,
+}
+
+/// What the disk meter measured: its longest write, and every write held up for
+/// [`DISK_KEEP`] or more.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DiskWrites {
+    pub longest: Option<DiskWrite>,
+    pub slow: Vec<DiskWrite>,
+}
+
+/// Measures how long the machine's disk holds up a small write: a thread that, every
+/// [`DISK_TICK`], writes a file in the scenario's scratch directory (where the
+/// node's state directory is) through a file beside it, as the node writes its duty
+/// file. Nothing the node does holds it up; a disk the machine holds up for a while
+/// holds up its next write as long, less a tick and a little more at most. A
+/// hold-up of the node's own file alone (a virus scanner reading it) does not reach
+/// it, and the run then stands.
+pub(super) struct DiskMeter {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<DiskWrites>>,
+}
+
+impl DiskMeter {
+    pub(super) fn start(dir: &Path, clock: Clock) -> Self {
+        let (file, tmp) = (dir.join("disk-meter"), dir.join("disk-meter.tmp"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                let mut writes = DiskWrites::default();
+                loop {
+                    thread::sleep(DISK_TICK);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let (from, t0) = (clock.secs(), Instant::now());
+                    // Timed whether or not it worked: a write that fails late was
+                    // held up as long.
+                    let _ = std::fs::write(&tmp, format!("{}\n", clock.ms()))
+                        .and_then(|()| std::fs::rename(&tmp, &file));
+                    let w = DiskWrite {
+                        took: t0.elapsed(),
+                        from,
+                        to: clock.secs(),
+                    };
+                    if w.took >= DISK_KEEP {
+                        writes.slow.push(w);
+                    }
+                    if writes.longest.is_none_or(|l| w.took > l.took) {
+                        writes.longest = Some(w);
+                    }
+                }
+                writes
+            })
+        };
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stop measuring: what was measured.
+    pub(super) fn writes(mut self) -> DiskWrites {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for DiskMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The checks a write held up between two pieces can fail with nothing wrong in the
+/// node: the operator takes the over for cut short and answers it, so the exchange
+/// goes off its script, and what the node keys, reads out and decodes is not what
+/// the script expects. A failure of any other check stands, however slow the disk.
+const DISK_EXCUSES: &[&str] = &["script", "keyed", "gateway", "last_seq", "heard"];
+
+/// Whether write `w` can have made the operator take an over for cut short after
+/// the node fell `silent` (radio time: from when the node fell silent to when the
+/// operator gave up), at `scale` times real time. The node writes its duty file
+/// within a normal gap between pieces ([`PIECE_GAP`]) of falling silent, and a
+/// disk held up from then holds up the meter's next write too, which starts within
+/// a [`DISK_TICK`]. So the write overlapped the silence, it started no later than
+/// that, and it ended no earlier than [`PIECE_GAP`] before the operator gave up,
+/// late enough that a node held up behind it may not have keyed again in time.
+pub(super) fn cut_short_by(w: &DiskWrite, silent: (f64, f64), scale: f32) -> bool {
+    let (from, at) = silent;
+    let gap = f64::from(PIECE_GAP);
+    let tick = DISK_TICK.as_secs_f64() * f64::from(scale);
+    w.from < at && w.to > from && w.from <= from + gap + tick && w.to >= at - gap
+}
+
+/// Whether a keyer run met a fault or expected one, after which no slow write
+/// excuses it: the node forced receive (sent `stops` STOPs) or inhibited, or the
+/// scenario expects it to. Keying after an inhibit shows only in what the node
+/// keyed, a check a slow disk otherwise excuses.
+fn disk_fault(e: &Expect, stops: usize, inhibited: bool) -> bool {
+    e.forced_receive || e.inhibited || stops > 0 || inhibited
+}
+
+/// Add a keyer run's disk writes ([`DiskMeter`]) to its `machine` check. The check
+/// fails, so that [`super::run`] runs the scenario again, only if every over the
+/// operator took for cut short came while a write was held up for [`DISK_LIMIT`]
+/// or more ([`cut_short_by`]), every other check that failed is one of
+/// [`DISK_EXCUSES`], and there was no fault ([`disk_fault`]: the scenario expects
+/// `e`, and the node sent `stops` STOPs and ended `inhibited` or not).
+pub(super) fn disk_write_check(
+    out: &mut Outcome,
+    writes: &DiskWrites,
+    scale: f32,
+    e: &Expect,
+    stops: usize,
+    inhibited: bool,
+) {
+    let fault = disk_fault(e, stops, inhibited);
+    let limit = Duration::from_secs_f32(DISK_LIMIT / scale);
+    let failed: Vec<&str> = out
+        .checks
+        .iter()
+        .filter(|c| !c.pass && c.name != "machine")
+        .map(|c| c.name)
+        .collect();
+    let never: Vec<&str> = failed
+        .iter()
+        .copied()
+        .filter(|n| !DISK_EXCUSES.contains(n))
+        .collect();
+    // Each over the operator took for cut short, with a write held up that long in
+    // the silence before it, if there was one.
+    let cuts: Vec<((f64, f64), Option<&DiskWrite>)> = out
+        .facts
+        .cut_silences
+        .iter()
+        .map(|&cut| {
+            let w = writes
+                .slow
+                .iter()
+                .find(|w| w.took >= limit && cut_short_by(w, cut, scale));
+            (cut, w)
+        })
+        .collect();
+    let unexplained = cuts.iter().find(|(_, w)| w.is_none()).map(|&(cut, _)| cut);
+    let Some(c) = out.checks.iter_mut().find(|c| c.name == "machine") else {
+        return;
+    };
+    let Some(longest) = writes.longest else {
+        c.detail = format!("{}; no write to the disk timed", c.detail);
+        return;
+    };
+    let radio = |w: &DiskWrite| w.took.mul_f32(scale).as_secs_f32();
+    let measured = format!(
+        "longest write to the disk {:.2} s ({:.1} s radio time, at {:.0} s); limit {:.2} s",
+        longest.took.as_secs_f32(),
+        radio(&longest),
+        longest.to,
+        limit.as_secs_f32()
+    );
+    let stands = if failed.is_empty() {
+        Some("every other check passed, which a slow disk cannot cause".to_string())
+    } else if fault {
+        Some(
+            "the scenario expects a fault or the node met one (it forced receive or \
+             inhibited), after which a slow disk excuses nothing"
+                .into(),
+        )
+    } else if !never.is_empty() {
+        Some(format!(
+            "the run failed {}, which a slow disk does not excuse",
+            never.join(", ")
+        ))
+    } else if cuts.is_empty() {
+        Some("the operator took no over for cut short, the only way a slow disk fails a run".into())
+    } else if let Some((from, at)) = unexplained {
+        Some(format!(
+            "the node fell silent at {from:.0} s and the operator took the over for cut short \
+             at {at:.0} s with no write held up that long in the silence before it, and a \
+             slow disk excuses a run only if it explains every over cut short"
+        ))
+    } else {
+        None
+    };
+    c.detail = if longest.took < limit || !c.pass {
+        format!("{}; {measured}", c.detail)
+    } else if let Some(why) = stands {
+        format!("{}; {measured}: {why}", c.detail)
+    } else {
+        let ((from, at), w) = cuts[0];
+        let w = w.expect("every cut explained");
+        c.pass = false;
+        format!(
+            "{}; {measured}: the node fell silent at {from:.0} s and the operator took the \
+             over for cut short at {at:.0} s, while the disk held up a write for {:.2} s \
+             ({:.1} s radio time, from {:.0} s to {:.0} s), longer than the scenario's \
+             timing allows at {scale}x (the node writes its state on the thread that keys){}, \
+             so the run says nothing about the node",
+            c.detail,
+            w.took.as_secs_f32(),
+            radio(w),
+            w.from,
+            w.to,
+            match cuts.len() {
+                1 => String::new(),
+                n => format!(", and so before {} more over(s) cut short", n - 1),
+            }
+        )
+    };
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -212,7 +485,7 @@ pub(super) struct KeyerAir {
 }
 
 impl KeyerAir {
-    fn now(&self) -> f64 {
+    pub(super) fn now(&self) -> f64 {
         self.keyer_box.clock.secs()
     }
 
@@ -365,6 +638,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let book = node::load_codebook(&cfg)?;
     let clock = Clock::new(scale);
     let pauses = PauseMeter::start(clock);
+    let disk = DiskMeter::start(&dir.0, clock);
     let keyer_box = MockBox::new(clock);
     let monitor = Arc::new(Mutex::new(Monitor::starting_at(
         monitor_settings(&cfg, scale),
@@ -447,10 +721,14 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
     let ran = operate(s, &mut air, &done, out);
     out.checks.push(pauses.check(scale));
     let Some((station, session, svc)) = ran else {
+        // The node did not end (`ended` failed, which no slow write excuses), so
+        // what it met is not known.
+        disk_write_check(out, &disk.writes(), scale, &s.expect, 0, false);
         return Ok(());
     };
     let inhibited = station.tx_inhibited();
-    // How the node left the box, before dropping the station stops it.
+    // How the node left the box, before dropping the station stops it, and before
+    // waiting for the disk meter, which can take a tick and a slow write.
     let (left_keying, stops) = {
         let b = keyer_box.now();
         let stops = b.lines[first_line..]
@@ -459,6 +737,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
             .count();
         (b.key_down() || b.running(), stops)
     };
+    let writes = disk.writes();
     drop(station);
     let notices: Vec<_> = alerts.try_iter().collect();
     let AirRadio::Keyer(k) = &air.radio else {
@@ -476,6 +755,7 @@ pub(super) fn run_inner(s: &Scenario, scale: f32, out: &mut Outcome) -> Result<(
         .push(box_safety(&cfg, e, &keyer_box, left_keying, inhibited));
     out.checks.push(alert_check(e, &s.node, &notices));
     reception_checks(&cfg, e, out);
+    disk_write_check(out, &writes, scale, e, stops, inhibited);
     // On a failure, what the station recorded (why a transmission failed, among
     // others): a test keeps no log of the node's.
     if !out.passed() {

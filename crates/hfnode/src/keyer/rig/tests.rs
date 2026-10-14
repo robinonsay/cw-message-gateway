@@ -1,7 +1,8 @@
 //! The keyer rig with the mock box and radio, under the station's safety layer.
 
 use super::*;
-use crate::keyer::mock::{MockBox, RadioSettings};
+use crate::keyer::mock::{MockBox, PttLine, RadioSettings};
+use crate::keyer::monitor::AUDIO_FRESH;
 use crate::keyer::testbench::{bench, bench_at, bench_with, handheld, radio_secs, tx, SCALE};
 use crate::keyer::Output;
 use crate::station::TxError;
@@ -387,14 +388,67 @@ fn a_run_the_node_stops_is_not_taken_for_a_stuck_key() {
     }
 }
 
+/// Whether the node has measured the band's level, without measuring it: a look
+/// later than its audio counts as fresh measures nothing.
+fn band_heard(m: &Mutex<Monitor>) -> bool {
+    let later = Instant::now() + AUDIO_FRESH + Duration::from_secs(1);
+    lock(m).band(later).level_db.is_some()
+}
+
 #[test]
 fn a_key_closed_at_the_radio_just_before_a_piece_inhibits() {
+    // The key closes at the radio once the node has heard the band for the piece,
+    // and `LEAD` before the box keys it: the node's next line to the box (the STATUS
+    // before its CW) is held up that long. So the audio just before the run is the
+    // sidetone, and only the band heard before it shows the key still closed after
+    // it. Not closed at a time taken before `transmit`: a machine busy for a tenth
+    // of a second between that and the band check left the node too little band
+    // without the sidetone to key on (macOS CI), and nothing was keyed; on a quick
+    // one the key closed 0.1 s before the run, too late for the audio before it.
+    const LEAD: f64 = 0.5;
     let mut b = bench(|_| {});
-    let at = b.now();
-    b.radio.set(|r| r.stuck_from = Some(at));
+    let monitor = lock(&b.station.rig()).monitor();
+    assert!(
+        !band_heard(&monitor),
+        "the band was measured before the piece"
+    );
+    let closed: Arc<Mutex<Option<f64>>> = Arc::default();
+    *lock(&b.before_line) = Some({
+        let (settings, kb, closed) = (
+            b.radio.settings.clone(),
+            b.keyer_box.clone(),
+            closed.clone(),
+        );
+        Box::new(move |_: &str| {
+            if lock(&closed).is_some() || !band_heard(&monitor) {
+                return;
+            }
+            let at = kb.clock.secs();
+            // As `MockRadio::set`.
+            let line = {
+                let mut s = lock(&settings);
+                s.stuck_from = Some(at);
+                PttLine::of(&s)
+            };
+            kb.set_line(line);
+            *lock(&closed) = Some(at);
+            thread::sleep(radio_secs(LEAD));
+        })
+    });
     assert_eq!(
         b.station.transmit(&tx(&["DE N0DE K"])),
         Err(TxError::Inhibited)
+    );
+    let at = lock(&closed).expect("the key was never closed at the radio");
+    let keyed = b
+        .keyer_box
+        .now()
+        .runs
+        .first()
+        .map(|r| r.start as f64 / 1000.0);
+    assert!(
+        keyed.is_some_and(|k| k - at >= LEAD - 0.01),
+        "closed at {at:.3} s, the piece keyed at {keyed:?}"
     );
     let why = std::fs::read_to_string(b.inhibit_file()).unwrap();
     assert!(why.contains("after the box opened its key"), "{why}");
