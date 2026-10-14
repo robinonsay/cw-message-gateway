@@ -14,7 +14,7 @@ Each entry has three parts:
 
 Some words are not in the code. For those the entry says "Not found in the code at `44185fa`" and names where the word does appear. Project files (the design specs, the safety audit and the bench notes) are not public, so they are named in plain text and cannot be linked.
 
-The `rustos` repository has its own handover set, which explains the RP2350 drivers from the driver side (see [rustos](#rustos)): <https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/README.md>. Its pages are named below in plain text by number and title, for example "rustos page 06 (Multicore)".
+The `rustos` repository has its own handover set, which explains the RP2350 drivers from the driver side (see [rustos](#rustos)): <https://github.com/robinonsay/rustos/blob/master/docs/handover/README.md>. Its pages are named below in plain text by number and title, for example "rustos page 06 (Multicore)".
 
 Every safety number on this page is a never-loosen rule. The canonical table of every limit and gate, with its code and its audit source, is [13 Safety rules (never loosen)](13-safety-rules.md); where this page and that one ever disagree, the code wins.
 
@@ -935,7 +935,7 @@ The letters A, B and C name only the UV-K1's three routes, as [10 Quansheng UV-K
 
 **In this project.** The keyer firmware on `main` pins `api` and `pico2` by git `rev` at `8c915079996f9d6537a1ec1f56dc5e3ea5cccc4c`, master's merge of rustos #4: [`firmware/pico2-keyer/Cargo.toml:21-31`](https://github.com/robinonsay/cw-message-gateway/blob/44185fa9a00369c379d9d8af40ca307e3867e860/firmware/pico2-keyer/Cargo.toml#L21-L31). The comment there says that moving this pin can change the UF2 with no source change. The driver files this page cites (`watchdog.rs`, `gpio/`, `usb/`, `pwm.rs`) are the same at `8c91507` and at master `80bf599`; master adds the ADC and DMA drivers and changes the clock and board code. The [one-Pico image](#one-pico-image) (PR #31, draft, not on main) pins rustos PR #6 (open, untested on hardware) at `410dffa`: [`firmware/pico2-keyer/Cargo.toml:24-31`](https://github.com/robinonsay/cw-message-gateway/blob/bc5062ae4f56ae1f9949b3b067218c7e675d88f8/firmware/pico2-keyer/Cargo.toml#L24-L31). Any re-pin is a new build id, a new hash and a new audit. **Never loosen** (rule 7.3 in [13 Safety rules (never loosen)](13-safety-rules.md)).
 
-**Covered in.** The rustos handover set, <https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/README.md>, in particular rustos pages 03 (The api crate) and 08 (Changes made for cw-message-gateway); and [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md).
+**Covered in.** The rustos handover set, <https://github.com/robinonsay/rustos/blob/master/docs/handover/README.md>, in particular rustos pages 03 (The api crate) and 08 (Changes made for cw-message-gateway); and [08 Keyer box: firmware and protocol](08-keyer-box-firmware.md).
 
 ## S
 

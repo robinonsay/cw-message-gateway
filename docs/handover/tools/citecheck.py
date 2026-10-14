@@ -20,7 +20,9 @@ compare them with the sentence that cites them.
 
 Relative links (other pages, diagrams, anchors) are checked for existence.
 Links to a moving ref (blob/main, blob/master, tree/main) are flagged: the
-handover cites fixed commits only.
+handover cites fixed commits only. The one exception is a link to the other
+repository's handover set (docs/handover/), on its default branch or on the
+docs branch.
 
 Exit status 1 if anything is broken.
 """
@@ -56,6 +58,9 @@ GH = re.compile(
 )
 MOVING = {"main", "master", "HEAD"}
 DOCS_BRANCH = "claude/handover-docs-us00cn"
+# Refs a link to the other repository's handover set may use: its default branch
+# (where the set lives once merged) or the docs branch it was written on.
+HANDOVER_REFS = (DOCS_BRANCH, "main", "master")
 _cache = {}
 
 
@@ -126,14 +131,21 @@ def main(argv):
                 if g:
                     repo_name, kind, ref, path, a, b = g.groups()
                     repo = REPOS.get(repo_name)
-                    if url.split("/blob/")[-1].startswith(DOCS_BRANCH + "/docs/handover/") or url.split("/tree/")[-1].startswith(DOCS_BRANCH + "/docs/handover"):
-                        # The one allowed moving link: the other repo's handover set on the docs branch.
-                        rel = url.split(DOCS_BRANCH + "/", 1)[1].split("#")[0]
-                        if repo and os.path.exists(os.path.join(repo, rel)):
+                    tail = url.split("/blob/", 1)[-1] if "/blob/" in url else url.split("/tree/", 1)[-1]
+                    docs_ref = next((r for r in HANDOVER_REFS if tail.startswith(r + "/docs/handover")), None)
+                    if docs_ref:
+                        # The one allowed moving link: the other repo's handover set, on its
+                        # default branch once merged there, or on the docs branch before.
+                        rel = tail[len(docs_ref) + 1 :].split("#")[0]
+                        there = repo and (
+                            os.path.exists(os.path.join(repo, rel))
+                            or not subprocess.run(["git", "-C", repo, "cat-file", "-e", f"origin/{docs_ref}:{rel}"], capture_output=True).returncode
+                        )
+                        if there:
                             if not quiet:
-                                print(f"  ok   {md}:{lineno} docs-branch {repo_name}:{rel}")
+                                print(f"  ok   {md}:{lineno} handover set {repo_name}@{docs_ref}:{rel}")
                         else:
-                            print(f"  BAD  {md}:{lineno} docs-branch target missing locally: {repo_name}:{rel}")
+                            print(f"  BAD  {md}:{lineno} handover-set target missing locally: {repo_name}@{docs_ref}:{rel}")
                             bad += 1
                         continue
                     if ref in MOVING or not re.fullmatch(r"[0-9a-f]{7,40}", ref or ""):

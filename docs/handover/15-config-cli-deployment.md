@@ -731,7 +731,7 @@ Unverified:
 - PR #31 (draft) adds `hfnode keyer core1test [--fault]` and its README row.
 - PR #27 (open, ready, audit-cleared) adds read-only preflight reads of the front-panel keys, the microphone keys and MIC Up/Down Keyer, which `radio tune`, `radio cw` and `run` will then require ([`crates/civ/src/preflight.rs:10-13`](https://github.com/robinonsay/cw-message-gateway/blob/3c97427bcf59fcb8223af7a3676eeebdec529f52/crates/civ/src/preflight.rs#L10-L13)), and edits section 6 of [docs/raspberry-pi-setup.md](../raspberry-pi-setup.md). When it merges, the [IC-7300 preflight](#ic-7300-preflight-before-anything-is-written) paragraph and the "Needs" column above change with it.
 
-The project-wide list is [16 Work left and known bugs](16-work-left-known-bugs.md). The rustos side is in the rustos handover set, page [09 Work left and known issues](https://github.com/robinonsay/rustos/blob/claude/handover-docs-us00cn/docs/handover/09-work-left-known-issues.md).
+The project-wide list is [16 Work left and known bugs](16-work-left-known-bugs.md). The rustos side is in the rustos handover set, page [09 Work left and known issues](https://github.com/robinonsay/rustos/blob/master/docs/handover/09-work-left-known-issues.md).
 
 ## Sources
 
