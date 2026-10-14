@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1380" width="720" height="1380" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>How WX resolves a grid square, a numbered preset or the last confirmed place to an NWS forecast and a short CW reply, including NO COVERAGE</title>
+  <defs>
+    <marker id="k06wx-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1380" fill="#ffffff"/>
+  <text x="24.0" y="36.0" text-anchor="start" font-size="20" fill="#111827" font-weight="bold">WX: from a place to a short forecast</text>
+  <text x="24.0" y="60.0" text-anchor="start" font-size="14" fill="#4b5563">protocol::wx_place, session.rs wx_place and commit, gateway/weather.rs</text>
+  <rect x="30.0" y="84.0" width="350.0" height="72.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="205.0" y="115.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">The field operator opens</tspan></text>
+  <text x="205.0" y="133.2" text-anchor="middle" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">W5XXX 46 &lt;code&gt; WX ... K</tspan></text>
+  <path d="M380.0,120.0 L448.0,120.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <text x="414.0" y="112.0" text-anchor="middle" font-size="14" fill="#4b5563">else</text>
+  <rect x="450.0" y="78.0" width="240.0" height="84.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="462.0" y="99.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Anything else: silence</tspan></text>
+  <text x="462.0" y="117.2" text-anchor="start" font-size="14" fill="#111827">a bad locator, an unknown</text>
+  <text x="462.0" y="135.2" text-anchor="start" font-size="14" fill="#111827">preset, or a grid plus noise</text>
+  <text x="462.0" y="153.2" text-anchor="start" font-size="14" fill="#111827">such as <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DL89 EE</tspan></text>
+  <path d="M205.0,156.0 L205.0,172.0" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M135.0,172.0 L585.0,172.0" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M135.0,172.0 L135.0,190.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M360.0,172.0 L360.0,190.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M585.0,172.0 L585.0,190.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="192.0" width="210.0" height="128.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="233.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">A grid square</tspan></text>
+  <text x="42.0" y="251.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WX DL89IG</tspan>; a square</text>
+  <text x="42.0" y="269.2" text-anchor="start" font-size="14" fill="#111827">split by a long gap is</text>
+  <text x="42.0" y="287.2" text-anchor="start" font-size="14" fill="#111827">rejoined (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DL89 IG</tspan>)</text>
+  <rect x="255.0" y="192.0" width="210.0" height="128.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="267.0" y="233.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">A preset number</tspan></text>
+  <text x="267.0" y="251.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WX 3</tspan>: exactly a number</text>
+  <text x="267.0" y="269.2" text-anchor="start" font-size="14" fill="#111827">in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[[weather.presets]]</tspan>,</text>
+  <text x="267.0" y="287.2" text-anchor="start" font-size="14" fill="#111827">no leading zeros</text>
+  <rect x="480.0" y="192.0" width="210.0" height="128.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="492.0" y="215.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Nothing</tspan></text>
+  <text x="492.0" y="233.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WX</tspan> alone: the last place</text>
+  <text x="492.0" y="251.2" text-anchor="start" font-size="14" fill="#111827">this callsign confirmed</text>
+  <text x="492.0" y="269.2" text-anchor="start" font-size="14" fill="#111827">(<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">wx_last.json</tspan>), else</text>
+  <text x="492.0" y="287.2" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">weather.default_grid</tspan>;</text>
+  <text x="492.0" y="305.2" text-anchor="start" font-size="14" fill="#111827">neither: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL 47 WX</tspan> later</text>
+  <path d="M135.0,320.0 L135.0,356.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M360.0,320.0 L360.0,356.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M585.0,320.0 L585.0,356.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="100.0" y="358.0" width="520.0" height="64.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="360.0" y="384.9" text-anchor="middle" font-size="15" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">R 46 WX 3 DL89IG ? DE N0CALL K</tspan></text>
+  <text x="360.0" y="402.9" text-anchor="middle" font-size="14" fill="#111827">the grid it will use, if any; the preset number only if sent (WX 3)</text>
+  <path d="M360.0,422.0 L360.0,450.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="100.0" y="452.0" width="520.0" height="56.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="360.0" y="484.2" text-anchor="middle" font-size="16" fill="#111827"><tspan font-weight="bold">The operator confirms</tspan> <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK 47 &lt;code&gt; K</tspan></text>
+  <path d="M215.0,508.0 L215.0,538.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="540.0" width="370.0" height="64.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="567.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">grid_center(grid)</tspan></tspan></text>
+  <text x="42.0" y="585.2" text-anchor="start" font-size="14" fill="#111827">centre of the square: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DL89</tspan> → 29.5° N, 103.0° W</text>
+  <path d="M215.0,604.0 L215.0,650.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="652.0" width="370.0" height="64.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42.0" y="679.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GET /points/{lat},{lon}</tspan></tspan></text>
+  <text x="42.0" y="697.2" text-anchor="start" font-size="14" fill="#111827">api.weather.gov: which forecast office</text>
+  <path d="M400.0,684.0 L420.0,684.0" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M420.0,644.0 L420.0,728.0" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M420.0,644.0 L438.0,644.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M420.0,728.0 L438.0,728.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="440.0" y="608.0" width="250.0" height="72.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="452.0" y="629.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL 47 WX NO COVERAGE</tspan></text>
+  <text x="452.0" y="647.6" text-anchor="start" font-size="14" fill="#111827">HTTP 404, or no forecast link:</text>
+  <text x="452.0" y="665.6" text-anchor="start" font-size="14" fill="#111827">outside the US, or at sea</text>
+  <rect x="440.0" y="692.0" width="250.0" height="72.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="452.0" y="713.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL 47 WX</tspan></text>
+  <text x="452.0" y="731.6" text-anchor="start" font-size="14" fill="#111827">any other error: no network,</text>
+  <text x="452.0" y="749.6" text-anchor="start" font-size="14" fill="#111827">a server error, a timeout</text>
+  <path d="M215.0,716.0 L215.0,798.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <text x="223.0" y="760.0" text-anchor="start" font-size="14" fill="#4b5563">OK</text>
+  <rect x="30.0" y="800.0" width="370.0" height="64.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42.0" y="827.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GET</tspan> the forecast URL</tspan></text>
+  <text x="42.0" y="845.2" text-anchor="start" font-size="14" fill="#111827">the periods the point's office names</text>
+  <path d="M400.0,832.0 L438.0,832.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="440.0" y="804.0" width="250.0" height="56.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="452.0" y="826.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL 47 WX</tspan></text>
+  <text x="452.0" y="844.6" text-anchor="start" font-size="14" fill="#111827">if this request fails</text>
+  <path d="M215.0,864.0 L215.0,894.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="896.0" width="370.0" height="64.0" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="42.0" y="923.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">GET /alerts/active?point=...</tspan></tspan></text>
+  <text x="42.0" y="941.2" text-anchor="start" font-size="14" fill="#111827">the active alerts at that point</text>
+  <path d="M400.0,928.0 L438.0,928.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <text x="420.0" y="911.0" text-anchor="middle" font-size="14" fill="#4b5563">fails</text>
+  <rect x="440.0" y="890.0" width="250.0" height="76.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="452.0" y="914.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Alerts unknown</tspan></text>
+  <text x="452.0" y="932.2" text-anchor="start" font-size="14" fill="#111827">the line says <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ALERTS UNAVBL</tspan>,</text>
+  <text x="452.0" y="950.2" text-anchor="start" font-size="14" fill="#111827">never “no alerts”</text>
+  <path d="M215.0,960.0 L215.0,990.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="992.0" width="370.0" height="88.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1015.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">format_forecast</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">abbreviate</tspan></tspan></text>
+  <text x="42.0" y="1033.2" text-anchor="start" font-size="14" fill="#111827">the grid, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ALERT</tspan> and each event name,</text>
+  <text x="42.0" y="1051.2" text-anchor="start" font-size="14" fill="#111827">then <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">periods</tspan> periods: name, sky,</text>
+  <text x="42.0" y="1069.2" text-anchor="start" font-size="14" fill="#111827">HI or LO temperature, wind</text>
+  <path d="M215.0,1080.0 L215.0,1106.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <path d="M690.0,728.0 L704.0,728.0" fill="none" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <path d="M690.0,832.0 L704.0,832.0" fill="none" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <path d="M704.0,728.0 L704.0,1040.0 L600.0,1040.0 L600.0,1106.0" fill="none" stroke="#374151" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#k06wx-arrow)"/>
+  <text x="590.0" y="1078.0" text-anchor="end" font-size="14" fill="#4b5563">also saved</text>
+  <rect x="30.0" y="1108.0" width="660.0" height="84.0" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="42.0" y="1136.2" text-anchor="start" font-size="16" fill="#111827"><tspan font-weight="bold">Remember the place</tspan>: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">LastPlaces::set(call, grid)</tspan> → <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">wx_last.json</tspan></text>
+  <text x="42.0" y="1154.2" text-anchor="start" font-size="14" fill="#111827">only if a grid or preset was named, and the result is anything but</text>
+  <text x="42.0" y="1172.2" text-anchor="start" font-size="14" fill="#111827">NO COVERAGE (so also after <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">FAIL 47 WX</tspan>); a failed save is only logged</text>
+  <path d="M215.0,1192.0 L215.0,1222.0" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k06wx-arrow)"/>
+  <rect x="30.0" y="1224.0" width="660.0" height="84.0" rx="14" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="42.0" y="1251.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WX DL89IG ALERT HEAT ADVISORY TNGT MSTLY CLEAR LO 58 WIND W = A</tspan></text>
+  <text x="42.0" y="1269.6" text-anchor="start" font-size="14" fill="#111827"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">5 MPH SAT SUNNY HI 97 WIND SW 10 TO 15 MPH = B DE N0CALL K</tspan></text>
+  <text x="42.0" y="1287.6" text-anchor="start" font-size="14" fill="#111827">chunked like an <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RX</tspan> readout</text>
+  <text x="24.0" y="1334.0" text-anchor="start" font-size="14" fill="#111827" font-weight="bold">Legend</text>
+  <rect x="24" y="1346" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/>
+  <text x="50.0" y="1358.0" text-anchor="start" font-size="14" fill="#111827">host code, files</text>
+  <rect x="204" y="1346" width="18" height="14" fill="#f3f4f6" stroke="#374151"/>
+  <text x="230.0" y="1358.0" text-anchor="start" font-size="14" fill="#111827">external service or person</text>
+  <rect x="444" y="1346" width="18" height="14" rx="7" fill="#ffffff" stroke="#374151"/>
+  <text x="470.0" y="1358.0" text-anchor="start" font-size="14" fill="#111827">keyed on air</text>
+</svg>

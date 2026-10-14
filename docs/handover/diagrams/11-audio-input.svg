@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1230" width="720" height="1230" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>K1 audio into the keyer box's GP26 for the one-Pico image: C1 1 µF from the 2.5 mm tip (speaker) to R3 10 kΩ, R3 to GP26 (pin 31), R1 10 kΩ from GP26 to ADC_VREF (pin 35), R2 10 kΩ from GP26 to AGND (pin 33); one shared ground wire from GND (pin 23) to the 2.5 mm sleeve; wire it only after the one-Pico image is merged and flashed</title>
+  <rect x="0" y="0" width="720" height="1230" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">K1 audio into the keyer box's GP26 (wire later)</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">One-Pico image (PR #31, draft). Purple parts: add only after it is merged and flashed</text>
+
+  <!-- keyer box outline: the box exists; neutral container -->
+  <rect x="12" y="76" width="696" height="606" rx="10" fill="none" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="698" y="96" text-anchor="end" font-size="14" font-weight="bold" fill="#4b5563">keyer box</text>
+
+  <!-- Pico 2 (exists) -->
+  <rect x="24" y="108" width="672" height="136" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="36" y="132" font-weight="bold">Raspberry Pi Pico 2 (the keyer box's own)</text>
+  <text x="70" y="162" text-anchor="middle" font-size="14" font-weight="bold">GP16</text>
+  <text x="70" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 21</text>
+  <text x="200" y="162" text-anchor="middle" font-size="14" font-weight="bold">GND</text>
+  <text x="200" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 23</text>
+  <text x="270" y="162" text-anchor="middle" font-size="14" font-weight="bold">GND</text>
+  <text x="270" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 38</text>
+  <text x="380" y="162" text-anchor="middle" font-size="14" font-weight="bold">AGND</text>
+  <text x="380" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 33</text>
+  <text x="520" y="162" text-anchor="middle" font-size="14" font-weight="bold">ADC_VREF</text>
+  <text x="520" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 35</text>
+  <text x="640" y="162" text-anchor="middle" font-size="14" font-weight="bold">GP26</text>
+  <text x="640" y="180" text-anchor="middle" font-size="13" fill="#4b5563">pin 31, ADC0</text>
+
+  <!-- joins on the board itself -->
+  <line x1="200" y1="188" x2="200" y2="208" stroke="#374151" stroke-width="2"/>
+  <line x1="270" y1="188" x2="270" y2="208" stroke="#374151" stroke-width="2"/>
+  <line x1="380" y1="188" x2="380" y2="208" stroke="#374151" stroke-width="2"/>
+  <line x1="200" y1="208" x2="270" y2="208" stroke="#374151" stroke-width="2"/>
+  <line x1="270" y1="208" x2="380" y2="208" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <circle cx="270" cy="208" r="4" fill="#374151"/>
+  <text x="392" y="212" font-size="13" fill="#4b5563">on the board: all GND pins one net;</text>
+  <text x="392" y="230" font-size="13" fill="#4b5563">AGND to GND inferred (meter it)</text>
+
+  <!-- key side: exists, unchanged -->
+  <line x1="70" y1="244" x2="70" y2="282" stroke="#374151" stroke-width="2"/>
+  <text x="78" y="272" font-size="13" fill="#4b5563">in</text>
+  <rect x="24" y="282" width="140" height="104" rx="6" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="34" y="302" font-size="14" font-weight="bold">Key switch</text>
+  <text x="34" y="320" font-size="13">2N3904,</text>
+  <text x="34" y="336" font-size="13">10 kΩ to base,</text>
+  <text x="34" y="352" font-size="13">4.7 kΩ pull-down</text>
+  <text x="34" y="370" font-size="13" fill="#4b5563">(as is, page 10)</text>
+  <!-- emitter to the ground net -->
+  <line x1="164" y1="334" x2="200" y2="334" stroke="#374151" stroke-width="2"/>
+  <text x="172" y="326" font-size="13" fill="#4b5563">E</text>
+  <!-- collector: key wire -->
+  <line x1="70" y1="386" x2="70" y2="800" stroke="#374151" stroke-width="2"/>
+  <text x="78" y="404" font-size="13" fill="#4b5563">C</text>
+  <text x="78" y="500" font-size="14">key wire</text>
+
+  <!-- ground net: the one ground wire (exists) -->
+  <line x1="200" y1="244" x2="200" y2="800" stroke="#374151" stroke-width="2"/>
+  <circle cx="200" cy="334" r="4" fill="#374151"/>
+  <text x="208" y="470" font-size="14">ground wire</text>
+  <text x="208" y="488" font-size="13">already there,</text>
+  <text x="208" y="504" font-size="13">no second one</text>
+
+  <!-- new parts: not built yet -->
+  <rect x="318" y="258" width="380" height="404" rx="8" fill="#ede9fe" fill-opacity="0.35" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="330" y="624" font-size="14" font-weight="bold" fill="#5b21b6">New: add after PR #31</text>
+  <text x="330" y="642" font-size="14" font-weight="bold" fill="#5b21b6">is merged and flashed</text>
+
+  <!-- AGND net: R2 -->
+  <line x1="380" y1="244" x2="380" y2="300" stroke="#374151" stroke-width="2"/>
+  <rect x="370" y="300" width="20" height="60" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="400" y="326" font-size="14" font-weight="bold">R2 10 kΩ</text>
+  <text x="400" y="344" font-size="13" fill="#4b5563">(bench: R5)</text>
+  <line x1="380" y1="360" x2="380" y2="420" stroke="#374151" stroke-width="2"/>
+  <line x1="380" y1="420" x2="640" y2="420" stroke="#374151" stroke-width="2"/>
+
+  <!-- ADC_VREF net: R1 -->
+  <line x1="520" y1="244" x2="520" y2="276" stroke="#374151" stroke-width="2"/>
+  <rect x="510" y="276" width="20" height="60" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="540" y="302" font-size="14" font-weight="bold">R1 10 kΩ</text>
+  <text x="540" y="320" font-size="13" fill="#4b5563">(bench: R4)</text>
+  <line x1="520" y1="336" x2="520" y2="378" stroke="#374151" stroke-width="2"/>
+  <line x1="520" y1="378" x2="640" y2="378" stroke="#374151" stroke-width="2"/>
+
+  <!-- GP26 net -->
+  <line x1="640" y1="244" x2="640" y2="448" stroke="#374151" stroke-width="2"/>
+  <circle cx="640" cy="378" r="4" fill="#374151"/>
+  <circle cx="640" cy="420" r="4" fill="#374151"/>
+  <!-- R3 -->
+  <rect x="630" y="448" width="20" height="60" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="620" y="484" text-anchor="end" font-size="14" font-weight="bold">R3 10 kΩ</text>
+  <line x1="640" y1="508" x2="640" y2="536" stroke="#374151" stroke-width="2"/>
+  <!-- C1 -->
+  <line x1="620" y1="536" x2="660" y2="536" stroke="#5b21b6" stroke-width="3"/>
+  <line x1="620" y1="546" x2="660" y2="546" stroke="#5b21b6" stroke-width="3"/>
+  <text x="610" y="534" text-anchor="end" font-size="14" font-weight="bold">C1 1 µF</text>
+  <text x="610" y="552" text-anchor="end" font-size="14">film or ceramic, 16 V or more</text>
+  <text x="610" y="570" text-anchor="end" font-size="14" fill="#991b1b">never electrolytic</text>
+  <!-- audio wire: new -->
+  <line x1="640" y1="546" x2="640" y2="800" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="628" y="600" text-anchor="end" font-size="14" fill="#5b21b6">audio wire (new)</text>
+
+  <!-- cable -->
+  <text x="208" y="712" font-size="14">three wires: key, ground, speaker</text>
+  <text x="208" y="732" font-size="13">one clip-on ferrite round the whole cable, radio end</text>
+  <rect x="44" y="748" width="636" height="18" rx="9" fill="#e5e7eb" stroke="#374151" stroke-width="2"/>
+  <line x1="70" y1="748" x2="70" y2="766" stroke="#374151" stroke-width="2"/>
+  <line x1="200" y1="748" x2="200" y2="766" stroke="#374151" stroke-width="2"/>
+  <line x1="640" y1="748" x2="640" y2="766" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+
+  <!-- radio: terminals above the box, a stub into it -->
+  <line x1="70" y1="805" x2="70" y2="820" stroke="#374151" stroke-width="2"/>
+  <line x1="200" y1="805" x2="200" y2="820" stroke="#374151" stroke-width="2"/>
+  <line x1="640" y1="805" x2="640" y2="820" stroke="#374151" stroke-width="2"/>
+  <circle cx="70" cy="800" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <circle cx="200" cy="800" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <circle cx="640" cy="800" r="5" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <rect x="24" y="820" width="672" height="146" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="70" y="844" text-anchor="middle" font-size="14" font-weight="bold">3.5 mm TIP</text>
+  <text x="70" y="862" text-anchor="middle" font-size="13" fill="#4b5563">key line</text>
+  <text x="200" y="844" text-anchor="middle" font-size="14" font-weight="bold">2.5 mm SLEEVE</text>
+  <text x="200" y="862" text-anchor="middle" font-size="13" fill="#4b5563">ground</text>
+  <text x="640" y="844" text-anchor="middle" font-size="14" font-weight="bold">2.5 mm TIP</text>
+  <text x="684" y="862" text-anchor="end" font-size="13" fill="#4b5563">speaker (AIOC label)</text>
+  <text x="36" y="892" font-size="13" fill="#991b1b">Never connected, cut short and insulated: 2.5 mm RING (serial),</text>
+  <text x="36" y="910" font-size="13" fill="#991b1b">3.5 mm RING, and 3.5 mm SLEEVE (a serial pin, not ground)</text>
+  <text x="360" y="946" text-anchor="middle" font-weight="bold">Quansheng UV-K1, NR7Y firmware, CW mode</text>
+
+  <!-- notes -->
+  <rect x="24" y="986" width="672" height="186" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="36" y="1010" font-weight="bold">Before and after</text>
+  <text x="36" y="1034" font-size="14">Pico unplugged: pin 33 to pin 38 reads about 0 Ω. If open, wire 33 to 38, never 37 (3V3_EN).</text>
+  <text x="36" y="1056" font-size="14">One ground wire only. R2 goes to AGND; the key's emitter stays on GND (pin 23).</text>
+  <text x="36" y="1078" font-size="14">Zero-RF check first: does the K1's speaker still play with the 2.5 mm plug in?</text>
+  <text x="36" y="1100" font-size="14">After wiring, redo bench stages 5 and 6 with the full cable.</text>
+  <text x="36" y="1122" font-size="14">The Mac microphone stays the monitor feed until this image and PR 5 are both audited.</text>
+  <text x="36" y="1150" font-size="14" fill="#4b5563">What it does: R1, R2 hold GP26 at 1.65 V; R3 against R1 ∥ R2 passes one third; C1 blocks DC.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1192" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="48" y="1204" font-size="14">hardware</text>
+  <rect x="126" y="1192" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="150" y="1204" font-size="14">safety</text>
+  <rect x="214" y="1192" width="18" height="14" fill="#ede9fe" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="238" y="1204" font-size="14">not built yet</text>
+  <line x1="342" y1="1199" x2="374" y2="1199" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/><text x="382" y="1204" font-size="14">joined on the board (inferred)</text>
+  <circle cx="598" cy="1199" r="4" fill="#374151"/><text x="608" y="1204" font-size="14">junction</text>
+</svg>

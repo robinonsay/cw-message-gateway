@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1152" width="720" height="1152" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The layers from the station down to the radio: Station, the Rig trait, the Ic7300 driver beside the preflight and the bring-up gate, the Port and ControlLines traits over serialport, the CP210x bridge and the IC-7300; and the test doubles SimRig, MockPort and MockRadio, and TimeScaled</title>
+  <defs>
+    <marker id="k07s-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1152" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" fill="#111827" font-weight="bold">The CI-V stack, in production and in tests</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Each box is a type. Arrows: caller to callee, or trait to the types that implement it.</text>
+  <rect x="24" y="80" width="672" height="60" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="106" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station&lt;R: Rig&gt;</text>
+  <text x="40" y="128" font-size="14" fill="#4b5563">station.rs: the only code that keys a radio (page 05)</text>
+  <line x1="214" y1="140" x2="214" y2="176" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <rect x="24" y="176" width="428" height="108" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="202" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">trait Rig: Send</text>
+  <text x="40" y="224" font-size="14" fill="#111827">frequency, mode, power, speed, break-in,</text>
+  <text x="40" y="244" font-size="14" fill="#111827">status, meters, tuner, send_cw, stop</text>
+  <text x="40" y="264" font-size="14" fill="#4b5563">also KeyerRig (page 09), Handheld (page 10)</text>
+  <rect x="540" y="176" width="156" height="108" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="556" y="202" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">SimRig</text>
+  <text x="556" y="224" font-size="14" fill="#111827">in memory,</text>
+  <text x="556" y="244" font-size="14" fill="#111827">no bytes,</text>
+  <text x="556" y="264" font-size="14" fill="#111827">settable faults</text>
+  <line x1="452" y1="230" x2="540" y2="230" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="496" y="220" font-size="14" fill="#4b5563" text-anchor="middle">unit tests</text>
+  <line x1="214" y1="284" x2="214" y2="320" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="226" y="307" font-size="14" fill="#4b5563">run, radio commands, selftest</text>
+  <rect x="24" y="320" width="364" height="152" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="346" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Ic7300&lt;P: Port&gt;</text>
+  <text x="40" y="368" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">crates/civ/src/ic7300.rs</text>
+  <text x="40" y="388" font-size="14" fill="#111827">every command goes through transact():</text>
+  <text x="40" y="408" font-size="14" fill="#111827">drain, write, wait up to 500 ms</text>
+  <text x="40" y="428" font-size="14" fill="#111827">one named constant per frame (mod cmd)</text>
+  <text x="40" y="448" font-size="14" fill="#111827">refuses 1C 00 01; writes no menu item</text>
+  <rect x="452" y="320" width="244" height="152" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="468" y="346" font-size="14" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">commissioning::open_for</text>
+  <text x="468" y="366" font-size="14" fill="#111827" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">and preflight.rs</text>
+  <text x="468" y="386" font-size="14" fill="#111827">1. stage and power, before</text>
+  <text x="486" y="406" font-size="14" fill="#111827">the port is opened</text>
+  <text x="468" y="426" font-size="14" fill="#111827">2. 27 reads (34 with PR #27)</text>
+  <text x="468" y="446" font-size="14" fill="#111827">3. settings read back</text>
+  <line x1="452" y1="400" x2="388" y2="400" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="420" y="390" font-size="14" fill="#4b5563" text-anchor="middle">reads</text>
+  <line x1="214" y1="472" x2="214" y2="508" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <rect x="24" y="508" width="380" height="108" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="534" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">trait Port, trait ControlLines</text>
+  <text x="40" y="556" font-size="14" fill="#111827">Port: Read + Write + Send + discard_input</text>
+  <text x="40" y="576" font-size="14" fill="#111827">ControlLines: set_dtr, set_rts (serial.rs)</text>
+  <text x="40" y="596" font-size="14" fill="#111827">lower_control_lines: DTR, then RTS</text>
+  <line x1="124" y1="616" x2="124" y2="668" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="136" y="647" font-size="14" fill="#4b5563">production</text>
+  <path d="M404,560 L574,560 L574,668" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="489" y="550" font-size="14" fill="#4b5563" text-anchor="middle">tests, selftest</text>
+  <rect x="24" y="668" width="308" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="694" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Box&lt;dyn SerialPort&gt;</text>
+  <text x="40" y="716" font-size="14" fill="#111827">serialport 4, 8N1, no flow control</text>
+  <text x="40" y="736" font-size="14" fill="#111827">path from station.serial_port</text>
+  <text x="40" y="756" font-size="14" fill="#4b5563">(hfnode devices lists candidates)</text>
+  <line x1="178" y1="772" x2="178" y2="808" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="190" y="795" font-size="14" fill="#4b5563">USB</text>
+  <rect x="24" y="808" width="308" height="64" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="40" y="834" font-size="16" fill="#111827" font-weight="bold">CP210x USB-serial bridge</text>
+  <text x="40" y="856" font-size="14" fill="#111827">inside the radio, USB ID 10C4:EA60</text>
+  <line x1="178" y1="872" x2="178" y2="908" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <text x="190" y="895" font-size="14" fill="#4b5563">CI-V frames</text>
+  <rect x="24" y="908" width="308" height="64" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="40" y="934" font-size="16" fill="#111827" font-weight="bold">IC-7300, CI-V address 94h</text>
+  <text x="40" y="956" font-size="14" fill="#111827">answers from 94h to E0h</text>
+  <rect x="452" y="668" width="244" height="104" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="468" y="694" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MockPort</text>
+  <text x="468" y="716" font-size="14" fill="#111827">implements Port but not</text>
+  <text x="468" y="736" font-size="14" fill="#111827">ControlLines, so tests build</text>
+  <text x="468" y="756" font-size="14" fill="#111827">the driver with with_port</text>
+  <line x1="574" y1="772" x2="574" y2="808" stroke="#374151" stroke-width="2" marker-end="url(#k07s-arrow)"/>
+  <rect x="452" y="808" width="244" height="164" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="468" y="834" font-size="16" fill="#111827" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MockRadio</text>
+  <text x="468" y="856" font-size="14" fill="#111827">a byte-level IC-7300:</text>
+  <text x="468" y="876" font-size="14" fill="#111827">checks every frame against</text>
+  <text x="468" y="896" font-size="14" fill="#111827">the manual's Section 19,</text>
+  <text x="468" y="916" font-size="14" fill="#111827">radio time = real time × scale,</text>
+  <text x="468" y="936" font-size="14" fill="#111827">injects Faults,</text>
+  <text x="468" y="956" font-size="14" fill="#111827">records Violations</text>
+  <rect x="24" y="1004" width="672" height="84" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="40" y="1030" font-size="16" fill="#111827" xml:space="preserve"><tspan font-weight="bold">In hfnode selftest: </tspan><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Station&lt;TimeScaled&lt;Ic7300&lt;MockPort&gt;&gt;&gt;</tspan></text>
+  <text x="40" y="1052" font-size="14" fill="#111827">TimeScaled wraps any Rig and divides dot_duration by the time scale,</text>
+  <text x="40" y="1072" font-size="14" fill="#111827">so the station's timing matches the mock's faster radio time (selftest.rs).</text>
+  <text x="24" y="1118" font-size="14" fill="#111827" font-weight="bold">Legend</text>
+  <rect x="92" y="1105" width="18" height="14" rx="0" fill="#dbeafe" stroke="#1e40af" stroke-width="1"/>
+  <text x="118" y="1118" font-size="14" fill="#111827">host code</text>
+  <rect x="221.6" y="1105" width="18" height="14" rx="0" fill="#fef3c7" stroke="#92400e" stroke-width="1"/>
+  <text x="247.6" y="1118" font-size="14" fill="#111827">radio hardware</text>
+  <rect x="393.2" y="1105" width="18" height="14" rx="0" fill="#fee2e2" stroke="#991b1b" stroke-width="1"/>
+  <text x="419.2" y="1118" font-size="14" fill="#111827">safety gate</text>
+</svg>

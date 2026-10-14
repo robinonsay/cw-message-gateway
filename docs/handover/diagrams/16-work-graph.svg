@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 990" width="720" height="990" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The work left as a dependency graph: #30 merges, #31 is retargeted, re-audited, merged and flashed on Robin's go, then the UV-K1 audio wiring and a second run of UV-K1 stages 5 and 6; #30 also leads to PR 4, and PR 4 to PR 5 with its audit and, with #31, to source = "keyer"; rustos #6 leads to a rustos re-pin in #31 and the fresh audit; #27 can merge any time; the IC-7300 bench (stages 2 to 9, then the link-loss test in stage 10, then the steps that need a load and a wattmeter), and the UV-K1 bench on today's image feed the bench results; those results and a hardware timer feed the safety audit's review of unattended use, which grades hardware only</title>
+  <defs>
+    <marker id="k16-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="990" fill="#ffffff"/>
+  <text x="24" y="38" font-size="20" font-weight="bold">Work left: what waits on what</text>
+  <text x="24" y="62" font-size="14" fill="#4b5563">As of main 44185fa, 2026-10-13. An arrow means the box it points to waits on the first.</text>
+
+  <!-- Row 1 -->
+  <rect x="24" y="80" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="124" y="105" text-anchor="middle" font-weight="bold">rustos #6 merges</text>
+  <text x="124" y="127" text-anchor="middle" font-size="14" fill="#4b5563">core 1 start, USB room()</text>
+
+  <rect x="260" y="80" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="360" y="105" text-anchor="middle" font-weight="bold">#30 merges</text>
+  <text x="360" y="127" text-anchor="middle" font-size="14" fill="#4b5563">the decoder box</text>
+
+  <rect x="496" y="80" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="596" y="105" text-anchor="middle" font-weight="bold">#27 merges</text>
+  <text x="596" y="127" text-anchor="middle" font-size="14" fill="#4b5563">any time; nothing waits</text>
+
+  <!-- Row 2 -->
+  <rect x="24" y="172" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="124" y="197" text-anchor="middle" font-weight="bold">#31 re-pins rustos</text>
+  <text x="124" y="219" text-anchor="middle" font-size="14" fill="#4b5563">to master's merge of #6</text>
+
+  <rect x="260" y="172" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="360" y="197" text-anchor="middle" font-weight="bold">#31 retargeted</text>
+  <text x="360" y="219" text-anchor="middle" font-size="14" fill="#4b5563">its base becomes main</text>
+
+  <rect x="496" y="172" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="596" y="197" text-anchor="middle" font-weight="bold">PR 4 (planned)</text>
+  <text x="596" y="219" text-anchor="middle" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">source = "box"</text>
+
+  <!-- Row 3 -->
+  <rect x="260" y="264" width="200" height="60" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="360" y="289" text-anchor="middle" font-weight="bold">Fresh audit</text>
+  <text x="360" y="311" text-anchor="middle" font-size="14" fill="#4b5563">new head, new hash</text>
+
+  <rect x="496" y="264" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="596" y="289" text-anchor="middle" font-weight="bold">PR 5 (planned)</text>
+  <text x="596" y="311" text-anchor="middle" font-size="14" fill="#4b5563">monitor fed by the box</text>
+
+  <!-- Row 4 -->
+  <rect x="260" y="356" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="360" y="381" text-anchor="middle" font-weight="bold">#31 merges</text>
+  <text x="360" y="403" text-anchor="middle" font-size="14" fill="#4b5563">hfnode rebuilt from main</text>
+
+  <rect x="496" y="356" width="200" height="60" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="596" y="381" text-anchor="middle" font-weight="bold">Audit of PR 5</text>
+  <text x="596" y="403" text-anchor="middle" font-size="14" fill="#4b5563">it touches keying</text>
+
+  <!-- Row 5 -->
+  <rect x="24" y="448" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="124" y="473" text-anchor="middle" font-weight="bold">IC-7300 bench</text>
+  <text x="124" y="495" text-anchor="middle" font-size="14" fill="#4b5563">stages 2 to 9</text>
+
+  <rect x="260" y="448" width="200" height="60" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="360" y="473" text-anchor="middle" font-weight="bold">Flash on Robin's go</text>
+  <text x="360" y="495" text-anchor="middle" font-size="14" fill="#4b5563">then keyer check twice</text>
+
+  <rect x="496" y="448" width="200" height="60" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="596" y="473" text-anchor="middle" font-size="15" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">source = "keyer"</text>
+  <text x="596" y="495" text-anchor="middle" font-size="14" fill="#4b5563">planned; audit reviews</text>
+
+  <!-- Row 6 -->
+  <rect x="24" y="540" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="124" y="565" text-anchor="middle" font-weight="bold">Stage 10: link loss</text>
+  <text x="124" y="587" text-anchor="middle" font-size="14" fill="#4b5563">then stages 11 and 13</text>
+
+  <rect x="260" y="540" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="360" y="565" text-anchor="middle" font-weight="bold">UV-K1 audio wiring</text>
+  <text x="360" y="587" text-anchor="middle" font-size="14" fill="#4b5563">into GP26</text>
+
+  <rect x="496" y="540" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="596" y="565" text-anchor="middle" font-weight="bold">UV-K1 bench</text>
+  <text x="596" y="587" text-anchor="middle" font-size="14" fill="#4b5563">stages 1 to 7, today</text>
+
+  <!-- Row 7 -->
+  <rect x="24" y="632" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="124" y="657" text-anchor="middle" font-weight="bold">Load and wattmeter</text>
+  <text x="124" y="679" text-anchor="middle" font-size="14" fill="#4b5563">stage 12; steps 9, 11</text>
+
+  <rect x="260" y="632" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="360" y="657" text-anchor="middle" font-weight="bold">UV-K1 stages 5, 6</text>
+  <text x="360" y="679" text-anchor="middle" font-size="14" fill="#4b5563">again, with GP26 audio</text>
+
+  <rect x="496" y="632" width="200" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="596" y="657" text-anchor="middle" font-weight="bold">Hardware timer</text>
+  <text x="596" y="679" text-anchor="middle" font-size="14" fill="#4b5563">not built or designed</text>
+
+  <!-- Row 8 -->
+  <rect x="24" y="724" width="436" height="60" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="242" y="749" text-anchor="middle" font-weight="bold">Bench results to the audit</text>
+  <text x="242" y="771" text-anchor="middle" font-size="14" fill="#4b5563">measured readings, rubric criterion H1</text>
+
+  <!-- Row 9 -->
+  <rect x="24" y="816" width="672" height="60" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="360" y="841" text-anchor="middle" font-weight="bold">The safety audit's review of unattended use</text>
+  <text x="360" y="863" text-anchor="middle" font-size="14" fill="#4b5563">no route cleared yet; hardware only (Part 97 risk accepted by Robin, 2026-10-08)</text>
+
+  <!-- Arrows -->
+  <g stroke="#374151" stroke-width="2" fill="none">
+    <line x1="124" y1="140" x2="124" y2="170" marker-end="url(#k16-arrow)"/>
+    <path d="M124,232 V294 H258" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="140" x2="360" y2="170" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="232" x2="360" y2="262" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="324" x2="360" y2="354" marker-end="url(#k16-arrow)"/>
+    <path d="M460,386 H470 V490 H494" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="416" x2="360" y2="446" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="508" x2="360" y2="538" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="600" x2="360" y2="630" marker-end="url(#k16-arrow)"/>
+    <line x1="360" y1="692" x2="360" y2="722" marker-end="url(#k16-arrow)"/>
+    <line x1="124" y1="508" x2="124" y2="538" marker-end="url(#k16-arrow)"/>
+    <line x1="124" y1="600" x2="124" y2="630" marker-end="url(#k16-arrow)"/>
+    <line x1="124" y1="692" x2="124" y2="722" marker-end="url(#k16-arrow)"/>
+    <path d="M460,110 H470 V202 H494" marker-end="url(#k16-arrow)"/>
+    <path d="M496,222 H482 V462 H494" marker-end="url(#k16-arrow)"/>
+    <line x1="596" y1="232" x2="596" y2="262" marker-end="url(#k16-arrow)"/>
+    <line x1="596" y1="324" x2="596" y2="354" marker-end="url(#k16-arrow)"/>
+    <path d="M496,570 H478 V754 H462" marker-end="url(#k16-arrow)"/>
+    <path d="M478,662 H462" marker-end="url(#k16-arrow)"/>
+    <line x1="242" y1="784" x2="242" y2="814" marker-end="url(#k16-arrow)"/>
+    <line x1="596" y1="692" x2="596" y2="814" marker-end="url(#k16-arrow)"/>
+  </g>
+  <circle cx="478" cy="662" r="4" fill="#374151"/>
+
+  <!-- Legend -->
+  <text x="24" y="912" font-size="14" font-weight="bold">Legend</text>
+  <rect x="24" y="924" width="26" height="16" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="58" y="937" font-size="14">open PR or planned work, not on main</text>
+  <rect x="380" y="924" width="26" height="16" rx="3" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="414" y="937" font-size="14">safety gate: the audit or Robin's go</text>
+  <rect x="24" y="950" width="26" height="16" rx="3" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="58" y="963" font-size="14">handed to the audit (an outside reviewer)</text>
+  <rect x="380" y="950" width="26" height="16" rx="3" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="414" y="963" font-size="14">bench or hardware task</text>
+</svg>

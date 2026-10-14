@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1616" width="720" height="1616" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <rect x="0" y="0" width="720" height="1616" fill="#ffffff"/>
+  <title>Sequence of one route A transmission between the station, the Handheld rig, its keep-alive thread and the UV-K1 firmware: HELLO, STOP and STATUS at open; CW and OK CW at the first key-down; STATUS every 250 ms while keyed; STATUS tx 0 at the end, checked against the 0.8 rule; STOP at the deadline</title>
+  <defs>
+    <marker id="k10s-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <text x="16" y="34" font-size="20" font-weight="bold">Route A: one transmission, from open to the end (parked)</text>
+  <text x="16" y="56" font-size="14" fill="#4b5563">Time runs down. Every line carries an id and a checksum, left out here.</text>
+  <rect x="16" y="72" width="160" height="56" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="96" y="96" text-anchor="middle" font-weight="bold">Station</text>
+  <text x="96" y="116" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">station.rs</text>
+  <rect x="192" y="72" width="160" height="56" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="272" y="96" text-anchor="middle" font-weight="bold">Handheld rig</text>
+  <text x="272" y="116" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">handheld.rs</text>
+  <rect x="368" y="72" width="160" height="56" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="448" y="96" text-anchor="middle" font-weight="bold">UV-K1 firmware</text>
+  <text x="448" y="116" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode.c</text>
+  <rect x="544" y="72" width="160" height="56" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="624" y="96" text-anchor="middle" font-weight="bold">keep-alive thread</text>
+  <text x="624" y="116" text-anchor="middle" font-size="14">&quot;handheld link&quot;</text>
+  <line x1="96" y1="128" x2="96" y2="164" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="192" x2="96" y2="452" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="480" x2="96" y2="736" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="764" x2="96" y2="928" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="956" x2="96" y2="1060" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="1088" x2="96" y2="1276" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="96" y1="1304" x2="96" y2="1486" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="128" x2="272" y2="164" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="192" x2="272" y2="452" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="480" x2="272" y2="736" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="764" x2="272" y2="928" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="956" x2="272" y2="1060" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="1088" x2="272" y2="1276" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="272" y1="1304" x2="272" y2="1486" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="128" x2="448" y2="164" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="192" x2="448" y2="452" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="480" x2="448" y2="736" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="764" x2="448" y2="928" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="956" x2="448" y2="1060" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="1088" x2="448" y2="1276" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="448" y1="1304" x2="448" y2="1486" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="128" x2="624" y2="164" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="192" x2="624" y2="452" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="480" x2="624" y2="736" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="764" x2="624" y2="928" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="956" x2="624" y2="1060" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="1088" x2="624" y2="1276" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <line x1="624" y1="1304" x2="624" y2="1486" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <rect x="16" y="164" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="183" font-size="14" font-weight="bold">1. Open the radio: Handheld::new</text>
+  <rect x="16" y="452" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="471" font-size="14" font-weight="bold">2. Before a transmission, and each piece</text>
+  <rect x="16" y="736" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="755" font-size="14" font-weight="bold">3. One piece: send_cw</text>
+  <rect x="16" y="928" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="947" font-size="14" font-weight="bold">4. While it keys</text>
+  <rect x="16" y="1060" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="1079" font-size="14" font-weight="bold">5. The end</text>
+  <rect x="16" y="1276" width="688" height="28" rx="4" fill="#f3f4f6"/>
+  <text x="26" y="1295" font-size="14" font-weight="bold">Or: still keying at the deadline</text>
+  <line x1="274" y1="226" x2="446" y2="226" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="219" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">HELLO</text>
+  <line x1="446" y1="260" x2="274" y2="260" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="253" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK HELLO …</text>
+  <text x="262" y="280" text-anchor="end" font-size="14" fill="#4b5563">check_hello: version</text>
+  <text x="262" y="298" text-anchor="end" font-size="14" fill="#4b5563">and both limits</text>
+  <line x1="274" y1="294" x2="446" y2="294" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="287" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STOP</text>
+  <line x1="446" y1="328" x2="274" y2="328" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="321" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STOP</text>
+  <line x1="274" y1="362" x2="446" y2="362" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="355" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STATUS</text>
+  <line x1="446" y1="396" x2="274" y2="396" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="389" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STATUS 0 …</text>
+  <text x="262" y="416" text-anchor="end" font-size="14" fill="#4b5563">tx 1 here: refuse</text>
+  <text x="262" y="434" text-anchor="end" font-size="14" fill="#4b5563">to open</text>
+  <line x1="274" y1="430" x2="622" y2="430" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="423" text-anchor="start" font-size="14">start: every 250 ms</text>
+  <line x1="98" y1="514" x2="270" y2="514" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="106" y="507" text-anchor="start" font-size="14">set up, check</text>
+  <line x1="274" y1="566" x2="446" y2="566" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="541" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">MODE, FREQ,</text>
+  <text x="282" y="559" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">POWER, BREAKIN</text>
+  <line x1="446" y1="600" x2="274" y2="600" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="593" text-anchor="end" font-size="14">read-backs</text>
+  <line x1="98" y1="634" x2="270" y2="634" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="106" y="627" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">rest_needed()</text>
+  <text x="262" y="654" text-anchor="end" font-size="14" fill="#4b5563">duty cycle first,</text>
+  <text x="262" y="672" text-anchor="end" font-size="14" fill="#4b5563">then the busy</text>
+  <text x="262" y="690" text-anchor="end" font-size="14" fill="#4b5563">channel</text>
+  <line x1="274" y1="668" x2="446" y2="668" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="661" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STATUS</text>
+  <line x1="446" y1="702" x2="274" y2="702" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="695" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STATUS 0 …</text>
+  <line x1="98" y1="798" x2="270" y2="798" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="106" y="791" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">send_cw(piece)</text>
+  <text x="262" y="818" text-anchor="end" font-size="14" fill="#4b5563">records since, end</text>
+  <text x="262" y="836" text-anchor="end" font-size="14" fill="#4b5563">and the deadline</text>
+  <line x1="274" y1="832" x2="446" y2="832" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="825" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">CW &lt;wpm&gt; &lt;text&gt;</text>
+  <text x="458" y="852" text-anchor="start" font-size="14" fill="#4b5563">STARTING: key-down</text>
+  <text x="458" y="870" text-anchor="start" font-size="14" fill="#4b5563">within 300 ms, else</text>
+  <text x="458" y="888" text-anchor="start" font-size="14" fill="#4b5563" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ERR CW REFUSED</text>
+  <line x1="446" y1="866" x2="274" y2="866" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="859" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK CW</text>
+  <line x1="270" y1="900" x2="98" y2="900" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="262" y="893" text-anchor="end" font-size="14">returns: keying</text>
+  <line x1="622" y1="1000" x2="450" y2="1000" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="614" y="993" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STATUS</text>
+  <text x="106" y="975" text-anchor="start" font-size="14" fill="#4b5563">sleeps for the</text>
+  <text x="106" y="993" text-anchor="start" font-size="14" fill="#4b5563">piece's length</text>
+  <text x="438" y="975" text-anchor="end" font-size="14" fill="#4b5563">every 250 ms, so</text>
+  <text x="438" y="993" text-anchor="end" font-size="14" fill="#4b5563">the 2 s link timeout</text>
+  <text x="438" y="1011" text-anchor="end" font-size="14" fill="#4b5563">never expires</text>
+  <line x1="450" y1="1034" x2="622" y2="1034" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="458" y="1027" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STATUS 1 …</text>
+  <line x1="98" y1="1122" x2="270" y2="1122" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="106" y="1115" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">is_transmitting()</text>
+  <line x1="274" y1="1156" x2="446" y2="1156" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="282" y="1149" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STATUS</text>
+  <line x1="446" y1="1190" x2="274" y2="1190" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="438" y="1183" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STATUS 0 …</text>
+  <text x="282" y="1210" text-anchor="start" font-size="14" fill="#4b5563">ended before 0.8 of</text>
+  <text x="282" y="1228" text-anchor="start" font-size="14" fill="#4b5563">its length: cut short,</text>
+  <text x="282" y="1246" text-anchor="start" font-size="14" fill="#4b5563">a fault</text>
+  <line x1="270" y1="1224" x2="98" y2="1224" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="262" y="1217" text-anchor="end" font-size="14">false: receive</text>
+  <text x="106" y="1244" text-anchor="start" font-size="14" fill="#4b5563">twice in a row:</text>
+  <text x="106" y="1262" text-anchor="start" font-size="14" fill="#4b5563">the piece is over</text>
+  <line x1="622" y1="1348" x2="450" y2="1348" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="614" y="1341" text-anchor="end" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">STOP</text>
+  <text x="438" y="1323" text-anchor="end" font-size="14" fill="#4b5563">stop_overdue, under</text>
+  <text x="438" y="1341" text-anchor="end" font-size="14" fill="#4b5563">the state lock</text>
+  <line x1="450" y1="1382" x2="622" y2="1382" stroke="#374151" stroke-width="2" marker-end="url(#k10s-arrow)"/>
+  <text x="458" y="1375" text-anchor="start" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">OK STOP</text>
+  <text x="458" y="1404" text-anchor="start" font-size="14" fill="#4b5563">fault: sent past the</text>
+  <text x="458" y="1422" text-anchor="start" font-size="14" fill="#4b5563">end. If STOP fails,</text>
+  <text x="458" y="1440" text-anchor="start" font-size="14" fill="#4b5563">keep-alives stop; the</text>
+  <text x="458" y="1458" text-anchor="start" font-size="14" fill="#4b5563">2 s link timeout ends it</text>
+  <rect x="16" y="1498" width="688" height="78" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="28" y="1522" font-size="14"><tspan font-weight="bold">The deadline:</tspan> the piece's length, with 50 ms a character for the switch</text>
+  <text x="28" y="1542" font-size="14">back to transmit, plus 2 s; or <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">max_key_seconds</tspan> plus 5 s, whichever is</text>
+  <text x="28" y="1562" font-size="14">sooner. The firmware's own limits (its run states, below) end a run without it.</text>
+</svg>

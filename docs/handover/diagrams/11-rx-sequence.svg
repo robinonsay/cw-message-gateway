@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1060" width="720" height="1060" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Sequence of an RX session on the one-Pico keyer box: the host sends 07 RX HELLO; core 0 re-frames it and writes it whole into the ring to core 1, or answers ERR RX BUSY or ERR RX OFF; core 1 replies into the ring back; core 0 forwards the reply as 07 RX OK HELLO only after the keyer's own replies have gone, then forwards the decoder's id-00 lines only while rx_open</title>
+  <defs>
+    <marker id="k11s-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1060" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Keyer protocol 5: an RX session through core 0</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Draft PR #31 at bc5062ae (crates/keyer-core/src/control.rs:494-646): not on main</text>
+
+  <!-- lifeline heads -->
+  <rect x="8" y="84" width="96" height="52" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="56" y="106" text-anchor="middle" font-size="15" font-weight="bold">host</text>
+  <text x="56" y="126" text-anchor="middle" font-size="13">USB serial</text>
+  <rect x="172" y="84" width="156" height="52" rx="6" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="250" y="106" text-anchor="middle" font-size="15" font-weight="bold">core 0</text>
+  <text x="250" y="126" text-anchor="middle" font-size="13">keyer_core</text>
+  <rect x="372" y="84" width="148" height="52" rx="6" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="446" y="106" text-anchor="middle" font-size="15" font-weight="bold">LINK rings</text>
+  <text x="446" y="126" text-anchor="middle" font-size="13">to_core1, from_core1</text>
+  <rect x="560" y="84" width="132" height="52" rx="6" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="626" y="106" text-anchor="middle" font-size="15" font-weight="bold">core 1</text>
+  <text x="626" y="126" text-anchor="middle" font-size="13">decoder_core</text>
+
+  <!-- lifelines -->
+  <line x1="56" y1="136" x2="56" y2="872" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="250" y1="136" x2="250" y2="190" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="250" y1="260" x2="250" y2="342" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="250" y1="370" x2="250" y2="584" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="250" y1="672" x2="250" y2="872" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="446" y1="136" x2="446" y2="872" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+  <line x1="626" y1="136" x2="626" y2="872" stroke="#374151" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- 1: RX HELLO in -->
+  <text x="66" y="166" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">07 RX HELLO*4F</text>
+  <line x1="56" y1="176" x2="248" y2="176" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- note: rx_command -->
+  <rect x="164" y="190" width="256" height="70" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="174" y="209" font-size="13">RX line: never to the keyer</text>
+  <text x="174" y="228" font-size="13">core 1 down or CORE1: ERR RX OFF</text>
+  <text x="174" y="247" font-size="13">else re-framed, queued whole</text>
+
+  <!-- 2: into to_core1 -->
+  <text x="262" y="282" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">07 HELLO*cs LF</text>
+  <line x1="250" y1="292" x2="444" y2="292" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- 3: alternative, ring full -->
+  <text x="78" y="320" font-size="13">no room: 07 ERR RX BUSY</text>
+  <line x1="250" y1="330" x2="58" y2="330" stroke="#374151" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#k11s-arrow)"/>
+
+  <!-- note: rx_open -->
+  <rect x="190" y="342" width="120" height="28" rx="6" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="250" y="361" text-anchor="middle" font-size="13">rx_open = true</text>
+
+  <!-- 4: core 1 reads it -->
+  <text x="456" y="394" font-size="13">next pass: usb_read</text>
+  <line x1="446" y1="404" x2="624" y2="404" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- 5: core 1 replies -->
+  <text x="468" y="438" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">07 OK HELLO 1 …</text>
+  <line x1="626" y1="448" x2="448" y2="448" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- 6: a keyer command meanwhile -->
+  <text x="66" y="484" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">08 STATUS*cs</text>
+  <line x1="56" y1="494" x2="248" y2="494" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+  <text x="78" y="522" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">08 OK STATUS …</text>
+  <line x1="250" y1="532" x2="58" y2="532" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- 7: core 0 reads from_core1 -->
+  <text x="274" y="560" font-size="13">≤ 97 bytes a pass</text>
+  <line x1="446" y1="570" x2="252" y2="570" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- note: forwarding gate -->
+  <rect x="164" y="584" width="256" height="88" rx="6" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="174" y="603" font-size="13">re-framed 07 RX OK HELLO …</text>
+  <text x="174" y="622" font-size="13">sent only when the keyer's out</text>
+  <text x="174" y="641" font-size="13">queue is empty and USB has room</text>
+  <text x="174" y="660" font-size="13">for it plus a keyer reply (97 B)</text>
+
+  <!-- 8: reply out -->
+  <text x="78" y="694" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">07 RX OK HELLO …</text>
+  <line x1="250" y1="704" x2="58" y2="704" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- 9: decoder's own lines -->
+  <text x="468" y="736" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">00 ST, 00 SL, 00 CH</text>
+  <line x1="626" y1="746" x2="448" y2="746" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+  <text x="274" y="776" font-size="13">one line a pass</text>
+  <line x1="446" y1="786" x2="252" y2="786" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+  <text x="78" y="820" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">00 RX ST …</text>
+  <text x="78" y="838" font-size="13" fill="#4b5563">only while rx_open</text>
+  <line x1="250" y1="850" x2="58" y2="850" stroke="#374151" stroke-width="2" marker-end="url(#k11s-arrow)"/>
+
+  <!-- closing note -->
+  <rect x="24" y="902" width="672" height="98" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="36" y="924" font-size="13">rx_open closes on RX TEXT, a USB epoch change, or 2 s with no valid line from the host.</text>
+  <text x="36" y="944" font-size="13">While it is closed core 0 drops id-00 lines; a line that does not frame-decode is dropped.</text>
+  <text x="36" y="964" font-size="13">Keyer commands (no RX) go to the keyer as on main. The decoder drops to text mode after</text>
+  <text x="36" y="984" font-size="13">2 s without an RX line, so a host keeps one (RX STATUS) going while it wants lines.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1022" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="48" y="1034" font-size="14">host</text>
+  <rect x="102" y="1022" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="126" y="1034" font-size="14">firmware</text>
+  <rect x="208" y="1022" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="232" y="1034" font-size="14">gate</text>
+  <line x1="290" y1="1029" x2="322" y2="1029" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/><text x="330" y="1034" font-size="14">only if the line does not fit the ring</text>
+</svg>

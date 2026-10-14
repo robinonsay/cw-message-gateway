@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1924" width="720" height="1924" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The CI jobs as boxes with their runners and main steps and what each guards: the Linux test job, the macOS and Windows matrix with the self-test, the Raspberry Pi aarch64 check, the keyer firmware job with its safety checks and artifact, the handheld host test and firmware build; PR #30 adds a decoder-core step and the decoder firmware job, PR #31 adds the core 1 check</title>
+  <defs>
+    <marker id="k02p-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+    <marker id="k02p-arrow-pr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b21b6"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1924" fill="#ffffff"/>
+  <text x="24" y="34" font-size="20" font-weight="bold">What CI runs, and what each job guards</text>
+  <text x="24" y="58" font-size="14" fill="#4b5563">Six jobs on main and one from PR #30, none waiting for another; red steps are safety checks</text>
+  <rect x="24" y="76" width="672" height="60" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="102" font-size="16" font-weight="bold">GitHub Actions, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.github/workflows/ci.yml</tspan></text>
+  <text x="40" y="124" font-size="14" fill="#4b5563">on every <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">push</tspan> (any branch) and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pull_request</tspan>; all jobs start at once</text>
+  <path d="M40,136 V1541" fill="none" stroke="#374151" stroke-width="2"/>
+  <path d="M40,183 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <path d="M40,435 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <path d="M40,655 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <path d="M40,789 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <path d="M40,1113 H61" fill="none" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#k02p-arrow-pr)"/>
+  <path d="M40,1365 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <path d="M40,1541 H61" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02p-arrow)"/>
+  <rect x="64" y="160" width="632" height="236" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="80" y="188" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">test</tspan><tspan dx="10">fmt, clippy, test</tspan></text>
+  <text x="80" y="212" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-latest</tspan>, stable Rust, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">HFNODE_E2E_SCALE=20</tspan></text>
+  <text x="80" y="234" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo fmt --all --check</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo clippy --all-targets</tspan></text>
+  <text x="80" y="256" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo test --all</tspan> (every host test, mock radio at 20x)</text>
+  <text x="80" y="278" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cw</tspan> without std: clippy and build for the RP2350; tests</text>
+  <text x="80" y="300" font-size="14">with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">--cfg cw_force_libm</tspan> and with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">--no-default-features</tspan></text>
+  <rect x="72" y="313" width="616" height="24" rx="4" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="84" y="330" font-size="14">PR #30: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decoder-core</tspan> built for the RP2350, tested with libm</text>
+  <text x="80" y="362" font-size="14"><tspan font-weight="bold">Guards:</tspan> formatting, lints and every host test; the decoder still</text>
+  <text x="80" y="382" font-size="14">builds without std and passes its tests with libm's maths</text>
+  <rect x="64" y="412" width="632" height="204" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="80" y="440" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">test-other-os</tspan><tspan dx="10">clippy, test, selftest</tspan></text>
+  <text x="80" y="464" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">macos-latest</tspan> and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">windows-latest</tspan>, scale 20, fail-fast off</text>
+  <text x="80" y="486" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo clippy</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo test --all</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo build --release</tspan></text>
+  <text x="80" y="508" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode selftest --scale 20</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode devices</tspan></text>
+  <text x="80" y="530" font-size="14">Windows: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">deploy/windows/test-supervise.ps1</tspan></text>
+  <text x="80" y="552" font-size="14">macOS: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo check</tspan> for <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">x86_64-apple-darwin</tspan> (Intel)</text>
+  <text x="80" y="582" font-size="14"><tspan font-weight="bold">Guards:</tspan> the node builds and passes its self-test on macOS and</text>
+  <text x="80" y="602" font-size="14">Windows; the Windows start-up script behaves as designed</text>
+  <rect x="64" y="632" width="632" height="118" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="80" y="660" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">check-pi</tspan><tspan dx="10">check aarch64 (Raspberry Pi)</tspan></text>
+  <text x="80" y="684" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-latest</tspan> with the aarch64 cross C toolchain</text>
+  <text x="80" y="706" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo check --target aarch64-unknown-linux-gnu --all-targets</tspan></text>
+  <text x="80" y="736" font-size="14"><tspan font-weight="bold">Guards:</tspan> the node still compiles for the Pi (nothing runs there)</text>
+  <rect x="64" y="766" width="632" height="308" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="80" y="794" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">pico2-keyer</tspan><tspan dx="10">keyer box firmware (Pico 2)</tspan></text>
+  <text x="80" y="818" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-latest</tspan>, Rust 1.97.0 pinned, in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/pico2-keyer</tspan></text>
+  <text x="80" y="840" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo fmt --check</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo clippy --release --locked</tspan></text>
+  <rect x="72" y="853" width="616" height="24" rx="4" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="84" y="870" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">build.sh</tspan>: UF2, its SHA-256, build id <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">KEYER_BUILD_ID</tspan></text>
+  <rect x="72" y="885" width="616" height="24" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="84" y="902" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_faults.py</tspan>: fault handlers open the key first</text>
+  <rect x="72" y="917" width="616" height="24" rx="4" fill="#fee2e2" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="84" y="934" font-size="14">PR #31: <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_core1.py</tspan>: self-test, then core 1 reaches no pin</text>
+  <rect x="72" y="949" width="616" height="24" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="84" y="966" font-size="14">build again from a second path; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cmp</tspan> the two UF2s</text>
+  <text x="80" y="990" font-size="14">job summary; artifact <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer-firmware</tspan></text>
+  <text x="80" y="1020" font-size="14"><tspan font-weight="bold">Guards:</tspan> the committed tree builds to the same UF2 from any checkout</text>
+  <text x="80" y="1040" font-size="14">path, its build id and SHA-256 are printed, and the handlers open the</text>
+  <text x="80" y="1060" font-size="14">key before anything else</text>
+  <rect x="64" y="1090" width="632" height="236" rx="8" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="80" y="1118" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">pico2-decoder</tspan><tspan dx="10">decoder box firmware, PR #30</tspan></text>
+  <text x="80" y="1142" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-latest</tspan>, Rust 1.97.0, in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/pico2-decoder</tspan></text>
+  <text x="80" y="1164" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo fmt --check</tspan>, <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo clippy --release --locked</tspan></text>
+  <rect x="72" y="1177" width="616" height="24" rx="4" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="84" y="1194" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">build.sh</tspan>: UF2, its SHA-256, build id <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DECODER_BUILD_ID</tspan></text>
+  <rect x="72" y="1209" width="616" height="24" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="84" y="1226" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_pins.py</tspan>: self-test, then GP16-GP18 never high</text>
+  <rect x="72" y="1241" width="616" height="24" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="84" y="1258" font-size="14">build again from a second path; <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cmp</tspan> the two UF2s</text>
+  <text x="80" y="1282" font-size="14">job summary; artifact <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-decoder-firmware</tspan></text>
+  <text x="80" y="1312" font-size="14"><tspan font-weight="bold">Guards:</tspan> the decoder image never drives the keyer box's key, PTT or tone pins high</text>
+  <rect x="64" y="1342" width="632" height="160" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="80" y="1370" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">firmware-host-test</tspan><tspan dx="10">handheld firmware host test</tspan></text>
+  <text x="80" y="1394" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-latest</tspan>, in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/uv-k1</tspan></text>
+  <text x="80" y="1416" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cc -std=c11 -Wall -Wextra -Werror</tspan></text>
+  <text x="80" y="1438" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">-fsanitize=address,undefined</tspan>, then run <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">./test_hfnode</tspan></text>
+  <text x="80" y="1468" font-size="14"><tspan font-weight="bold">Guards:</tspan> hfnode's handheld command and limit code, with no</text>
+  <text x="80" y="1488" font-size="14">memory or undefined-behaviour errors</text>
+  <rect x="64" y="1518" width="632" height="138" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="80" y="1546" font-size="16"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">firmware-build</tspan><tspan dx="10">handheld firmware build</tspan></text>
+  <text x="80" y="1570" font-size="14" fill="#4b5563"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">ubuntu-24.04</tspan>, read-only token, credentials not kept</text>
+  <text x="80" y="1592" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/uv-k1/build.sh</tspan>; artifact <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">uv-k1-firmware</tspan></text>
+  <text x="80" y="1622" font-size="14"><tspan font-weight="bold">Guards:</tspan> the patch still applies to upstream <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">47075bf</tspan> and the image</text>
+  <text x="80" y="1642" font-size="14">builds (the route is parked; nothing is flashed)</text>
+  <rect x="24" y="1676" width="672" height="122" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="40" y="1700" font-size="14" font-weight="bold">Not run by CI; run by hand:</text>
+  <text x="40" y="1720" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">mutants.py</tspan> (PR #30) builds seven broken decoder images and</text>
+  <text x="40" y="1740" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">mutants_core1.py</tspan> (PR #31) eight broken keyer images, and check</text>
+  <text x="40" y="1760" font-size="14">that <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_pins.py</tspan> and <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_core1.py</tspan> reject every one.</text>
+  <text x="40" y="1780" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hardware/keyer-box/render.sh</tspan> (the enclosure) is also by hand.</text>
+  <text x="24" y="1828" font-size="14" font-weight="bold">Legend</text>
+  <rect x="24" y="1840" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="48" y="1852" font-size="14">host code job</text>
+  <rect x="186" y="1840" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="210" y="1852" font-size="14">firmware job</text>
+  <rect x="330" y="1840" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="354" y="1852" font-size="14">safety check step</text>
+  <rect x="520" y="1840" width="18" height="14" fill="#f3f4f6" stroke="#374151"/><text x="544" y="1852" font-size="14">GitHub</text>
+  <rect x="24" y="1866" width="18" height="14" fill="#ede9fe" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="48" y="1878" font-size="14">not on main yet (added by the PR named)</text>
+  <rect x="380" y="1866" width="18" height="14" fill="#fee2e2" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="404" y="1878" font-size="14">safety check step added by a PR</text>
+  <rect x="24" y="1892" width="18" height="14" fill="#ffffff" stroke="#374151" stroke-dasharray="4 3"/><text x="48" y="1904" font-size="14">not run by CI (in the repository)</text>
+  <rect x="330" y="1892" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="354" y="1904" font-size="14">build step inside a firmware job</text>
+</svg>

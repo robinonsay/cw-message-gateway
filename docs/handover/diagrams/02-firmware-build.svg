@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1700" width="720" height="1700" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>The path from source to a flashed keyer box: firmware source and the pinned rustos revision are built by build.sh at the pinned compiler into an ELF, uf2.py turns it into the UF2, CI prints its SHA-256 and keeps it as an artifact, the audit records the hash, and Robin flashes that exact file after checking it</title>
+  <defs>
+    <marker id="k02f-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1700" fill="#ffffff"/>
+  <text x="24" y="34" font-size="20" font-weight="bold">From source to a flashed keyer box</text>
+  <text x="24" y="58" font-size="14" fill="#4b5563">On main. The file on the box is CI's artifact, with the hash the audit published</text>
+
+  <!-- Inputs -->
+  <rect x="24" y="80" width="156" height="124" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="102" y="106" font-size="16" font-weight="bold" text-anchor="middle">Source</text>
+  <text x="102" y="126" font-size="14" text-anchor="middle" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">firmware/</text>
+  <text x="102" y="146" font-size="14" text-anchor="middle" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer</text>
+
+  <rect x="196" y="80" width="156" height="124" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="274" y="106" font-size="16" font-weight="bold" text-anchor="middle">Host crate</text>
+  <text x="274" y="126" font-size="14" text-anchor="middle"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">keyer-core</tspan>,</text>
+  <text x="274" y="146" font-size="14" text-anchor="middle">by path</text>
+  <text x="274" y="166" font-size="14" text-anchor="middle" fill="#5b21b6">+ <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decoder-core</tspan>,</text>
+  <text x="274" y="186" font-size="14" text-anchor="middle" fill="#5b21b6"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cw</tspan> in PR #31</text>
+
+  <rect x="368" y="80" width="156" height="124" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="446" y="106" font-size="16" font-weight="bold" text-anchor="middle">rustos</text>
+  <text x="446" y="126" font-size="14" text-anchor="middle">at git rev</text>
+  <text x="446" y="146" font-size="14" text-anchor="middle" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">8c91507</text>
+  <text x="446" y="166" font-size="14" text-anchor="middle" fill="#5b21b6"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">410dffa</tspan> in PR #31</text>
+
+  <rect x="540" y="80" width="156" height="124" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="618" y="106" font-size="16" font-weight="bold" text-anchor="middle">Compiler</text>
+  <text x="618" y="126" font-size="14" text-anchor="middle">Rust 1.97.0, from</text>
+  <text x="618" y="146" font-size="14" text-anchor="middle">the toolchain file</text>
+
+  <path d="M102,204 V245" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <path d="M274,204 V245" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <path d="M446,204 V245" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <path d="M618,204 V245" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+
+  <!-- build.sh -->
+  <rect x="24" y="248" width="672" height="132" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="40" y="274" font-size="16" font-weight="bold"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">build.sh</tspan>, run by the CI step "UF2 and its SHA-256"</text>
+  <text x="40" y="294" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">git archive</tspan> of the commit, unpacked at <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">/tmp/pico2-keyer-build</tspan></text>
+  <text x="40" y="314" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">KEYER_BUILD_ID</tspan> = first 8 characters of the commit</text>
+  <text x="40" y="334" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RUSTFLAGS</tspan> and the target directory variables unset</text>
+  <text x="40" y="354" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cargo build --release --locked</tspan>, at that fixed path</text>
+
+  <!-- ELF and the fault check -->
+  <path d="M240,380 V421" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="424" width="432" height="64" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="40" y="450" font-size="16" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer.elf</text>
+  <text x="40" y="470" font-size="14">the linked program, kept for the checker</text>
+  <rect x="480" y="406" width="216" height="100" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="496" y="432" font-size="16" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">check_faults.py</text>
+  <text x="496" y="452" font-size="14">fault and panic handlers</text>
+  <text x="496" y="472" font-size="14">open the key first, read</text>
+  <text x="496" y="492" font-size="14">from the machine code</text>
+  <path d="M456,456 H477" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+
+  <!-- uf2.py -->
+  <path d="M240,488 V529" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="532" width="432" height="84" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="40" y="558" font-size="16" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">uf2.py</text>
+  <text x="40" y="578" font-size="14">refuses an image the boot ROM would not start,</text>
+  <text x="40" y="598" font-size="14">then writes 512-byte UF2 blocks for the RP2350</text>
+
+  <!-- UF2 and the second-path build -->
+  <path d="M240,616 V657" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="660" width="432" height="64" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="40" y="686" font-size="16" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer.uf2</text>
+  <text x="40" y="706" font-size="14">the only file that goes onto the box</text>
+  <rect x="480" y="648" width="216" height="88" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="496" y="674" font-size="16" font-weight="bold">Rebuilt elsewhere</text>
+  <text x="496" y="694" font-size="14">a second checkout path;</text>
+  <text x="496" y="714" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">cmp</tspan>: must be identical</text>
+  <path d="M456,692 H477" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+
+  <!-- SHA-256: a build output, not a gate -->
+  <path d="M240,724 V765" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="768" width="432" height="84" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="40" y="794" font-size="16" font-weight="bold">SHA-256 of the UF2</text>
+  <text x="40" y="814" font-size="14">printed in the CI log and the job summary,</text>
+  <text x="40" y="834" font-size="14">with the build id and the size</text>
+
+  <!-- Artifact -->
+  <path d="M240,852 V893" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="896" width="432" height="84" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="922" font-size="16" font-weight="bold">CI artifact <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer-firmware</tspan></text>
+  <text x="40" y="942" font-size="14">a zip of the <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.uf2</tspan> and its <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.uf2.sha256</tspan>, from</text>
+  <text x="40" y="962" font-size="14">the push run; GitHub deletes it when it expires</text>
+
+  <!-- Audit -->
+  <path d="M240,980 V1021" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="1024" width="432" height="84" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="1050" font-size="16" font-weight="bold">Safety audit</text>
+  <text x="40" y="1070" font-size="14">rebuilds the commit with <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">build.sh</tspan>, and publishes</text>
+  <text x="40" y="1090" font-size="14">the SHA-256, size and build id to flash</text>
+
+  <!-- Robin checks -->
+  <path d="M240,1108 V1149" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="1152" width="432" height="124" rx="8" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="40" y="1178" font-size="16" font-weight="bold">Robin checks the download</text>
+  <text x="40" y="1198" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">sha256sum</tspan> (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">shasum -a 256</tspan> on a Mac) of</text>
+  <text x="40" y="1218" font-size="14"><tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">pico2-keyer.uf2</tspan> must match the audit's hash;</text>
+  <text x="40" y="1238" font-size="14">the zip's own <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">.sha256</tspan> only shows that the</text>
+  <text x="40" y="1258" font-size="14">download is intact</text>
+
+  <!-- Robin flashes -->
+  <path d="M240,1276 V1317" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="1320" width="432" height="104" rx="8" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="40" y="1346" font-size="16" font-weight="bold">Robin flashes that exact file</text>
+  <text x="40" y="1366" font-size="14">box unplugged from the radio; hold BOOTSEL,</text>
+  <text x="40" y="1386" font-size="14">copy it to the <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">RP2350</tspan> drive, then unplug</text>
+  <text x="40" y="1406" font-size="14">the box and plug it in again</text>
+
+  <!-- Keyer box and hfnode -->
+  <path d="M212,1424 V1465" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+  <rect x="24" y="1468" width="376" height="64" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="40" y="1494" font-size="16" font-weight="bold">Keyer box</text>
+  <text x="40" y="1514" font-size="14">reports its version and build id in <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">HELLO</tspan></text>
+  <rect x="440" y="1428" width="256" height="144" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="456" y="1454" font-size="16" font-weight="bold" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode</text>
+  <text x="456" y="1474" font-size="14">checks the protocol version;</text>
+  <text x="456" y="1494" font-size="14">if <tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">[keyer] firmware_build</tspan></text>
+  <text x="456" y="1514" font-size="14">is set, refuses a box</text>
+  <text x="456" y="1534" font-size="14">reporting any other build</text>
+  <text x="456" y="1554" font-size="14">(unset: no build check)</text>
+  <path d="M400,1500 H437" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k02f-arrow)"/>
+
+  <!-- Notes -->
+  <rect x="480" y="768" width="216" height="220" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="496" y="794" font-size="16" font-weight="bold">A new file?</text>
+  <text x="496" y="814" font-size="14">Moving the rustos pin,</text>
+  <text x="496" y="834" font-size="14">the compiler or a build</text>
+  <text x="496" y="854" font-size="14">setting can change the</text>
+  <text x="496" y="874" font-size="14">UF2 with no source</text>
+  <text x="496" y="894" font-size="14">change; a new build id</text>
+  <text x="496" y="914" font-size="14">always does. Rebuild at</text>
+  <text x="496" y="934" font-size="14">the audited build id and</text>
+  <text x="496" y="954" font-size="14">compare: a different</text>
+  <text x="496" y="974" font-size="14">hash needs a new audit.</text>
+
+  <rect x="480" y="1008" width="216" height="124" rx="8" fill="#ffffff" stroke="#374151" stroke-width="2"/>
+  <text x="496" y="1034" font-size="16" font-weight="bold">Which run</text>
+  <text x="496" y="1054" font-size="14">A pull_request run builds</text>
+  <text x="496" y="1074" font-size="14">a merge commit: another</text>
+  <text x="496" y="1094" font-size="14">build id and hash. The</text>
+  <text x="496" y="1114" font-size="14">audit names a push run.</text>
+
+  <!-- Legend -->
+  <text x="24" y="1610" font-size="14" font-weight="bold">Legend</text>
+  <rect x="24" y="1622" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="48" y="1634" font-size="14">firmware build step or output</text>
+  <rect x="270" y="1622" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/><text x="294" y="1634" font-size="14">check that can stop a file</text>
+  <rect x="500" y="1622" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="524" y="1634" font-size="14">host code</text>
+  <rect x="24" y="1648" width="18" height="14" fill="#f3f4f6" stroke="#374151"/><text x="48" y="1660" font-size="14">GitHub or a person</text>
+  <rect x="200" y="1648" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="224" y="1660" font-size="14">hardware</text>
+  <rect x="310" y="1648" width="18" height="14" fill="#ffffff" stroke="#374151"/><text x="334" y="1660" font-size="14">note</text>
+  <text x="400" y="1660" font-size="14" fill="#5b21b6">purple text: not on main yet</text>
+</svg>

@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1180" width="720" height="1180" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Decoder data flow: radio audio on GP26 into the ADC at 32 kHz, DMA into a 16 kB ring, read up to 128 samples a pass, the frontend filters and decimates to 8 kHz, then the cw decoder, the monitor and the block clock make CH, SL and ST lines or plain text, which leave through the decoder box's USB (PR #30) or through core 0 as RX lines (PR #31)</title>
+  <defs>
+    <marker id="k11d-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="720" height="1180" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Decoder data flow: from radio audio to lines</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">decoder_core, in PR #30 (open, 3efaf842) and PR #31 (draft, bc5062ae): not on main</text>
+
+  <!-- frame: not on main -->
+  <rect x="12" y="74" width="696" height="954" rx="10" fill="#ede9fe" fill-opacity="0.35" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+
+  <!-- A: radio audio -->
+  <rect x="24" y="88" width="400" height="60" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="36" y="112" font-weight="bold">Radio audio: PHONES or the speaker</text>
+  <text x="36" y="134" font-size="14">C1 and three 10 kΩ: one third, on 1.65 V</text>
+
+  <line x1="224" y1="148" x2="224" y2="180" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="236" y="169" font-size="14">GP26 (pin 31)</text>
+
+  <!-- B: ADC -->
+  <rect x="24" y="184" width="400" height="64" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="36" y="208" font-weight="bold">ADC0: 12 bits, 32 kHz, 8-entry FIFO</text>
+  <text x="36" y="232" font-size="14">bit 15 of an entry: the conversion failed</text>
+
+  <line x1="224" y1="248" x2="224" y2="280" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="236" y="269" font-size="14">DMA channel 0</text>
+
+  <!-- C: ring -->
+  <rect x="24" y="284" width="400" height="64" rx="8" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="36" y="308" font-weight="bold">RING: 16 kB, 8192 samples (256 ms)</text>
+  <text x="36" y="332" font-size="14">endless; each slot read is set back to 0xFFFF</text>
+
+  <!-- side: audio lost -->
+  <line x1="424" y1="316" x2="468" y2="316" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="428" y="306" font-size="13">fails</text>
+  <rect x="472" y="184" width="224" height="186" rx="8" fill="#ffffff" stroke="#991b1b" stroke-width="2"/>
+  <text x="484" y="208" font-weight="bold">Audio lost</text>
+  <text x="484" y="230" font-size="14">read() fails: GAP &lt;n&gt;</text>
+  <text x="484" y="250" font-size="14">OVERRUN, FIFO or HALTED</text>
+  <text x="484" y="270" font-size="14">(hfnode mode only)</text>
+  <text x="484" y="294" font-size="14">HALTED: no more reads.</text>
+  <text x="484" y="314" font-size="14">PR #30 box: stops feeding</text>
+  <text x="484" y="334" font-size="14">its watchdog, so restarts.</text>
+  <text x="484" y="354" font-size="14">PR #31: core 1 still beats.</text>
+
+  <line x1="224" y1="348" x2="224" y2="384" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="236" y="371" font-size="14">≤ 128 samples a pass</text>
+
+  <!-- D: frontend -->
+  <rect x="24" y="388" width="672" height="142" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="36" y="412" font-weight="bold">Frontend (<tspan font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15">decoder_core::frontend</tspan>): 32 kHz in, 8 kHz out</text>
+  <text x="36" y="436" font-size="14">1. a failed conversion: the last good value instead</text>
+  <text x="36" y="456" font-size="14">2. scale: (v − 2048) / 2048</text>
+  <text x="36" y="476" font-size="14">3. low-pass: 63-tap windowed sinc (Blackman), 3 kHz cutoff, unity gain at DC</text>
+  <text x="36" y="496" font-size="14">4. keep 1 in 4 (the filter is worked only for those): 8 kHz</text>
+  <text x="36" y="516" font-size="14">5. DC high-pass: one pole at 5 Hz, run at 8 kHz</text>
+
+  <line x1="128" y1="530" x2="128" y2="570" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <line x1="360" y1="530" x2="360" y2="570" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <line x1="592" y1="530" x2="592" y2="570" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+
+  <!-- E: decoder, monitor, block clock -->
+  <rect x="24" y="574" width="208" height="140" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="36" y="598" font-weight="bold">cw::Decoder</text>
+  <text x="36" y="620" font-size="14">push_with, as on the host</text>
+  <text x="36" y="640" font-size="14">not fed while HOLD, nor</text>
+  <text x="36" y="660" font-size="14">while keyed and 250 ms</text>
+  <text x="36" y="680" font-size="14">after (then reset_levels)</text>
+  <text x="36" y="700" font-size="14">letters, _ gap, * unknown</text>
+
+  <rect x="256" y="574" width="208" height="140" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="268" y="598" font-weight="bold">Monitor</text>
+  <text x="268" y="620" font-size="14">80 samples (10 ms) a slice</text>
+  <text x="268" y="640" font-size="14">cw::level::measure:</text>
+  <text x="268" y="660" font-size="14">Goertzel at the monitor</text>
+  <text x="268" y="680" font-size="14">pitch; tone and total, in</text>
+  <text x="268" y="700" font-size="14">tenths of a dB; always on</text>
+
+  <rect x="488" y="574" width="208" height="140" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="500" y="598" font-weight="bold">Every 400 samples</text>
+  <text x="500" y="620" font-size="14">a 50 ms block ends</text>
+  <text x="500" y="640" font-size="14">hfnode mode: an ST line</text>
+  <text x="500" y="660" font-size="14">(key, partial, idle, wpm)</text>
+  <text x="500" y="680" font-size="14">text mode: a new line</text>
+  <text x="500" y="700" font-size="14">after 2 s with nothing</text>
+
+  <line x1="128" y1="714" x2="128" y2="754" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="140" y="739" font-size="14">CH, or text</text>
+  <line x1="360" y1="714" x2="360" y2="754" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="372" y="739" font-size="14">SL, every 5 slices</text>
+  <line x1="592" y1="714" x2="592" y2="754" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="604" y="739" font-size="14">ST, or \r\n</text>
+
+  <!-- F: out queue -->
+  <rect x="24" y="758" width="672" height="84" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="36" y="782" font-weight="bold">Out queue: 4096 B, whole lines or none</text>
+  <text x="36" y="806" font-size="14">A framed line that does not fit is dropped and counted (STATUS lost). GAP joins here.</text>
+  <text x="36" y="826" font-size="14">Own lines framed with id 00, replies with the host's id; each ends in LF.</text>
+
+  <line x1="186" y1="842" x2="186" y2="882" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="198" y="867" font-size="14">usb_write</text>
+  <line x1="534" y1="842" x2="534" y2="882" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <text x="546" y="867" font-size="14">usb_write</text>
+
+  <!-- G: two images -->
+  <rect x="24" y="886" width="324" height="128" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="36" y="910" font-weight="bold">PR #30: the decoder box</text>
+  <text x="36" y="932" font-size="14">its own USB port: decoder protocol v1</text>
+  <text x="36" y="952" font-size="14">text mode: plain text, for a terminal</text>
+  <text x="36" y="972" font-size="14">hfnode mode (after HELLO): framed</text>
+  <text x="36" y="992" font-size="14">CH, ST, SL, GAP and replies</text>
+
+  <rect x="372" y="886" width="324" height="128" rx="8" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="384" y="910" font-weight="bold">PR #31: core 1, from_core1</text>
+  <text x="384" y="932" font-size="14">core 0 passes on one line a pass,</text>
+  <text x="384" y="952" font-size="14">framed &lt;id&gt; RX &lt;line&gt; (keyer protocol 5)</text>
+  <text x="384" y="972" font-size="14">id 00 lines only after RX HELLO</text>
+  <text x="384" y="992" font-size="14">plain text never reaches the port</text>
+
+  <line x1="186" y1="1014" x2="186" y2="1060" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+  <line x1="534" y1="1014" x2="534" y2="1060" stroke="#374151" stroke-width="2" marker-end="url(#k11d-arrow)"/>
+
+  <!-- H: host -->
+  <rect x="24" y="1064" width="672" height="64" rx="8" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="36" y="1088" font-weight="bold">Host: hfnode</text>
+  <text x="36" y="1112" font-size="14">Reads neither yet: PR 4 (written, not opened) reads the box; no RX lines sent yet.</text>
+
+  <!-- legend -->
+  <rect x="24" y="1148" width="18" height="14" fill="#fef3c7" stroke="#92400e"/><text x="48" y="1160" font-size="14">hardware</text>
+  <rect x="134" y="1148" width="18" height="14" fill="#dcfce7" stroke="#166534"/><text x="158" y="1160" font-size="14">firmware</text>
+  <rect x="240" y="1148" width="18" height="14" fill="#ffffff" stroke="#991b1b"/><text x="264" y="1160" font-size="14">error path</text>
+  <rect x="354" y="1148" width="18" height="14" fill="#dbeafe" stroke="#1e40af"/><text x="378" y="1160" font-size="14">host</text>
+  <rect x="432" y="1148" width="18" height="14" fill="#ede9fe" stroke="#5b21b6" stroke-dasharray="4 3"/><text x="456" y="1160" font-size="14">not on main yet</text>
+</svg>

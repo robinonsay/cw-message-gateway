@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1390" width="720" height="1390" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <rect x="0" y="0" width="720" height="1390" fill="#ffffff"/>
+  <title>State machine of the keyer: start from restore into Idle or Tripped; Idle to a CW or MCW run on an accepted command; the run ends back to Idle on DONE, STOP, LINK, LIMIT, USB or LINE; trips to the latched Tripped state; TEST HANG to Hung, which the watchdog turns into a restart that comes up tripped</title>
+  <defs>
+    <marker id="k08s-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+    <marker id="k08s-small" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+  </defs>
+
+  <text x="16" y="34" font-size="20" font-weight="bold">The keyer state machine (on main)</text>
+  <text x="16" y="56" font-size="14" fill="#4b5563">keyer.rs and control.rs. Every limit is the box's own; the host cannot change one.</text>
+
+  <!-- initial -->
+  <circle cx="200" cy="88" r="8" fill="#111827"/>
+  <line x1="200" y1="96" x2="200" y2="122" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+
+  <!-- Start -->
+  <rect x="80" y="122" width="240" height="56" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="200" y="146" text-anchor="middle" font-weight="bold">Start</text>
+  <text x="200" y="166" text-anchor="middle" font-size="14" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Keyer::restore</text>
+
+  <!-- Start to Tripped, round the right -->
+  <path d="M320,150 H690 V1020 H620" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="336" y="140" font-size="14">boot WATCHDOG, or a trip saved before the restart</text>
+
+  <!-- Start to Idle -->
+  <line x1="200" y1="178" x2="200" y2="250" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="212" y="204" font-size="14">POWER: budget full, 60 s</text>
+  <text x="212" y="222" font-size="14">OTHER: budget 0, earned back</text>
+
+  <!-- Idle -->
+  <rect x="80" y="250" width="240" height="100" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="200" y="274" text-anchor="middle" font-weight="bold">Idle</text>
+  <text x="200" y="294" text-anchor="middle" font-size="14">every output open</text>
+  <text x="200" y="313" text-anchor="middle" font-size="14">budget +1 ms per ms, to 60 s</text>
+  <text x="200" y="332" text-anchor="middle" font-size="14">rest 1 s after any run</text>
+
+  <!-- Idle to Tripped, round the right -->
+  <path d="M320,300 H640 V980 H620" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="336" y="254" font-size="14" fill="#991b1b">clock check fails: CLOCK</text>
+  <text x="336" y="272" font-size="14" fill="#991b1b">PTT line still low 100 ms after</text>
+  <text x="336" y="290" font-size="14" fill="#991b1b">the PTT opened: LINE</text>
+
+  <!-- Idle to Run and back -->
+  <line x1="140" y1="350" x2="140" y2="456" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="128" y="394" text-anchor="end" font-size="14">CW or MCW</text>
+  <text x="128" y="412" text-anchor="end" font-size="14">accepted</text>
+  <line x1="260" y1="456" x2="260" y2="350" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="272" y="376" font-size="14">run ends: DONE · STOP · USB</text>
+  <text x="272" y="395" font-size="14">LINK: no valid line for 2 s</text>
+  <text x="272" y="414" font-size="14">LIMIT: the 60 s run limit</text>
+  <text x="272" y="433" font-size="14">LINE (MCW): PTT not seen, no trip</text>
+
+  <!-- Run -->
+  <rect x="40" y="456" width="520" height="244" rx="14" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="56" y="481" font-weight="bold">Run <tspan font-weight="normal" font-size="14" fill="#4b5563">(one at a time)</tspan></text>
+  <rect x="56" y="492" width="488" height="64" rx="10" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="72" y="516"><tspan font-weight="bold">CW</tspan>: the key follows the Morse</text>
+  <text x="72" y="538" font-size="14">dot 1200 / wpm ms; dash 3 dots; gaps 1, 3, 7 dots</text>
+  <text x="56" y="580" font-size="14"><tspan font-weight="bold">MCW</tspan>: PTT held all run; the Morse goes on the tone</text>
+  <rect x="56" y="592" width="140" height="64" rx="10" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="126" y="616" text-anchor="middle" font-weight="bold">Lead</text>
+  <text x="126" y="638" text-anchor="middle" font-size="14">PTT, 500 ms</text>
+  <line x1="196" y1="624" x2="230" y2="624" stroke="#374151" stroke-width="2" marker-end="url(#k08s-small)"/>
+  <rect x="230" y="592" width="140" height="64" rx="10" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="300" y="616" text-anchor="middle" font-weight="bold">Morse</text>
+  <text x="300" y="638" text-anchor="middle" font-size="14">700 Hz tone</text>
+  <line x1="370" y1="624" x2="404" y2="624" stroke="#374151" stroke-width="2" marker-end="url(#k08s-small)"/>
+  <rect x="404" y="592" width="140" height="64" rx="10" fill="#ffffff" stroke="#166534" stroke-width="2"/>
+  <text x="474" y="616" text-anchor="middle" font-weight="bold">Tail</text>
+  <text x="474" y="638" text-anchor="middle" font-size="14">PTT, 200 ms</text>
+  <text x="56" y="684" font-size="14" fill="#4b5563">Same-ms events: limits, then link, run limit, segment, line check.</text>
+
+  <!-- Run to Tripped -->
+  <line x1="330" y1="700" x2="330" y2="950" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="342" y="730" font-size="14" fill="#991b1b">key or tone on 1 s: DOWN</text>
+  <text x="342" y="749" font-size="14" fill="#991b1b">PTT down 60 s: PTT</text>
+  <text x="342" y="768" font-size="14" fill="#991b1b">the loop's own checks: PIN,</text>
+  <text x="342" y="787" font-size="14" fill="#991b1b">SLOW (pass over 10 ms), CLOCK</text>
+
+  <!-- Run to Hung -->
+  <line x1="120" y1="700" x2="120" y2="790" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="132" y="726" font-size="14">TEST HANG (armed):</text>
+  <text x="132" y="744" font-size="14">at the next element,</text>
+  <text x="132" y="762" font-size="14">or now if key/tone on</text>
+
+  <!-- Hung -->
+  <rect x="40" y="790" width="240" height="84" rx="14" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="160" y="814" text-anchor="middle" font-weight="bold">Hung (test only)</text>
+  <text x="160" y="835" text-anchor="middle" font-size="14">loop stops feeding the watchdog;</text>
+  <text x="160" y="854" text-anchor="middle" font-size="14">opens all itself at 1 s</text>
+  <!-- Hung back to Start: the watchdog restarts the chip -->
+  <path d="M100,874 V904 H28 V166 H80" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="112" y="898" font-size="14">watchdog resets the chip</text>
+  <text x="112" y="916" font-size="14">within 0.5 s: a restart,</text>
+  <text x="112" y="934" font-size="14">boot WATCHDOG</text>
+
+  <!-- Tripped -->
+  <rect x="40" y="950" width="580" height="96" rx="14" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="330" y="976" text-anchor="middle" font-weight="bold">Tripped (latched)</text>
+  <text x="330" y="997" text-anchor="middle" font-size="14">every output open; CW and MCW get ERR … TRIP; LED flashes</text>
+  <text x="330" y="1017" text-anchor="middle" font-size="14">kept across any restart short of a chip-level reset (saved state)</text>
+  <text x="330" y="1036" text-anchor="middle" font-size="14">a second trip does not replace the first</text>
+
+  <!-- Tripped back to Start: unplug -->
+  <path d="M60,1046 V1080 H20 V140 H80" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#k08s-arrow)"/>
+  <text x="72" y="1072" font-size="14">unplug and plug in again: a power-up clears the saved words</text>
+
+  <!-- start checks -->
+  <rect x="16" y="1096" width="688" height="242" rx="10" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="32" y="1122" font-weight="bold">CW and MCW: the first check that fails names the error</text>
+  <g font-size="14">
+    <text x="32" y="1148">1</text>
+    <text x="50" y="1148" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">TRIP</text>
+    <text x="112" y="1148">the box is tripped</text>
+    <text x="32" y="1167">2</text>
+    <text x="50" y="1167" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">RUN</text>
+    <text x="112" y="1167">a run is under way</text>
+    <text x="32" y="1186">3</text>
+    <text x="50" y="1186" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">LEN</text>
+    <text x="112" y="1186">nothing after CW or MCW</text>
+    <text x="32" y="1205">4</text>
+    <text x="50" y="1205" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">WPM</text>
+    <text x="112" y="1205">speed not 5 to 50</text>
+    <text x="32" y="1224">5</text>
+    <text x="50" y="1224" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">LEN</text>
+    <text x="112" y="1224">text empty or over 30 characters</text>
+    <text x="50" y="1243" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">CHAR</text>
+    <text x="112" y="1243">a character not in the table (lower case included)</text>
+    <text x="32" y="1262">6</text>
+    <text x="50" y="1262" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">LIMIT</text>
+    <text x="112" y="1262">Morse over 60 s; MCW: lead + Morse + tail not under 60 s</text>
+    <text x="32" y="1281">7</text>
+    <text x="50" y="1281" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">LINE</text>
+    <text x="112" y="1281">a PTT line check is due; MCW: the line reads low</text>
+    <text x="32" y="1300">8</text>
+    <text x="50" y="1300" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">REST</text>
+    <text x="112" y="1300">under 1 s since the last run ended</text>
+    <text x="32" y="1319">9</text>
+    <text x="50" y="1319" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-weight="bold">DUTY</text>
+    <text x="112" y="1319">budget under the run's keyed time (MCW: all its PTT time)</text>
+  </g>
+
+  <!-- legend -->
+  <rect x="16" y="1358" width="18" height="14" fill="#dcfce7" stroke="#166534"/>
+  <text x="40" y="1370" font-size="14">state (firmware)</text>
+  <rect x="170" y="1358" width="18" height="14" fill="#fee2e2" stroke="#991b1b"/>
+  <text x="194" y="1370" font-size="14">trip, limit or gate: never loosen</text>
+  <circle cx="450" cy="1365" r="6" fill="#111827"/>
+  <text x="464" y="1370" font-size="14">first state</text>
+</svg>

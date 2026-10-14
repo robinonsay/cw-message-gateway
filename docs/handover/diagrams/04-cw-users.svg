@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 1100" width="720" height="1100" font-family="Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" fill="#111827">
+  <title>Who uses the cw crate: the field protocol, the node loop and CLI, the station, the IC-7300 and UV-K1 drivers, the keyer-core tests, the self-test and mocks, and (PR #30 and #31) the Pico 2 images and the sidetone monitor, each arrow labelled with what that part takes from the crate</title>
+  <defs><marker id="u04-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#374151"/></marker></defs>
+  <rect x="0" y="0" width="720" height="1100" fill="#ffffff"/>
+  <text x="24" y="36" font-size="20" font-weight="bold">Who uses the cw crate, and for what</text>
+  <text x="24" y="60" font-size="14" fill="#4b5563">Arrow labels: what each part takes from the crate. Page numbers in brackets.</text>
+  <rect x="24" y="76" width="22" height="16" rx="3" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="54" y="89" font-size="14">host code</text>
+  <rect x="160" y="76" width="22" height="16" rx="3" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="190" y="89" font-size="14">firmware crate</text>
+  <rect x="320" y="76" width="22" height="16" rx="3" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="350" y="89" font-size="14">not on main yet (open PR)</text>
+  <rect x="546" y="76" width="22" height="16" rx="3" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="576" y="89" font-size="14">safety gate</text>
+  <rect x="24" y="132" width="190" height="944" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="36" y="162" font-weight="bold">cw crate</text>
+  <text x="36" y="182" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">crates/cw</text>
+  <text x="36" y="202" font-size="14" fill="#4b5563">no_std without its std</text>
+  <text x="36" y="220" font-size="14" fill="#4b5563">feature, no heap</text>
+  <text x="36" y="256" font-size="14" font-weight="bold">morse.rs</text>
+  <text x="36" y="278" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">TABLE (private)</text>
+  <text x="36" y="297" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">encode_char</text>
+  <text x="36" y="316" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decode_pattern</text>
+  <text x="36" y="335" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">is_sendable</text>
+  <text x="36" y="354" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">units, mark_units</text>
+  <text x="36" y="373" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">duration_ms</text>
+  <text x="36" y="412" font-size="14" font-weight="bold">decoder.rs</text>
+  <text x="36" y="434" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Decoder</text>
+  <text x="36" y="453" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">DecoderConfig</text>
+  <text x="36" y="472" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Event, DecodeEvent</text>
+  <text x="36" y="491" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">events_to_text</text>
+  <text x="36" y="510" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">WORD_RUNS</text>
+  <text x="36" y="549" font-size="14" font-weight="bold">synth.rs (std, tests)</text>
+  <text x="36" y="571" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Keyer, Noise</text>
+  <text x="36" y="610" font-size="14" font-weight="bold">math.rs (private)</text>
+  <text x="36" y="632" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">std or libm</text>
+  <rect x="34" y="665" width="170" height="104" rx="4" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="44" y="689" font-size="14" font-weight="bold">level.rs (PR #30)</text>
+  <text x="44" y="711" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">measure, db,</text>
+  <text x="44" y="730" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">goertzel_coeff,</text>
+  <text x="44" y="749" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">Level</text>
+  <rect x="34" y="868" width="170" height="194" rx="4" fill="#fee2e2" stroke="#991b1b" stroke-width="2"/>
+  <text x="44" y="892" font-size="14" font-weight="bold">Safety gate</text>
+  <text x="44" y="912" font-size="14">With PR #30 and #31,</text>
+  <text x="44" y="932" font-size="14">a change to morse,</text>
+  <text x="44" y="952" font-size="14">decoder, math or</text>
+  <text x="44" y="972" font-size="14">level changes the</text>
+  <text x="44" y="992" font-size="14">Pico 2 UF2s: a new</text>
+  <text x="44" y="1012" font-size="14">SHA-256 and audit</text>
+  <text x="44" y="1032" font-size="14">before any flash</text>
+  <text x="44" y="1052" font-size="14">(pages 13, 14).</text>
+  <rect x="454" y="132" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="158" font-weight="bold">Node loop and CLI</text>
+  <text x="466" y="180" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode node.rs, main.rs</text>
+  <text x="466" y="202" font-size="14">decodes the radio's audio;</text>
+  <text x="466" y="222" font-size="14">synth makes test WAVs (05)</text>
+  <line x1="214" y1="184" x2="454" y2="184" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="175" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">Decoder, events_to_text</text>
+  <text x="226" y="206" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">Keyer, Noise</text>
+  <rect x="454" y="252" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="278" font-weight="bold">Field protocol</text>
+  <text x="466" y="300" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">protocol fuzzy.rs, text.rs</text>
+  <text x="466" y="322" font-size="14">snaps noisy words to its</text>
+  <text x="466" y="342" font-size="14">vocabulary; sendable text (03)</text>
+  <line x1="214" y1="304" x2="454" y2="304" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="295" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">encode_char, is_sendable</text>
+  <rect x="454" y="372" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="398" font-weight="bold">Station</text>
+  <text x="466" y="420" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode station.rs</text>
+  <text x="466" y="442" font-size="14">safety timing: length limit,</text>
+  <text x="466" y="462" font-size="14">duty rest, keying watchdog (05)</text>
+  <line x1="214" y1="424" x2="454" y2="424" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="415" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">units, mark_units</text>
+  <rect x="454" y="492" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="518" font-weight="bold">IC-7300 driver</text>
+  <text x="466" y="540" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">civ ic7300.rs</text>
+  <text x="466" y="562" font-size="14">keys only sendable text</text>
+  <text x="466" y="582" font-size="14">with CI-V command 17 (07)</text>
+  <line x1="214" y1="544" x2="454" y2="544" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="535" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">is_sendable</text>
+  <rect x="454" y="612" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="638" font-weight="bold">UV-K1 handheld driver</text>
+  <text x="466" y="660" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">hfnode handheld.rs</text>
+  <text x="466" y="682" font-size="14">refuses unkeyable text and runs</text>
+  <text x="466" y="702" font-size="14">past the transmit limit (10)</text>
+  <line x1="214" y1="664" x2="454" y2="664" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="655" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">is_sendable, units</text>
+  <rect x="454" y="732" width="242" height="104" rx="6" fill="#dcfce7" stroke="#166534" stroke-width="2"/>
+  <text x="466" y="758" font-weight="bold">keyer-core tests</text>
+  <text x="466" y="780" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">dev-dependency only</text>
+  <text x="466" y="802" font-size="14">the box's own table and timing</text>
+  <text x="466" y="822" font-size="14">must match cw's (08)</text>
+  <line x1="214" y1="784" x2="454" y2="784" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="775" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">morse::encode_char, units</text>
+  <rect x="454" y="852" width="242" height="104" rx="6" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="466" y="878" font-weight="bold">Self-test and mocks</text>
+  <text x="466" y="900" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">selftest, civ sim, mocks</text>
+  <text x="466" y="922" font-size="14">field operators' audio, mock</text>
+  <text x="466" y="942" font-size="14">keying and band noise (12)</text>
+  <line x1="214" y1="904" x2="454" y2="904" stroke="#374151" stroke-width="2" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="895" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">Keyer, Noise</text>
+  <text x="226" y="926" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">Keyer::timing, encode_char</text>
+  <rect x="454" y="972" width="242" height="104" rx="6" fill="#ede9fe" stroke="#5b21b6" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="466" y="998" font-weight="bold">Pico 2 images, monitor</text>
+  <text x="466" y="1020" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace">decoder-core (PR #30, #31)</text>
+  <text x="466" y="1042" font-size="14">decoder box, one-Pico image,</text>
+  <text x="466" y="1062" font-size="14">and hfnode's monitor (09, 11)</text>
+  <line x1="214" y1="1024" x2="454" y2="1024" stroke="#374151" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#u04-arrow)"/>
+  <text x="226" y="1015" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">Decoder (no std)</text>
+  <text x="226" y="1046" font-size="13" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" fill="#111827">level</text>
+</svg>
